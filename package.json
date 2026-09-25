@@ -24,6 +24,7 @@
   },
   "devDependencies": {
     "@agent-workflow-kit/core": "workspace:*",
+    "@agent-workflow-kit/orchestration": "workspace:*",
     "@agent-workflow-kit/persistence": "workspace:*",
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.13.0",

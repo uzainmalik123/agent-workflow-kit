@@ -1,5 +1,6 @@
 packages:
   - "core"
+  - "orchestration"
   - "adapters/*"
   - "integrations/*"
   - "apps/*"

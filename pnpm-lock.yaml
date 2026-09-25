@@ -210,6 +210,9 @@ importers:
       '@agent-workflow-kit/core':
         specifier: workspace:*
         version: link:core
+      '@agent-workflow-kit/orchestration':
+        specifier: workspace:*
+        version: link:orchestration
       '@agent-workflow-kit/persistence':
         specifier: workspace:*
         version: link:adapters/persistence
@@ -245,6 +248,15 @@ importers:
         version: link:../../core
 
   core: {}
+
+  orchestration:
+    dependencies:
+      '@agent-workflow-kit/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agent-workflow-kit/persistence':
+        specifier: workspace:*
+        version: link:../adapters/persistence
 
 packages:
 

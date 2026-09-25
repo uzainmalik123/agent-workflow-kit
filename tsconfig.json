@@ -16,6 +16,7 @@
   },
   "include": [
     "core/src/**/*.ts",
+    "orchestration/src/**/*.ts",
     "adapters/*/src/**/*.ts",
     "fixtures/**/*.ts",
     "tests/**/*.ts"

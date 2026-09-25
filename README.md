@@ -2,18 +2,19 @@
 
 Agent Workflow Kit provides a coding-agent-independent software development workflow that can be installed into arbitrary repositories.
 
-Milestones 1–2.1 and 3 establish the repository, domain contracts, deterministic in-memory lifecycle engine, and repository-local persistent feature sessions. The project still does not execute features or implement agent integrations, templates, or CLI behavior.
+Milestones 1–4 establish the repository, domain contracts, the deterministic in-memory lifecycle engine, repository-local persistent feature sessions, and the agent-independent workflow orchestrator. The project still does not execute features: no AI model, project command, Git operation, agent integration, template, or CLI behavior is implemented.
 
 ## Workspace
 
 The repository is a pnpm workspace:
 
 - `core/` contains the agent-independent domain model and public core package.
+- `orchestration/` maps workflow state to work, artifacts, and a legal transition; it depends on the core and on the persistence adapter.
 - `apps/cli/` reserves the future CLI package and its dependency on the core; it contains no CLI implementation yet.
 - `adapters/` is the boundary for agent adapters and project adapters; `adapters/persistence/` provides the repository-local session and artifact store.
 - `integrations/` is the boundary for external-system integrations.
 - `templates/` will hold reusable workflow and project templates.
-- `fixtures/` contains deterministic sample data for tests.
+- `fixtures/` contains deterministic sample data for tests, including a fake stage executor that never calls a model.
 - `tests/` contains cross-package contract and behavior tests.
 
 The workspace configuration also reserves package locations below `adapters/`, `integrations/`, and `apps/` so those boundaries can grow independently.
@@ -34,9 +35,13 @@ The core owns stable workflow vocabulary, data contracts, and the deterministic 
 
 The persistence layer depends on core contracts, while core remains filesystem independent. Missing, malformed, mismatched, and unsupported persisted data fails explicitly; it never silently falls back to a draft state. Storage paths are guarded against symbolic links at every level for both reads and writes, transition events are written only by `transition`, and artifact writes roll back when the session update fails. The persisted layout, session document, and store API are described in `adapters/README.md`.
 
+### Orchestration
+
+`orchestration/` is the workflow coordinator. Given a persisted feature session it decides what work is legal next, routes only the artifacts that stage needs, invokes a generic `StageExecutor` port, validates the structured result, stores the produced artifacts, and applies exactly one legal state-machine event. `runNext()` executes at most one work stage per call, so recovery and human control stay explicit. Human approval states, the commit and push states, and terminal states are never executed by the orchestrator. Failures are classified as workflow, executor, or persistence problems, and only an explicit `failFeature()` decision can terminate a feature. An ambiguous persistence failure is resolved by reloading the authoritative session and comparing machine snapshots, never by retrying the transition. The stage map, context routing, fix loop, and gate behavior are described in `orchestration/README.md`.
+
 ### Agent adapters and other outer layers
 
-Agent adapters translate between core contracts and a specific coding agent's capabilities, payloads, and responses. Agent-specific APIs stay inside adapter packages. The core must never import an adapter or depend on a coding-agent SDK. Agent adapters, integrations, templates, and the user-facing CLI remain deferred beyond this persistence foundation.
+Agent adapters translate between core contracts and a specific coding agent's capabilities, payloads, and responses. An agent adapter implements the orchestration `StageExecutor` port, so agent-specific APIs stay inside adapter packages. The core must never import an adapter or depend on a coding-agent SDK, and the orchestrator must never import an adapter. Agent adapters, integrations, templates, and the user-facing CLI remain deferred.
 
 ### Project adapters
 
@@ -46,7 +51,7 @@ Project adapters encapsulate access to project resources and tools, such as repo
 
 Integrations connect the kit to external systems and services. They own external I/O and service-specific representations while depending on shared contracts. External behavior must not leak into or become a dependency of the core.
 
-The dependency direction is intentionally one-way: outer layers may depend on core contracts; core never depends on a CLI, adapter, integration, or coding agent.
+The dependency direction is intentionally one-way: outer layers may depend on core contracts; core never depends on a CLI, adapter, integration, or coding agent. The orchestrator sits above the core and the persistence adapter and is depended on only by adapters and the future CLI.
 
 ## Toolchain
 
