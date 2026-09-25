@@ -1,4 +1,12 @@
 export { WorkflowState } from "./workflow-state.js";
+export { WorkflowStateMachine } from "./workflow-state-machine.js";
+export type {
+  FixReturnState,
+  TransitionError,
+  TransitionErrorCode,
+  TransitionResult,
+  WorkflowEvent,
+} from "./workflow-state-machine.js";
 export type {
   AcceptanceCriterion,
   Feature,

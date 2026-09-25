@@ -2,7 +2,7 @@
 
 Agent Workflow Kit provides a coding-agent-independent software development workflow that can be installed into arbitrary repositories.
 
-Milestones 1 and 1.1 establish the repository, domain foundations, and hardened verification contracts only. They do not implement orchestration, adapters, integrations, templates, or CLI behavior.
+Milestones 1, 1.1, and 2 establish the repository, domain contracts, and deterministic in-memory lifecycle engine. The project still does not execute features or implement adapters, integrations, templates, CLI behavior, or persistence.
 
 ## Workspace
 
@@ -22,7 +22,11 @@ The workspace configuration also reserves package locations below `adapters/`, `
 
 ### Workflow core
 
-The core owns stable workflow vocabulary and data contracts. It must remain independent of every coding agent and external system. It currently contains only the `Feature`, `Requirement`, `AcceptanceCriterion`, `Plan`, `PlanStep`, `ReviewFinding`, `VerificationEvidence`, and `VerificationResult` contracts plus the `WorkflowState` enum. It performs no orchestration and invokes no tools.
+The core owns stable workflow vocabulary, data contracts, and the deterministic lifecycle engine. It must remain independent of every coding agent and external system. It currently contains only the `Feature`, `Requirement`, `AcceptanceCriterion`, `Plan`, `PlanStep`, `ReviewFinding`, `VerificationEvidence`, and `VerificationResult` contracts plus the `WorkflowState` enum. It does not execute features, orchestrate external work, or invoke tools.
+
+### Deterministic state machine
+
+`WorkflowStateMachine` starts in `draft` and accepts typed `WorkflowEvent` values. Automatic `advance` events follow only the main lifecycle path. The `approve_plan` and `approve_push` events are the only exits from their approval gates. `request_fix` records an eligible review or verification state, and `complete_fix` returns to that exact state. The `fail` event enters terminal `failed`; neither `complete` nor `failed` has an exit. Fix context is retained only in memory, and the engine performs no external I/O.
 
 ### Agent adapters
 

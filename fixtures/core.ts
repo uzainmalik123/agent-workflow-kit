@@ -19,7 +19,7 @@ export const acceptanceCriterionFixture = {
 export const requirementFixture = {
   id: "REQ-1",
   title: "Expose workflow states",
-  description: "The core defines states without implementing transitions.",
+  description: "The state machine defines transitions without executing feature work.",
   acceptanceCriteria: [acceptanceCriterionFixture],
 } satisfies Requirement;
 
