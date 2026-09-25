@@ -14,5 +14,10 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["core/src/**/*.ts", "fixtures/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "core/src/**/*.ts",
+    "adapters/*/src/**/*.ts",
+    "fixtures/**/*.ts",
+    "tests/**/*.ts"
+  ]
 }
