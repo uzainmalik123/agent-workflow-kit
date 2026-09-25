@@ -1,0 +1,5 @@
+packages:
+  - "core"
+  - "adapters/*"
+  - "integrations/*"
+  - "apps/*"
