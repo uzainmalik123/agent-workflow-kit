@@ -22,11 +22,11 @@ The workspace configuration also reserves package locations below `adapters/`, `
 
 ### Workflow core
 
-The core owns stable workflow vocabulary, data contracts, and the deterministic lifecycle engine. It must remain independent of every coding agent and external system. It currently contains only the `Feature`, `Requirement`, `AcceptanceCriterion`, `Plan`, `PlanStep`, `ReviewFinding`, `VerificationEvidence`, and `VerificationResult` contracts plus the `WorkflowState` enum. It does not execute features, orchestrate external work, or invoke tools.
+The core owns stable workflow vocabulary, data contracts, and the deterministic lifecycle engine. It must remain independent of every coding agent and external system. It contains workflow contracts, the `WorkflowState` enum, and the pure `WorkflowStateMachine`; it does not execute features, orchestrate external work, or invoke tools.
 
 ### Deterministic state machine
 
-`WorkflowStateMachine` starts in `draft` and accepts typed `WorkflowEvent` values. Automatic `advance` events follow only the main lifecycle path. The `approve_plan` and `approve_push` events are the only exits from their approval gates. `request_fix` records an eligible review or verification state, and `complete_fix` returns to that exact state. The `fail` event enters terminal `failed`; neither `complete` nor `failed` has an exit. Fix context is retained only in memory, and the engine performs no external I/O.
+`WorkflowStateMachine` starts in `draft` and accepts typed `WorkflowEvent` values. Automatic `advance` events follow only the main lifecycle path. The `approve_plan` and `approve_push` events are the only exits from their approval gates. `request_fix` records an eligible review or verification state, and `complete_fix` returns to that exact state. The `fail` event enters terminal `failed`; neither `complete` nor `failed` has an exit. The `snapshot` getter returns plain serializable state, and the constructor restores only validated snapshots. The engine performs no filesystem or persistence I/O.
 
 ### Agent adapters
 

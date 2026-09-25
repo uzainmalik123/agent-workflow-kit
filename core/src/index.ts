@@ -6,6 +6,7 @@ export type {
   TransitionErrorCode,
   TransitionResult,
   WorkflowEvent,
+  WorkflowMachineSnapshot,
 } from "./workflow-state-machine.js";
 export type {
   AcceptanceCriterion,

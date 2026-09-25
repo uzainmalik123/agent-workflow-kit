@@ -34,6 +34,11 @@ export type TransitionResult =
     }
   | TransitionError;
 
+export interface WorkflowMachineSnapshot {
+  readonly state: WorkflowState;
+  readonly fixReturnState?: FixReturnState;
+}
+
 const nextStateByAdvance: Partial<Record<WorkflowState, WorkflowState>> = {
   [WorkflowState.Draft]: WorkflowState.Grilling,
   [WorkflowState.Grilling]: WorkflowState.SpecReady,
@@ -85,8 +90,45 @@ const terminalFailureStates: ReadonlySet<WorkflowState> = new Set([
   WorkflowState.Pushing,
 ]);
 
-function isFixReturnState(state: WorkflowState): state is FixReturnState {
+function isWorkflowState(state: unknown): state is WorkflowState {
+  return Object.values(WorkflowState).some((candidate) => candidate === state);
+}
+
+function isFixReturnState(state: unknown): state is FixReturnState {
   return fixReturnStateValues.some((candidate) => candidate === state);
+}
+
+function validateSnapshot(snapshot: unknown): WorkflowMachineSnapshot {
+  if (typeof snapshot !== "object" || snapshot === null) {
+    throw new TypeError("Invalid workflow snapshot: snapshot must be an object.");
+  }
+
+  const candidate = snapshot as Record<string, unknown>;
+  const state = candidate["state"];
+
+  if (!isWorkflowState(state)) {
+    throw new TypeError("Invalid workflow snapshot: state must be a WorkflowState.");
+  }
+
+  const fixReturnState = candidate["fixReturnState"];
+
+  if (state === WorkflowState.Fixing) {
+    if (!isFixReturnState(fixReturnState)) {
+      throw new TypeError(
+        "Invalid workflow snapshot: fixing requires a valid fix return state.",
+      );
+    }
+
+    return { state, fixReturnState };
+  }
+
+  if (fixReturnState !== undefined) {
+    throw new TypeError(
+      "Invalid workflow snapshot: fix return state is only valid while fixing.",
+    );
+  }
+
+  return { state };
 }
 
 function transitionSucceeded(state: WorkflowState): TransitionResult {
@@ -114,11 +156,32 @@ function terminalStateError(state: WorkflowState, event: WorkflowEvent): Transit
 }
 
 export class WorkflowStateMachine {
-  #state = WorkflowState.Draft;
+  #state: WorkflowState;
   #fixReturnState: FixReturnState | undefined;
+
+  constructor(snapshot: WorkflowMachineSnapshot = { state: WorkflowState.Draft }) {
+    const validatedSnapshot = validateSnapshot(snapshot);
+
+    this.#state = validatedSnapshot.state;
+    this.#fixReturnState = validatedSnapshot.fixReturnState;
+  }
 
   get state(): WorkflowState {
     return this.#state;
+  }
+
+  get snapshot(): WorkflowMachineSnapshot {
+    if (this.#state !== WorkflowState.Fixing) {
+      return { state: this.#state };
+    }
+
+    const fixReturnState = this.#fixReturnState;
+
+    if (fixReturnState === undefined) {
+      throw new Error("Workflow state machine invariant violated: fixing requires a return state.");
+    }
+
+    return { state: this.#state, fixReturnState };
   }
 
   transition(event: WorkflowEvent): TransitionResult {
