@@ -1,4 +1,13 @@
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,12 +19,12 @@ import {
   FEATURE_ARTIFACT_FILENAMES,
   FeatureSessionStore,
   PersistenceError,
+  createEmptyArtifactReferences,
   createFeatureSessionStore,
   restoreWorkflowStateMachine,
   sanitizeFeatureSlug,
   type Clock,
   type FeatureArtifactName,
-  type FeatureEventInput,
   type FeatureSession,
   type PersistenceErrorCode,
 } from "@agent-workflow-kit/persistence";
@@ -49,16 +58,36 @@ const advanceToComplete: readonly WorkflowEvent[] = [
   "advance",
 ];
 
+class FailingSessionWriteStore extends FeatureSessionStore {
+  protected override async atomicWriteFile(path: string, content: string): Promise<void> {
+    if (path.endsWith("session.json")) {
+      throw new PersistenceError("IO_ERROR", "Injected session write failure.", { path });
+    }
+
+    await super.atomicWriteFile(path, content);
+  }
+}
+
 function fixedClock(): string {
   return fixedTimestamp;
+}
+
+function incrementingClock(): Clock {
+  let tick = 0;
+  return () => new Date(Date.UTC(2026, 0, 2, 3, 4, 5, tick++ * 1000)).toISOString();
+}
+
+async function makeRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "agent-workflow-kit-"));
+  roots.push(root);
+  return root;
 }
 
 async function makeStore(clock: Clock = fixedClock): Promise<{
   readonly root: string;
   readonly store: FeatureSessionStore;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "agent-workflow-kit-"));
-  roots.push(root);
+  const root = await makeRoot();
   return { root, store: createFeatureSessionStore(root, { clock }) };
 }
 
@@ -67,6 +96,45 @@ async function expectPersistenceError(
   code: PersistenceErrorCode,
 ): Promise<void> {
   await expect(operation()).rejects.toMatchObject({ code });
+}
+
+function buildSession(): FeatureSession {
+  return {
+    schemaVersion: 1,
+    featureId: "F-001",
+    slug: "unsafe",
+    title: "Unsafe feature",
+    createdAt: fixedTimestamp,
+    updatedAt: fixedTimestamp,
+    machine: { state: WorkflowState.Draft },
+    artifacts: createEmptyArtifactReferences(),
+  };
+}
+
+async function replaceWithSymlink(root: string, path: string): Promise<void> {
+  const target = join(root, "outside-target");
+  await writeFile(target, "{}", "utf8");
+  await rm(path, { force: true });
+  await symlink(target, path, "file");
+}
+
+async function expectUnsafeTopology(store: FeatureSessionStore): Promise<void> {
+  await expectPersistenceError(() => store.list(), "UNSAFE_PATH");
+  await expectPersistenceError(() => store.load("F-001"), "UNSAFE_PATH");
+  await expectPersistenceError(() => store.exists("F-001"), "UNSAFE_PATH");
+  await expectPersistenceError(() => store.readEvents("F-001"), "UNSAFE_PATH");
+  await expectPersistenceError(() => store.readArtifact("F-001", "request"), "UNSAFE_PATH");
+  await expectPersistenceError(
+    () => store.create({ featureId: "F-002", title: "Unsafe feature" }),
+    "UNSAFE_PATH",
+  );
+  await expectPersistenceError(() => store.save(buildSession()), "UNSAFE_PATH");
+  await expectPersistenceError(() => store.update("F-001", { title: "Updated" }), "UNSAFE_PATH");
+  await expectPersistenceError(
+    () => store.writeArtifact("F-001", "request", "# Request\n"),
+    "UNSAFE_PATH",
+  );
+  await expectPersistenceError(() => store.transition("F-001", "advance"), "UNSAFE_PATH");
 }
 
 async function readSessionDocument(path: string): Promise<Record<string, unknown>> {
@@ -301,36 +369,53 @@ describe("FeatureSessionStore events", () => {
     expect(lines).toHaveLength(2);
     expect(lines.every((line) => JSON.parse(line) !== null)).toBe(true);
     expect((await store.load("F-001")).machine).toEqual({ state: WorkflowState.Grilling });
-
-    await store.appendEvent("F-001", {
-      previousState: WorkflowState.Grilling,
-      event: "advance",
-      resultingState: WorkflowState.SpecReady,
-      success: true,
-    });
-    expect((await store.load("F-001")).machine).toEqual({ state: WorkflowState.Grilling });
-    expect(await store.readEvents("F-001")).toHaveLength(3);
   });
 
-  it("rejects event inputs that are not valid workflow events", async () => {
-    const { store } = await makeStore();
-    await store.create({ featureId: "F-001", title: "Event input feature" });
+  it("keeps the log non-authoritative when a record is appended out of band", async () => {
+    const { root, store } = await makeStore();
+    await store.create({ featureId: "F-001", title: "Out of band feature" });
+    await store.transition("F-001", "advance");
 
-    await expectPersistenceError(
-      () =>
-        store.appendEvent("F-001", {
-          previousState: WorkflowState.Draft,
-          event: "teleport" as WorkflowEvent,
-          resultingState: WorkflowState.Draft,
-          success: true,
-        }),
-      "INVALID_EVENT",
+    const eventPath = join(root, ".agentflow", "features", "F-001-out-of-band-feature", "events.jsonl");
+    await appendFile(
+      eventPath,
+      `${JSON.stringify({
+        timestamp: fixedTimestamp,
+        featureId: "F-001",
+        previousState: WorkflowState.Grilling,
+        event: "advance",
+        resultingState: WorkflowState.Complete,
+        success: true,
+      })}\n`,
+      "utf8",
     );
-    await expectPersistenceError(
-      () => store.appendEvent("F-001", undefined as unknown as FeatureEventInput),
-      "INVALID_EVENT",
+
+    expect(await store.readEvents("F-001")).toHaveLength(2);
+    expect((await store.load("F-001")).machine).toEqual({ state: WorkflowState.Grilling });
+  });
+
+  it("does not expose a public API for fabricating transition history", async () => {
+    const { store } = await makeStore();
+    await store.create({ featureId: "F-001", title: "Forgery feature" });
+    await reachState(store, "F-001", advanceToComplete);
+
+    const storeRecord = store as unknown as Record<string, unknown>;
+    expect("appendEvent" in storeRecord).toBe(false);
+    expect(Object.getOwnPropertyNames(FeatureSessionStore.prototype)).not.toContain("appendEvent");
+
+    const events = await store.readEvents("F-001");
+    expect(events).toHaveLength(advanceToComplete.length);
+    expect(events.every((event) => event.success)).toBe(true);
+    expect(events.map((event) => `${event.previousState}->${event.resultingState}`)).not.toContain(
+      `${WorkflowState.Draft}->${WorkflowState.Complete}`,
     );
-    expect(await store.readEvents("F-001")).toEqual([]);
+
+    let state = WorkflowState.Draft;
+    for (const event of events) {
+      expect(event.previousState).toBe(state);
+      state = event.resultingState;
+    }
+    expect(state).toBe(WorkflowState.Complete);
   });
 
   it("persists a successful transition before a failed event append is reported", async () => {
@@ -409,17 +494,75 @@ describe("FeatureSessionStore corruption and safety", () => {
     expect(await readFile(sessionPath, "utf8")).toBe(conflicting);
   });
 
-  it("rejects a symlinked workflow root instead of writing outside the repository", async () => {
+  it("rejects a symlinked workflow root for reads and writes", async () => {
     const { root, store } = await makeStore();
-    const outside = join(root, "outside");
-    await mkdir(outside);
-    await symlink(outside, join(root, ".agentflow"), "dir");
+    await symlink(join(root, "outside"), join(root, ".agentflow"), "dir");
 
+    await expectUnsafeTopology(store);
+  });
+
+  it("rejects a symlinked features root for reads and writes", async () => {
+    const { root, store } = await makeStore();
+    await mkdir(join(root, ".agentflow"));
+    await symlink(join(root, "outside"), join(root, ".agentflow", "features"), "dir");
+
+    await expectUnsafeTopology(store);
+  });
+
+  it("rejects a symlinked feature directory for reads and writes", async () => {
+    const { root, store } = await makeStore();
+    await store.create({ featureId: "F-001", title: "Symlinked feature" });
+    const featurePath = join(root, ".agentflow", "features", "F-001-symlinked-feature");
+    await rm(featurePath, { recursive: true });
+    await symlink(join(root, "outside"), featurePath, "dir");
+
+    await expectUnsafeTopology(store);
+  });
+
+  it("rejects a symlinked session file for reads and writes", async () => {
+    const { root, store } = await makeStore();
+    const created = await store.create({ featureId: "F-001", title: "Symlinked session" });
+    const sessionPath = join(root, ".agentflow", "features", "F-001-symlinked-session", "session.json");
+    await replaceWithSymlink(root, sessionPath);
+
+    await expectPersistenceError(() => store.load("F-001"), "UNSAFE_PATH");
+    await expectPersistenceError(() => store.list(), "UNSAFE_PATH");
+    await expectPersistenceError(() => store.exists("F-001"), "UNSAFE_PATH");
+    await expectPersistenceError(() => store.readEvents("F-001"), "UNSAFE_PATH");
+    await expectPersistenceError(() => store.save(created), "UNSAFE_PATH");
+    await expectPersistenceError(() => store.update("F-001", { title: "Updated" }), "UNSAFE_PATH");
+    await expectPersistenceError(() => store.transition("F-001", "advance"), "UNSAFE_PATH");
+  });
+
+  it("rejects a symlinked artifact file for reads and writes", async () => {
+    const { root, store } = await makeStore();
+    await store.create({ featureId: "F-001", title: "Symlinked artifact" });
+    await store.writeArtifact("F-001", "request", "# Request\n");
+    const artifactPath = join(
+      root,
+      ".agentflow",
+      "features",
+      "F-001-symlinked-artifact",
+      FEATURE_ARTIFACT_FILENAMES.request,
+    );
+    await replaceWithSymlink(root, artifactPath);
+
+    await expectPersistenceError(() => store.readArtifact("F-001", "request"), "UNSAFE_PATH");
     await expectPersistenceError(
-      () => store.create({ featureId: "F-001", title: "Escaping feature" }),
+      () => store.writeArtifact("F-001", "request", "# Replacement\n"),
       "UNSAFE_PATH",
     );
-    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("rejects a symlinked event log for reads and appends", async () => {
+    const { root, store } = await makeStore();
+    await store.create({ featureId: "F-001", title: "Symlinked events" });
+    await store.transition("F-001", "advance");
+    const eventsPath = join(root, ".agentflow", "features", "F-001-symlinked-events", "events.jsonl");
+    await replaceWithSymlink(root, eventsPath);
+
+    await expectPersistenceError(() => store.readEvents("F-001"), "UNSAFE_PATH");
+    await expectPersistenceError(() => store.transition("F-001", "advance"), "UNSAFE_PATH");
   });
 
   it("rejects duplicate feature IDs and duplicate feature directories", async () => {
@@ -461,6 +604,76 @@ describe("FeatureSessionStore corruption and safety", () => {
 
     expect(await store.exists("F-001")).toBe(false);
     await expectPersistenceError(() => store.load("F-001"), "FEATURE_NOT_FOUND");
+  });
+});
+
+describe("FeatureSessionStore failure recovery", () => {
+  it("removes a feature directory when the initial session write fails", async () => {
+    const root = await makeRoot();
+    const failing = new FailingSessionWriteStore(root, { clock: fixedClock });
+    const featurePath = join(root, ".agentflow", "features", "F-001-retryable-feature");
+
+    await expectPersistenceError(
+      () => failing.create({ featureId: "F-001", title: "Retryable feature" }),
+      "IO_ERROR",
+    );
+    await expect(lstat(featurePath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const healthy = createFeatureSessionStore(root, { clock: fixedClock });
+    const created = await healthy.create({ featureId: "F-001", title: "Retryable feature" });
+    expect(created.featureId).toBe("F-001");
+    expect(await healthy.exists("F-001")).toBe(true);
+  });
+
+  it("removes a newly created artifact when the session update fails", async () => {
+    const root = await makeRoot();
+    const clock = incrementingClock();
+    const healthy = createFeatureSessionStore(root, { clock });
+    const created = await healthy.create({ featureId: "F-001", title: "Rollback feature" });
+    const artifactPath = join(
+      root,
+      ".agentflow",
+      "features",
+      "F-001-rollback-feature",
+      FEATURE_ARTIFACT_FILENAMES.request,
+    );
+    const failing = new FailingSessionWriteStore(root, { clock });
+
+    await expectPersistenceError(
+      () => failing.writeArtifact("F-001", "request", "# Request\n"),
+      "IO_ERROR",
+    );
+
+    await expect(lstat(artifactPath)).rejects.toMatchObject({ code: "ENOENT" });
+    const reloaded = await healthy.load("F-001");
+    expect(reloaded.updatedAt).toBe(created.updatedAt);
+    expect(reloaded.artifacts.request).toEqual({
+      filename: "request.md",
+      status: "missing",
+    });
+  });
+
+  it("restores the previous artifact when a replacement fails to update the session", async () => {
+    const root = await makeRoot();
+    const clock = incrementingClock();
+    const healthy = createFeatureSessionStore(root, { clock });
+    await healthy.create({ featureId: "F-001", title: "Replace feature" });
+    const original = await healthy.writeArtifact("F-001", "request", "# Original request\n");
+    const failing = new FailingSessionWriteStore(root, { clock });
+
+    await expectPersistenceError(
+      () => failing.writeArtifact("F-001", "request", "# Replacement request\n"),
+      "IO_ERROR",
+    );
+
+    expect(await healthy.readArtifact("F-001", "request")).toBe("# Original request\n");
+    const reloaded = await healthy.load("F-001");
+    expect(reloaded.updatedAt).toBe(original.updatedAt);
+    expect(reloaded.artifacts.request).toEqual({
+      filename: "request.md",
+      status: "present",
+      updatedAt: original.artifacts.request.updatedAt,
+    });
   });
 });
 

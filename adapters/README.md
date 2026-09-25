@@ -35,9 +35,23 @@ A session document references artifacts by filename and status; artifact content
 - `create`, `load`, `save`, `update`, `list`, and `exists` for sessions.
 - `transition(featureId, event)` to apply a workflow event, persist the authoritative session, and then append the event.
 - `writeArtifact` and `readArtifact` for the controlled artifact set.
-- `appendEvent` and `readEvents` for the event log.
+- `readEvents` for the event log.
 - `featureDirectoryPath(featureId, slug)` for deterministic feature paths.
 
 `restoreWorkflowStateMachine(session)` rebuilds the core state machine from a loaded session, including a pending fix return state.
 
 Failures throw `PersistenceError` with a `code`. Missing, malformed, mismatched, duplicate, and unsupported persisted data fails explicitly instead of being repaired or silently reset to a draft session.
+
+### Event-log integrity
+
+`transition` is the only writer of `events.jsonl`. There is no public API for appending a raw record, so transition history cannot be fabricated through the store; every logged event is produced by the core state machine. The log stays append-only and non-authoritative: `load` reconstructs workflow state from `session.json`, so a record written out of band never changes a session.
+
+### Path and symlink safety
+
+Every storage component is inspected with `lstat` before use, so reads and writes share the same guard: `.agentflow`, `.agentflow/features`, the feature directory, and each session, artifact, and event file. A symbolic link at any level, or a non-regular file where a file is expected, fails with `UNSAFE_PATH`; checks never rely on the final path component alone, and storage paths are never implicitly created below an unverified parent. `list()`, `exists()`, `load()`, `readArtifact()`, and `readEvents()` are protected exactly like the write paths.
+
+### Consistency and cleanup
+
+- `writeArtifact` reads the previous artifact first, writes the new file atomically, then updates `session.json`. If the session update fails, a newly created artifact is removed and a replaced artifact is restored to its previous contents, so authoritative metadata never claims an update that did not complete. A failed rollback is reported as `IO_ERROR` instead of being swallowed.
+- If the initial `session.json` write of `create` fails, the feature directory that was just created is removed so the feature ID stays reusable.
+- Session and artifact files are written to a temporary file in the same directory and then renamed, so a failed write never leaves a partially written document.

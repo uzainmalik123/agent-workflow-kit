@@ -32,7 +32,7 @@ The core owns stable workflow vocabulary, data contracts, and the deterministic 
 
 `adapters/persistence/` is the project adapter for durable repository-local workflow state. It stores authoritative `session.json` files, controlled feature artifacts, and append-only `events.jsonl` records under `.agentflow/features/`. Feature sessions persist only workflow metadata, machine snapshots, and artifact references/statuses; artifact contents remain in their deterministic files. Session writes use a temporary file followed by an atomic rename, and a successful transition persists the session before appending its event.
 
-The persistence layer depends on core contracts, while core remains filesystem independent. Missing, malformed, mismatched, and unsupported persisted data fails explicitly; it never silently falls back to a draft state. The persisted layout, session document, and store API are described in `adapters/README.md`.
+The persistence layer depends on core contracts, while core remains filesystem independent. Missing, malformed, mismatched, and unsupported persisted data fails explicitly; it never silently falls back to a draft state. Storage paths are guarded against symbolic links at every level for both reads and writes, transition events are written only by `transition`, and artifact writes roll back when the session update fails. The persisted layout, session document, and store API are described in `adapters/README.md`.
 
 ### Agent adapters and other outer layers
 

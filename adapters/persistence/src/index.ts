@@ -16,7 +16,6 @@ export type {
   FeatureArtifactReferences,
   FeatureArtifactStatus,
   FeatureEvent,
-  FeatureEventInput,
   FeatureSession,
   FeatureSessionSchemaVersion,
   FeatureSessionUpdate,

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, readdir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   WorkflowState,
@@ -107,34 +107,30 @@ interface ValidatedEventFields {
   readonly errorCode?: string;
 }
 
-function readEventFields(
-  value: Record<string, unknown>,
-  code: "INVALID_EVENT" | "MALFORMED_EVENT_LOG",
-  subject: string,
-): ValidatedEventFields {
+function readEventFields(value: Record<string, unknown>, subject: string): ValidatedEventFields {
   const previousState = value["previousState"];
   if (!isWorkflowState(previousState)) {
-    throw new PersistenceError(code, `${subject} has an invalid previousState.`);
+    throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid previousState.`);
   }
 
   const event = value["event"];
   if (!isWorkflowEvent(event)) {
-    throw new PersistenceError(code, `${subject} has an invalid event.`);
+    throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid event.`);
   }
 
   const resultingState = value["resultingState"];
   if (!isWorkflowState(resultingState)) {
-    throw new PersistenceError(code, `${subject} has an invalid resultingState.`);
+    throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid resultingState.`);
   }
 
   const success = value["success"];
   if (typeof success !== "boolean") {
-    throw new PersistenceError(code, `${subject} has an invalid success value.`);
+    throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid success value.`);
   }
 
   const errorCode = value["errorCode"];
   if (errorCode !== undefined && (typeof errorCode !== "string" || errorCode.length === 0)) {
-    throw new PersistenceError(code, `${subject} has an invalid errorCode.`);
+    throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid errorCode.`);
   }
 
   if (errorCode === undefined) {
@@ -142,14 +138,6 @@ function readEventFields(
   }
 
   return { previousState, event, resultingState, success, errorCode };
-}
-
-function validateEventInput(value: unknown): FeatureEventInput {
-  if (!isRecord(value)) {
-    throw new PersistenceError("INVALID_EVENT", "Event must be an object.");
-  }
-
-  return readEventFields(value, "INVALID_EVENT", "Event");
 }
 
 function makeEvent(
@@ -186,7 +174,7 @@ function validateEventDocument(value: unknown, featureId: string, lineNumber?: n
     );
   }
 
-  return { timestamp, featureId, ...readEventFields(value, "MALFORMED_EVENT_LOG", subject) };
+  return { timestamp, featureId, ...readEventFields(value, subject) };
 }
 
 export class FeatureSessionStore {
@@ -279,7 +267,15 @@ export class FeatureSessionStore {
       artifacts: createEmptyArtifactReferences(),
     };
 
-    await this.#atomicWrite(join(directoryPath, SESSION_FILENAME), this.#serializeSession(session));
+    const sessionPath = join(directoryPath, SESSION_FILENAME);
+
+    try {
+      await this.atomicWriteFile(sessionPath, this.#serializeSession(session));
+    } catch (error) {
+      await this.#removeEmptyDirectory(directoryPath);
+      throw error;
+    }
+
     return session;
   }
 
@@ -344,7 +340,8 @@ export class FeatureSessionStore {
       }
     }
 
-    await this.#atomicWrite(join(directoryPath, SESSION_FILENAME), this.#serializeSession(normalized));
+    const sessionPath = join(directoryPath, SESSION_FILENAME);
+    await this.atomicWriteFile(sessionPath, this.#serializeSession(normalized));
     return normalized;
   }
 
@@ -468,9 +465,11 @@ export class FeatureSessionStore {
 
     const location = await this.#loadLocation(featureId);
     const filename = FEATURE_ARTIFACT_FILENAMES[name];
+    const artifactPath = join(location.directoryPath, filename);
+    const previous = await this.#readOptionalText(artifactPath);
     const serialized = serializeArtifact(name, content);
     const timestamp = requireTimestamp(this.#clock());
-    await this.#atomicWrite(join(location.directoryPath, filename), serialized);
+    await this.atomicWriteFile(artifactPath, serialized);
     const updatedSession: FeatureSession = {
       ...location.session,
       updatedAt: timestamp,
@@ -484,7 +483,12 @@ export class FeatureSessionStore {
       },
     };
 
-    return this.save(updatedSession);
+    try {
+      return await this.save(updatedSession);
+    } catch (error) {
+      await this.#restoreArtifact(artifactPath, previous, error);
+      throw error;
+    }
   }
 
   async readArtifact(featureId: string, name: FeatureArtifactName): Promise<unknown> {
@@ -506,14 +510,6 @@ export class FeatureSessionStore {
     }
 
     return parseArtifact(name, serialized);
-  }
-
-  async appendEvent(featureId: string, input: FeatureEventInput): Promise<FeatureEvent> {
-    const fields = validateEventInput(input);
-    const location = await this.#loadLocation(featureId);
-    const event = makeEvent(featureId, requireTimestamp(this.#clock()), fields);
-    await this.#appendEventAt(location.directoryPath, event);
-    return event;
   }
 
   async readEvents(featureId: string): Promise<FeatureEvent[]> {
@@ -581,6 +577,8 @@ export class FeatureSessionStore {
     if (featureId !== undefined) {
       assertFeatureId(featureId);
     }
+
+    await this.#assertStorageRoots();
 
     let entries;
 
@@ -718,10 +716,46 @@ export class FeatureSessionStore {
   }
 
   async #ensureFeaturesRoot(): Promise<void> {
+    await this.#assertStorageRoots();
     await this.#ensureDirectory(this.agentflowRoot);
     await this.#assertDirectory(this.agentflowRoot);
     await this.#ensureDirectory(this.featuresRoot);
     await this.#assertDirectory(this.featuresRoot);
+  }
+
+  async #removeEmptyDirectory(path: string): Promise<void> {
+    try {
+      await rmdir(path);
+    } catch {
+      return;
+    }
+  }
+
+  async #restoreArtifact(
+    artifactPath: string,
+    previous: string | undefined,
+    failure: unknown,
+  ): Promise<void> {
+    try {
+      if (previous === undefined) {
+        await unlink(artifactPath);
+        return;
+      }
+
+      await this.atomicWriteFile(artifactPath, previous);
+    } catch (rollbackError) {
+      if (hasErrorCode(rollbackError, "ENOENT")) {
+        return;
+      }
+
+      throw new PersistenceError(
+        "IO_ERROR",
+        `Artifact update failed and "${artifactPath}" could not be restored: ${
+          failure instanceof Error ? failure.message : String(failure)
+        }`,
+        { cause: rollbackError, path: artifactPath },
+      );
+    }
   }
 
   async #ensureDirectory(path: string): Promise<void> {
@@ -737,17 +771,25 @@ export class FeatureSessionStore {
   }
 
   async #assertDirectory(path: string): Promise<void> {
+    if (await this.#inspectStorageDirectory(path)) {
+      return;
+    }
+
+    throw new PersistenceError(
+      "FEATURE_NOT_FOUND",
+      `Directory "${path}" does not exist.`,
+      { path },
+    );
+  }
+
+  async #inspectStorageDirectory(path: string): Promise<boolean> {
     let stats;
 
     try {
       stats = await lstat(path);
     } catch (error) {
       if (hasErrorCode(error, "ENOENT")) {
-        throw new PersistenceError(
-          "FEATURE_NOT_FOUND",
-          `Directory "${path}" does not exist.`,
-          { path },
-        );
+        return false;
       }
 
       throw new PersistenceError(
@@ -757,13 +799,23 @@ export class FeatureSessionStore {
       );
     }
 
-    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
       throw new PersistenceError(
         "UNSAFE_PATH",
-        `Path "${path}" must be a real directory.`,
+        `Directory "${path}" must be a real directory, not a symbolic link.`,
         { path },
       );
     }
+
+    return true;
+  }
+
+  async #assertStorageRoots(): Promise<void> {
+    if (!(await this.#inspectStorageDirectory(this.agentflowRoot))) {
+      return;
+    }
+
+    await this.#inspectStorageDirectory(this.featuresRoot);
   }
 
   async #pathExists(path: string): Promise<boolean> {
@@ -819,9 +871,9 @@ export class FeatureSessionStore {
     }
   }
 
-  async #atomicWrite(path: string, content: string): Promise<void> {
+  protected async atomicWriteFile(path: string, content: string): Promise<void> {
     const parentPath = dirname(path);
-    await this.#ensureDirectory(parentPath);
+    await this.#assertDirectory(parentPath);
     const temporaryPath = join(parentPath, `.${randomUUID()}.tmp`);
 
     try {
