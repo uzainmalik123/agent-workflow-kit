@@ -2,7 +2,7 @@
 
 Agent Workflow Kit provides a coding-agent-independent software development workflow that can be installed into arbitrary repositories.
 
-Milestone 1 establishes the repository and domain foundations only. It does not implement orchestration, adapters, integrations, templates, or CLI behavior.
+Milestones 1 and 1.1 establish the repository, domain foundations, and hardened verification contracts only. They do not implement orchestration, adapters, integrations, templates, or CLI behavior.
 
 ## Workspace
 
@@ -22,7 +22,7 @@ The workspace configuration also reserves package locations below `adapters/`, `
 
 ### Workflow core
 
-The core owns stable workflow vocabulary and data contracts. It must remain independent of every coding agent and external system. In this milestone it contains only the `Feature`, `Requirement`, `AcceptanceCriterion`, `Plan`, `ReviewFinding`, `VerificationEvidence`, and `VerificationResult` contracts plus the `WorkflowState` enum. It performs no orchestration and invokes no tools.
+The core owns stable workflow vocabulary and data contracts. It must remain independent of every coding agent and external system. It currently contains only the `Feature`, `Requirement`, `AcceptanceCriterion`, `Plan`, `PlanStep`, `ReviewFinding`, `VerificationEvidence`, and `VerificationResult` contracts plus the `WorkflowState` enum. It performs no orchestration and invokes no tools.
 
 ### Agent adapters
 
@@ -38,11 +38,16 @@ Integrations connect the kit to external systems and services. They own external
 
 The dependency direction is intentionally one-way: outer layers may depend on core contracts; core never depends on a CLI, adapter, integration, or coding agent.
 
+## Toolchain
+
+Use Node.js `^22.13.0 || ^24.0.0 || >=26.0.0` and pnpm `11.27.1`.
+
 ## Commands
 
 ```sh
-pnpm install
-pnpm test
-pnpm typecheck
+pnpm install --frozen-lockfile
 pnpm lint
+pnpm typecheck
+pnpm test
+pnpm verify
 ```

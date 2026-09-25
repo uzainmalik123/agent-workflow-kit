@@ -3,8 +3,10 @@ export type {
   AcceptanceCriterion,
   Feature,
   Plan,
+  PlanStep,
   Requirement,
   ReviewFinding,
   VerificationEvidence,
+  VerificationEvidenceKind,
   VerificationResult,
 } from "./types.js";

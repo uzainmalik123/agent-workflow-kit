@@ -4,16 +4,21 @@
   "description": "A coding-agent-independent software development workflow toolkit.",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.27.1",
+  "engines": {
+    "node": "^22.13.0 || ^24.0.0 || >=26.0.0"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --max-warnings 0"
+    "lint": "eslint . --max-warnings 0",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test"
   },
   "license": "ISC",
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "^11.3.0",
+      "version": "11.27.1",
       "onFail": "download"
     }
   },

@@ -3,6 +3,7 @@ import type { WorkflowState } from "./workflow-state.js";
 export interface AcceptanceCriterion {
   readonly id: string;
   readonly description: string;
+  readonly verification: string;
 }
 
 export interface Requirement {
@@ -12,10 +13,18 @@ export interface Requirement {
   readonly acceptanceCriteria: readonly AcceptanceCriterion[];
 }
 
+export interface PlanStep {
+  readonly id: string;
+  readonly description: string;
+  readonly requirementIds: readonly string[];
+  readonly expectedFiles: readonly string[];
+  readonly verification: string;
+}
+
 export interface Plan {
   readonly featureId: string;
   readonly summary: string;
-  readonly steps: readonly string[];
+  readonly steps: readonly PlanStep[];
 }
 
 export interface ReviewFinding {
@@ -26,8 +35,10 @@ export interface ReviewFinding {
   readonly line?: number;
 }
 
+export type VerificationEvidenceKind = "static" | "test" | "runtime" | "security";
+
 export interface VerificationEvidence {
-  readonly kind: string;
+  readonly kind: VerificationEvidenceKind;
   readonly description: string;
   readonly reference?: string;
 }
@@ -35,7 +46,7 @@ export interface VerificationEvidence {
 export interface VerificationResult {
   readonly requirementId: string;
   readonly acceptanceCriterionId: string;
-  readonly status: "passed" | "failed";
+  readonly status: "passed" | "failed" | "inconclusive";
   readonly evidence: readonly VerificationEvidence[];
 }
 
