@@ -17,8 +17,10 @@ import {
 } from "@agent-workflow-kit/core";
 import {
   FEATURE_ARTIFACT_FILENAMES,
+  FEATURE_SESSION_SCHEMA_VERSION,
   FeatureSessionStore,
   PersistenceError,
+  createEmptyApprovals,
   createEmptyArtifactReferences,
   createFeatureSessionStore,
   restoreWorkflowStateMachine,
@@ -100,14 +102,16 @@ async function expectPersistenceError(
 
 function buildSession(): FeatureSession {
   return {
-    schemaVersion: 1,
+    schemaVersion: FEATURE_SESSION_SCHEMA_VERSION,
     featureId: "F-001",
     slug: "unsafe",
     title: "Unsafe feature",
+    revision: 0,
     createdAt: fixedTimestamp,
     updatedAt: fixedTimestamp,
     machine: { state: WorkflowState.Draft },
     artifacts: createEmptyArtifactReferences(),
+    approvals: createEmptyApprovals(),
   };
 }
 
@@ -169,13 +173,15 @@ describe("FeatureSessionStore sessions", () => {
     });
 
     expect(created).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: FEATURE_SESSION_SCHEMA_VERSION,
       featureId: "F-001",
       slug: "google-oauth-api",
       title: "Google OAuth / API",
+      revision: 0,
       createdAt: fixedTimestamp,
       updatedAt: fixedTimestamp,
       machine: { state: WorkflowState.Draft },
+      approvals: { plan: null },
     });
     expect(created.artifacts.request).toEqual({
       filename: FEATURE_ARTIFACT_FILENAMES.request,
@@ -195,11 +201,12 @@ describe("FeatureSessionStore sessions", () => {
     const serialized = await readFile(sessionPath, "utf8");
     const persisted = JSON.parse(serialized) as Record<string, unknown>;
     expect(persisted).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: FEATURE_SESSION_SCHEMA_VERSION,
       featureId: "F-001",
       slug: "google-oauth-api",
       machine: { state: "draft" },
     });
+    expect(persisted["revision"]).toBe(1);
     expect(serialized).not.toContain("artifact content");
   });
 
@@ -355,6 +362,7 @@ describe("FeatureSessionStore events", () => {
       event: "advance",
       resultingState: WorkflowState.Grilling,
       success: true,
+      revision: 1,
     });
     expect(events[1]).toMatchObject({
       previousState: WorkflowState.Grilling,
@@ -386,6 +394,7 @@ describe("FeatureSessionStore events", () => {
         event: "advance",
         resultingState: WorkflowState.Complete,
         success: true,
+        revision: 99,
       })}\n`,
       "utf8",
     );
@@ -441,7 +450,7 @@ describe("FeatureSessionStore corruption and safety", () => {
 
     await writeFile(
       sessionPath,
-      JSON.stringify({ ...document, schemaVersion: 2 }),
+      JSON.stringify({ ...document, schemaVersion: 3 }),
       "utf8",
     );
     await expectPersistenceError(() => store.load("F-001"), "UNSUPPORTED_SCHEMA_VERSION");
@@ -680,13 +689,15 @@ describe("FeatureSessionStore failure recovery", () => {
 describe("FeatureSessionStore contract", () => {
   it("uses a versioned session document without artifact contents", () => {
     const session: FeatureSession = {
-      schemaVersion: 1,
+      schemaVersion: FEATURE_SESSION_SCHEMA_VERSION,
       featureId: "F-001",
       slug: "contract",
       title: "Contract",
+      revision: 0,
       createdAt: fixedTimestamp,
       updatedAt: fixedTimestamp,
       machine: { state: WorkflowState.Draft },
+      approvals: { plan: null },
       artifacts: {
         request: { filename: "request.md", status: "missing" },
         grill: { filename: "grill.json", status: "missing" },
@@ -699,6 +710,7 @@ describe("FeatureSessionStore contract", () => {
         verification: { filename: "verification.json", status: "missing" },
         security_review: { filename: "security-review.json", status: "missing" },
         final_summary: { filename: "final-summary.md", status: "missing" },
+        fixes: { filename: "fixes.json", status: "missing" },
       },
     };
 

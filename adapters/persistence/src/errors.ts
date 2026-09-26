@@ -17,7 +17,9 @@ export type PersistenceErrorCode =
   | "ARTIFACT_NOT_FOUND"
   | "MALFORMED_ARTIFACT"
   | "INVALID_EVENT"
-  | "MALFORMED_EVENT_LOG";
+  | "MALFORMED_EVENT_LOG"
+  | "REVISION_CONFLICT"
+  | "LOCK_TIMEOUT";
 
 export interface PersistenceErrorOptions {
   readonly cause?: unknown;

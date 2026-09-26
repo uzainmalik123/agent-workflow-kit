@@ -5,7 +5,7 @@ import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   createWorkflowOrchestrator,
   DEFERRED_WORK_STATES,
-  fixReportArtifact,
+  fixTriggerArtifact,
   humanActionForState,
   HUMAN_ACTIONS,
   isTerminalState,
@@ -157,7 +157,7 @@ describe("stage definitions", () => {
       static_verification: ["verification"],
       test_verification: ["verification"],
       runtime_verification: ["verification"],
-      fixing: [],
+      fixing: ["fixes"],
       security_review: ["security_review"],
       final_gate: [],
       final_summary: ["final_summary"],
@@ -186,12 +186,22 @@ describe("stage definitions", () => {
     for (const stage of ["static_verification", "test_verification", "runtime_verification"] as const) {
       const [output] = STAGE_DEFINITIONS[stage].outputs;
 
-      expect(output).toEqual({ name: "verification", envelopeKey: stage });
+      expect(output).toEqual({
+        name: "verification",
+        kind: "section",
+        envelopeKey: stage,
+      });
     }
   });
 
+  it("records the fixer report in the orchestrator owned fix history", () => {
+    expect(STAGE_DEFINITIONS.fixing.outputs).toEqual([
+      { name: "fixes", kind: "history", envelopeKey: null },
+    ]);
+  });
+
   it("refuses an artifact slot that the stage does not own", () => {
-    expect(outputSpecFor("planning", "plan")).toEqual({ name: "plan", envelopeKey: null });
+    expect(outputSpecFor("planning", "plan")).toEqual({ name: "plan", kind: "document", envelopeKey: null });
     expect(() => outputSpecFor("planning", "spec")).toThrow(/no output slot/u);
     expect(() => outputSpecFor("fixing", "implementation")).toThrow(/no output slot/u);
   });
@@ -212,20 +222,20 @@ describe("context routing", () => {
       scope_review: { required: ["plan", "implementation"], optional: ["spec", "plan_review"] },
       static_verification: {
         required: ["spec", "plan", "implementation"],
-        optional: ["verification"],
+        optional: ["verification", "fixes"],
       },
       test_verification: {
         required: ["spec", "plan", "implementation"],
-        optional: ["verification"],
+        optional: ["verification", "fixes"],
       },
       runtime_verification: {
         required: ["spec", "plan", "implementation"],
-        optional: ["verification"],
+        optional: ["verification", "fixes"],
       },
       fixing: null,
       security_review: {
         required: ["spec", "plan", "implementation", "verification"],
-        optional: ["code_review", "scope_review"],
+        optional: ["code_review", "scope_review", "fixes"],
       },
       final_gate: {
         required: [
@@ -238,7 +248,7 @@ describe("context routing", () => {
           "verification",
           "security_review",
         ],
-        optional: [],
+        optional: ["fixes"],
       },
       final_summary: {
         required: [
@@ -251,7 +261,7 @@ describe("context routing", () => {
           "verification",
           "security_review",
         ],
-        optional: [],
+        optional: ["fixes"],
       },
     });
   });
@@ -282,7 +292,7 @@ describe("context routing", () => {
       WorkflowState.SecurityReview,
     ];
 
-    expect(Object.fromEntries(fixReturnStates.map((state) => [state, fixReportArtifact(state)])))
+    expect(Object.fromEntries(fixReturnStates.map((state) => [state, fixTriggerArtifact(state)])))
       .toEqual({
         plan_review: "plan_review",
         code_review: "code_review",
@@ -417,7 +427,7 @@ describe("stage result validation", () => {
     role: "planner",
     state: WorkflowState.Planning,
     context: [],
-    outputs: [{ name: "plan", envelopeKey: null }],
+    outputs: [{ name: "plan", kind: "document", envelopeKey: null }],
     fixReturnState: null,
   };
 

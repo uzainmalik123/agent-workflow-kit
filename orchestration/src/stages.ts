@@ -43,8 +43,16 @@ export const HUMAN_ACTIONS = ["approve_plan", "approve_push"] as const;
 
 export type HumanAction = (typeof HUMAN_ACTIONS)[number];
 
+export type StageArtifactOutputKind = "document" | "section" | "history";
+
 export interface StageArtifactOutputSpec {
   readonly name: FeatureArtifactName;
+  /**
+   * `document` replaces the file, `section` merges into a shared envelope under its own key, and
+   * `history` appends to an orchestrator-owned history document. The executor never chooses a
+   * filename and never decides how a shared file is merged.
+   */
+  readonly kind: StageArtifactOutputKind;
   readonly envelopeKey: string | null;
 }
 
@@ -64,11 +72,15 @@ export interface StageDefinition {
 }
 
 function document(name: FeatureArtifactName): StageArtifactOutputSpec {
-  return { name, envelopeKey: null };
+  return { name, kind: "document", envelopeKey: null };
 }
 
 function section(name: FeatureArtifactName, envelopeKey: string): StageArtifactOutputSpec {
-  return { name, envelopeKey };
+  return { name, kind: "section", envelopeKey };
+}
+
+function history(name: FeatureArtifactName): StageArtifactOutputSpec {
+  return { name, kind: "history", envelopeKey: null };
 }
 
 export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
@@ -133,7 +145,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
     outputs: [section("verification", "static_verification")],
     context: {
       required: ["spec", "plan", "implementation"],
-      optional: ["verification"],
+      optional: ["verification", "fixes"],
     },
     successEvent: "advance",
     fixable: true,
@@ -145,7 +157,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
     outputs: [section("verification", "test_verification")],
     context: {
       required: ["spec", "plan", "implementation"],
-      optional: ["verification"],
+      optional: ["verification", "fixes"],
     },
     successEvent: "advance",
     fixable: true,
@@ -157,7 +169,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
     outputs: [section("verification", "runtime_verification")],
     context: {
       required: ["spec", "plan", "implementation"],
-      optional: ["verification"],
+      optional: ["verification", "fixes"],
     },
     successEvent: "advance",
     fixable: true,
@@ -166,7 +178,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
     stage: "fixing",
     state: WorkflowState.Fixing,
     role: "fixer",
-    outputs: [],
+    outputs: [history("fixes")],
     context: { required: [], optional: [] },
     successEvent: "complete_fix",
     fixable: false,
@@ -178,7 +190,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
     outputs: [document("security_review")],
     context: {
       required: ["spec", "plan", "implementation", "verification"],
-      optional: ["code_review", "scope_review"],
+      optional: ["code_review", "scope_review", "fixes"],
     },
     successEvent: "advance",
     fixable: true,
@@ -199,7 +211,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
         "verification",
         "security_review",
       ],
-      optional: [],
+      optional: ["fixes"],
     },
     successEvent: "advance",
     fixable: false,
@@ -220,7 +232,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
         "verification",
         "security_review",
       ],
-      optional: [],
+      optional: ["fixes"],
     },
     successEvent: "advance",
     fixable: false,
@@ -275,6 +287,31 @@ export const HUMAN_ACTION_BY_STATE: Readonly<Record<WorkflowState, HumanAction |
   [WorkflowState.Failed]: undefined,
 };
 
+/**
+ * Stages that may only run against the plan, spec, and plan review a human approved. Every one
+ * of them is re-verified against the approval checkpoint before the executor is called.
+ */
+export const APPROVAL_VERIFIED_STAGES: ReadonlySet<WorkStage> = new Set<WorkStage>([
+  "implementation",
+  "code_review",
+  "scope_review",
+  "static_verification",
+  "test_verification",
+  "runtime_verification",
+  "security_review",
+  "final_gate",
+  "final_summary",
+]);
+
+/** The artifacts a plan approval freezes. */
+export const APPROVED_ARTIFACTS = [
+  "spec",
+  "plan",
+  "plan_review",
+] as const satisfies readonly FeatureArtifactName[];
+
+export type ApprovedArtifactName = (typeof APPROVED_ARTIFACTS)[number];
+
 export const PASSIVE_ADVANCE_STATES: ReadonlySet<WorkflowState> = new Set([
   WorkflowState.Draft,
   WorkflowState.SpecReady,
@@ -312,7 +349,11 @@ export function outputSpecFor(stage: WorkStage, name: FeatureArtifactName): Stag
   return match;
 }
 
-export function fixReportArtifact(fixReturnState: FixReturnState): FeatureArtifactName {
+/**
+ * The artifact a fixer must read to understand why it was invoked. The fixer's own report goes to
+ * the durable fix history instead.
+ */
+export function fixTriggerArtifact(fixReturnState: FixReturnState): FeatureArtifactName {
   switch (fixReturnState) {
     case WorkflowState.PlanReview:
       return "plan_review";

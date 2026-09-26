@@ -9,8 +9,10 @@ export {
 } from "@agent-workflow-kit/core";
 
 export {
+  APPROVED_ARTIFACTS,
+  APPROVAL_VERIFIED_STAGES,
   DEFERRED_WORK_STATES,
-  fixReportArtifact,
+  fixTriggerArtifact,
   humanActionForState,
   HUMAN_ACTIONS,
   isTerminalState,
@@ -25,13 +27,21 @@ export {
   WORK_STAGES,
 } from "./stages.js";
 export type {
+  ApprovedArtifactName,
   HumanAction,
+  StageArtifactOutputKind,
   StageArtifactOutputSpec,
   StageContextPlan,
   StageDefinition,
   StageRole,
   WorkStage,
 } from "./stages.js";
+
+export { digestArtifactText } from "./approval.js";
+export type { ApprovalOutcome, ApprovalVerification } from "./approval.js";
+
+export { appendFixHistoryEntry } from "./fix-history.js";
+export type { FixHistoryOutcome } from "./fix-history.js";
 
 export { isStageOutcome, STAGE_OUTCOMES } from "./executor.js";
 export type {

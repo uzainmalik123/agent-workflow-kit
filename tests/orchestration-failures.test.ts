@@ -20,19 +20,20 @@ import { afterEach, describe, expect, it } from "vitest";
 const roots: string[] = [];
 const featureDirectory = "F-001-orchestration-failures";
 
-class CountingSessionWriteStore extends FeatureSessionStore {
+/**
+ * Counts every atomic write, so a test can stop the sequence a finalize mutation performs:
+ * artifacts, then the session, then the event log.
+ */
+class CountingAllWritesStore extends FeatureSessionStore {
   successfulWrites = 0;
   failAfterWrites = Number.POSITIVE_INFINITY;
 
   protected override async atomicWriteFile(path: string, content: string): Promise<void> {
-    if (path.endsWith("session.json")) {
-      if (this.successfulWrites >= this.failAfterWrites) {
-        throw new PersistenceError("IO_ERROR", "Injected session write failure.", { path });
-      }
-
-      this.successfulWrites += 1;
+    if (this.successfulWrites >= this.failAfterWrites) {
+      throw new PersistenceError("IO_ERROR", "Injected write failure.", { path });
     }
 
+    this.successfulWrites += 1;
     await super.atomicWriteFile(path, content);
   }
 }
@@ -271,7 +272,7 @@ describe("orchestrator rejects unusable executor results", () => {
     expect(await stateOf(harness)).toBe(WorkflowState.Planning);
   });
 
-  it("rejects a stage result that arrives after the session already moved", async () => {
+  it("refuses a stage result whose revision was already superseded", async () => {
     const harness = await planStateHarness();
 
     harness.executor.configure("planning", {
@@ -286,12 +287,12 @@ describe("orchestrator rejects unusable executor results", () => {
     const result = await harness.orchestrator.runNext("F-001");
 
     expect(result).toMatchObject({
-      status: "rejected",
+      status: "conflict",
       stage: "planning",
       state: WorkflowState.Failed,
       committed: false,
-      failureClass: "workflow",
-      error: { code: "state_conflict" },
+      failureClass: "persistence",
+      error: { code: "revision_conflict" },
     });
     await expectArtifactMissing(harness, "plan");
   });
@@ -427,7 +428,7 @@ describe("orchestrator failure categories", () => {
       status: "inconclusive",
       stage: "plan_review",
       state: WorkflowState.PlanReview,
-      committed: false,
+      committed: true,
     });
     await expectArtifactMissing(harness, "plan_review");
 
@@ -514,7 +515,7 @@ describe("orchestrator persistence recovery", () => {
     expect(executor.executedStages).toEqual(["grill"]);
   });
 
-  it("keeps the stage retryable when an artifact write fails", async () => {
+  it("keeps the stage retryable when the artifact write fails", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
     const healthy = createWorkflowOrchestrator({ store, executor });
@@ -529,7 +530,8 @@ describe("orchestrator persistence recovery", () => {
       await healthy.runNext("F-001");
     }
 
-    const failingStore = new CountingSessionWriteStore(root, { clock: fixedClock });
+    const revisionBefore = (await store.load("F-001")).revision;
+    const failingStore = new CountingAllWritesStore(root, { clock: fixedClock });
     failingStore.failAfterWrites = 0;
     const failing = createWorkflowOrchestrator({ store: failingStore, executor });
 
@@ -541,10 +543,11 @@ describe("orchestrator persistence recovery", () => {
       state: WorkflowState.Planning,
       committed: false,
       failureClass: "persistence",
-      error: { code: "persistence_failed" },
+      error: { code: "persistence_transition_not_committed" },
     });
     await expectArtifactMissing(healthy, "plan");
     expect((await store.load("F-001")).machine).toEqual({ state: WorkflowState.Planning });
+    expect((await store.load("F-001")).revision).toBe(revisionBefore);
 
     const retried = await healthy.runNext("F-001");
 
@@ -556,7 +559,7 @@ describe("orchestrator persistence recovery", () => {
     expect(executor.executedStages).toEqual(["grill", "planning", "planning"]);
   });
 
-  it("does not commit a transition that could not be persisted", async () => {
+  it("rolls the artifact back when the session write of a finalize fails", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
     const healthy = createWorkflowOrchestrator({ store, executor });
@@ -571,7 +574,9 @@ describe("orchestrator persistence recovery", () => {
       await healthy.runNext("F-001");
     }
 
-    const failingStore = new CountingSessionWriteStore(root, { clock: fixedClock });
+    const revisionBefore = (await store.load("F-001")).revision;
+    // Write 1 is plan.json, write 2 is the session the mutation would commit at.
+    const failingStore = new CountingAllWritesStore(root, { clock: fixedClock });
     failingStore.failAfterWrites = 1;
     const failing = createWorkflowOrchestrator({ store: failingStore, executor });
 
@@ -586,9 +591,10 @@ describe("orchestrator persistence recovery", () => {
       failureClass: "persistence",
       error: { code: "persistence_transition_not_committed" },
     });
-    expect(blocked.artifacts).toEqual(["plan"]);
-    expect(await store.readArtifact("F-001", "plan")).toMatchObject({ featureId: "F-001" });
+    expect(blocked.artifacts).toEqual([]);
+    await expectArtifactMissing(healthy, "plan");
     expect((await store.load("F-001")).machine).toEqual({ state: WorkflowState.Planning });
+    expect((await store.load("F-001")).revision).toBe(revisionBefore);
 
     const retried = await healthy.runNext("F-001");
 
@@ -597,7 +603,50 @@ describe("orchestrator persistence recovery", () => {
       stage: "planning",
       state: WorkflowState.PlanReview,
     });
-    expect(executor.executedStages).toEqual(["grill", "planning", "planning"]);
+  });
+
+  it("reports a finalize whose event log append failed after committing", async () => {
+    const root = await makeRoot();
+    const { store, executor } = createHarness(root);
+    const healthy = createWorkflowOrchestrator({ store, executor });
+
+    await healthy.createFeature({
+      featureId: "F-001",
+      title: "Orchestration failures",
+      request: "# Request\n\nExercise every failure path.\n",
+    });
+
+    for (let step = 0; step < 3; step += 1) {
+      await healthy.runNext("F-001");
+    }
+
+    const revisionBefore = (await store.load("F-001")).revision;
+    await breakEventLog(root);
+
+    const committed = await healthy.runNext("F-001");
+
+    expect(committed).toMatchObject({
+      status: "persistence_error",
+      stage: "planning",
+      fromState: WorkflowState.Planning,
+      state: WorkflowState.PlanReview,
+      committed: true,
+      failureClass: "persistence",
+      error: { code: "persistence_transition_committed" },
+    });
+    expect(await store.readArtifact("F-001", "plan")).toMatchObject({ featureId: "F-001" });
+    expect((await store.load("F-001")).revision).toBe(revisionBefore + 1);
+
+    await restoreEventLog(root);
+
+    const resumed = await healthy.runNext("F-001");
+
+    expect(resumed).toMatchObject({
+      status: "stage_completed",
+      stage: "plan_review",
+      state: WorkflowState.AwaitingPlanApproval,
+    });
+    expect(executor.executedStages).toEqual(["grill", "planning", "plan_review"]);
   });
 
   it("never repairs a non-object verification envelope by overwriting it", async () => {

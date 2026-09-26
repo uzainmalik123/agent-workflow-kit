@@ -3,10 +3,12 @@ import {
   FEATURE_ARTIFACT_FILENAMES,
   FEATURE_ARTIFACT_NAMES,
   FEATURE_SESSION_SCHEMA_VERSION,
+  type FeatureApprovals,
   type FeatureArtifactName,
   type FeatureArtifactReference,
   type FeatureArtifactReferences,
   type FeatureSession,
+  type PlanApprovalRecord,
 } from "./contracts.js";
 import { isFeatureId, isCanonicalFeatureSlug } from "./names.js";
 import { WorkflowStateMachine } from "@agent-workflow-kit/core";
@@ -93,6 +95,85 @@ function validateArtifactReferences(value: unknown): FeatureArtifactReferences {
   }
 
   return references;
+}
+
+function validateRevision(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session revision must be a non-negative integer.",
+    );
+  }
+
+  return value;
+}
+
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+function validateSha256(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || !SHA256_PATTERN.test(value)) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      `Session ${fieldName} must be a lowercase SHA-256 hex digest.`,
+    );
+  }
+
+  return value;
+}
+
+function validatePlanApproval(value: unknown): PlanApprovalRecord {
+  if (!isRecord(value)) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session plan approval must be an object or null.",
+    );
+  }
+
+  const approvedAt = value["approvedAt"];
+  const approvedRevision = value["approvedRevision"];
+
+  if (!isTimestamp(approvedAt)) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session plan approval must contain a valid approvedAt timestamp.",
+    );
+  }
+
+  if (typeof approvedRevision !== "number" || !Number.isInteger(approvedRevision) || approvedRevision < 0) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session plan approval approvedRevision must be a non-negative integer.",
+    );
+  }
+
+  return {
+    approvedAt,
+    approvedRevision,
+    specSha256: validateSha256(value["specSha256"], "plan approval specSha256"),
+    planSha256: validateSha256(value["planSha256"], "plan approval planSha256"),
+    planReviewSha256: validateSha256(value["planReviewSha256"], "plan approval planReviewSha256"),
+  };
+}
+
+function validateApprovals(value: unknown): FeatureApprovals {
+  if (value === undefined) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session data must contain approvals.",
+    );
+  }
+
+  if (!isRecord(value)) {
+    throw new PersistenceError("INVALID_SESSION", "Session approvals must be an object.");
+  }
+
+  const plan = value["plan"];
+
+  if (plan === undefined || plan === null) {
+    return { plan: null };
+  }
+
+  return { plan: validatePlanApproval(plan) };
 }
 
 function validateMachineSnapshot(value: unknown): WorkflowMachineSnapshot {
@@ -191,9 +272,11 @@ export function parseFeatureSessionDocument(
     featureId,
     slug,
     title,
+    revision: validateRevision(value["revision"]),
     createdAt,
     updatedAt,
     machine: validateMachineSnapshot(value["machine"]),
     artifacts: validateArtifactReferences(value["artifacts"]),
+    approvals: validateApprovals(value["approvals"]),
   };
 }

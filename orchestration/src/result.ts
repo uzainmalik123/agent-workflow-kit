@@ -22,6 +22,7 @@ export const ORCHESTRATION_STATUSES = [
   "inconclusive",
   "executor_error",
   "rejected",
+  "conflict",
   "persistence_error",
   "terminal",
 ] as const;

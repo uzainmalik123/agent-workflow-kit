@@ -59,6 +59,15 @@ function defaultContent(
     };
   }
 
+  if (name === "fixes") {
+    return {
+      featureId: request.feature.featureId,
+      fixedFor: request.fixReturnState,
+      summary: `Deterministic fix for ${request.fixReturnState ?? "an unknown state"}.`,
+      changes: [],
+    };
+  }
+
   return {
     featureId: request.feature.featureId,
     stage: request.stage,

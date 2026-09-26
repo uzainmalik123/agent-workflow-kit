@@ -15,11 +15,15 @@ export type OrchestrationErrorCode =
   | "missing_context_artifact"
   | "unmergeable_artifact"
   | "inconsistent_fix_state"
-  | "state_conflict"
+  | "revision_conflict"
+  | "approval_missing"
+  | "approval_invalidated"
+  | "approval_evidence_missing"
   | "unhandled_state"
   | "git_integration_deferred"
   | "persistence_transition_committed"
   | "persistence_transition_not_committed"
+  | "persistence_transition_superseded"
   | "persistence_verification_failed"
   | "persistence_failed";
 
@@ -45,11 +49,15 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     missing_context_artifact: "workflow",
     unmergeable_artifact: "persistence",
     inconsistent_fix_state: "workflow",
-    state_conflict: "workflow",
+    revision_conflict: "persistence",
+    approval_missing: "workflow",
+    approval_invalidated: "workflow",
+    approval_evidence_missing: "workflow",
     unhandled_state: "workflow",
     git_integration_deferred: "workflow",
     persistence_transition_committed: "persistence",
     persistence_transition_not_committed: "persistence",
+    persistence_transition_superseded: "persistence",
     persistence_verification_failed: "persistence",
     persistence_failed: "persistence",
   };

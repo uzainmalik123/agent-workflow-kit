@@ -7,14 +7,19 @@ import {
 import {
   FEATURE_ARTIFACT_FILENAMES,
   PersistenceError,
+  type FeatureApprovals,
   type FeatureArtifactName,
+  type FeatureArtifactWrite,
+  type FeatureMutationPlan,
+  type FeatureMutationReader,
   type FeatureSession,
   type FeatureSessionStore,
 } from "@agent-workflow-kit/persistence";
+import { buildPlanApproval, verifyPlanApproval } from "./approval.js";
 import { describeError, orchestrationError, type OrchestrationError } from "./errors.js";
+import { appendFixHistoryEntry } from "./fix-history.js";
 import type {
   StageArtifactContext,
-  StageArtifactOutput,
   StageExecutionRequest,
   StageExecutor,
 } from "./executor.js";
@@ -60,13 +65,30 @@ type ComposeOutcome =
   | { readonly ok: true; readonly content: unknown }
   | { readonly ok: false; readonly error: OrchestrationError };
 
-type PersistOutcome =
-  | {
-      readonly ok: true;
-      readonly session: FeatureSession;
-      readonly artifacts: readonly FeatureArtifactName[];
-    }
-  | { readonly ok: false; readonly result: OrchestrationResult };
+interface CommitInput {
+  readonly featureId: string;
+  /** The session the caller's decision was based on. Its revision is the optimistic precondition. */
+  readonly session: FeatureSession;
+  readonly event?: WorkflowEvent;
+  readonly prepare?: (reader: FeatureMutationReader) => Promise<FeatureMutationPlan>;
+  readonly successStatus: OrchestrationStatus;
+  readonly extras: ResultExtras;
+}
+
+/** Raised inside a mutation's prepare step so a rejected composition never reaches storage. */
+class StageFinalizeError extends Error {
+  readonly orchestrationError: OrchestrationError;
+
+  constructor(error: OrchestrationError) {
+    super(error.message);
+    this.name = "StageFinalizeError";
+    this.orchestrationError = error;
+  }
+}
+
+function isRevisionConflict(error: unknown): boolean {
+  return error instanceof PersistenceError && error.code === "REVISION_CONFLICT";
+}
 
 function isArtifactMissing(error: unknown): boolean {
   return error instanceof PersistenceError && error.code === "ARTIFACT_NOT_FOUND";
@@ -77,6 +99,24 @@ function snapshotsMatch(
   right: WorkflowMachineSnapshot,
 ): boolean {
   return left.state === right.state && left.fixReturnState === right.fixReturnState;
+}
+
+/** The snapshot a legal event produces, used to recognise a committed-but-reported failure. */
+function previewMachine(
+  session: FeatureSession,
+  event: WorkflowEvent,
+): { readonly ok: true; readonly snapshot: WorkflowMachineSnapshot } | { readonly ok: false; readonly error: OrchestrationError } {
+  const machine = new WorkflowStateMachine(session.machine);
+  const preview = machine.transition(event);
+
+  if (!preview.ok) {
+    return {
+      ok: false,
+      error: orchestrationError("illegal_transition", preview.message),
+    };
+  }
+
+  return { ok: true, snapshot: machine.snapshot };
 }
 
 export class WorkflowOrchestrator {
@@ -143,7 +183,13 @@ export class WorkflowOrchestrator {
     }
 
     if (PASSIVE_ADVANCE_STATES.has(fromState)) {
-      return this.#applyEvent(featureId, session, "advance", "advanced", base);
+      return this.#commit({
+        featureId,
+        session,
+        event: "advance",
+        successStatus: "advanced",
+        extras: base,
+      });
     }
 
     const stage = stageForState(fromState);
@@ -164,26 +210,47 @@ export class WorkflowOrchestrator {
   }
 
   async approvePlan(featureId: string): Promise<OrchestrationResult> {
-    return this.#applyGate(featureId, "approve_plan", "gate_approved");
+    return this.#applyGate(featureId, "approve_plan", "gate_approved", true);
   }
 
   async approvePush(featureId: string): Promise<OrchestrationResult> {
-    return this.#applyGate(featureId, "approve_push", "gate_approved");
+    return this.#applyGate(featureId, "approve_push", "gate_approved", false);
   }
 
   async failFeature(featureId: string): Promise<OrchestrationResult> {
-    return this.#applyGate(featureId, "fail", "feature_failed");
+    return this.#applyGate(featureId, "fail", "feature_failed", false);
   }
 
   async #applyGate(
     featureId: string,
     event: "approve_plan" | "approve_push" | "fail",
     status: OrchestrationStatus,
+    freezePlan: boolean,
   ): Promise<OrchestrationResult> {
     const session = await this.#store.load(featureId);
     const base: ResultExtras = { featureId, fromState: session.machine.state };
 
-    return this.#applyEvent(featureId, session, event, status, base);
+    return this.#commit({
+      featureId,
+      session,
+      event,
+      successStatus: status,
+      extras: base,
+      ...(!freezePlan
+        ? {}
+        : {
+            prepare: async (reader: FeatureMutationReader) => {
+              const approval = await buildPlanApproval(reader);
+
+              if (!approval.ok) {
+                throw new StageFinalizeError(approval.error);
+              }
+
+              const approvals: FeatureApprovals = { plan: approval.record };
+              return { approvals };
+            },
+          }),
+    });
   }
 
   async #runStage(session: FeatureSession, stage: WorkStage): Promise<OrchestrationResult> {
@@ -209,6 +276,12 @@ export class WorkflowOrchestrator {
           "The persisted session is fixing without a recorded fix return state.",
         ),
       });
+    }
+
+    const approval = await this.#verifyApproval(featureId, stage, fromState);
+
+    if (!approval.ok) {
+      return this.#result({ ...base, status: "rejected", state: fromState, error: approval.error });
     }
 
     const context = await this.#gatherContext(featureId, contextPlan);
@@ -276,56 +349,70 @@ export class WorkflowOrchestrator {
       });
     }
 
-    let current: FeatureSession;
+    // Finalization is the only mutation a stage result can cause. It runs without any lock held
+    // while the executor works, and the store re-checks the revision inside the lock, so a stale
+    // result can neither write its artifacts nor apply its event to a later state.
+    return this.#commit({
+      featureId,
+      session,
+      ...(outcome.outcome === "inconclusive"
+        ? {}
+        : { event: outcome.outcome === "needs_fix" ? "request_fix" : definition.successEvent }),
+      successStatus:
+        outcome.outcome === "needs_fix"
+          ? "fix_requested"
+          : outcome.outcome === "inconclusive"
+            ? "inconclusive"
+            : "stage_completed",
+      extras: reported,
+      prepare: async (reader) => {
+        const reverified = await verifyPlanApproval(reader, stage, fromState);
 
+        if (!reverified.ok) {
+          throw new StageFinalizeError(reverified.error);
+        }
+
+        const artifacts: FeatureArtifactWrite[] = [];
+
+        for (const artifact of outcome.artifacts) {
+          const composed = await this.#composeArtifactContent(
+            reader,
+            stage,
+            artifact.name,
+            artifact.content,
+          );
+
+          if (!composed.ok) {
+            throw new StageFinalizeError(composed.error);
+          }
+
+          artifacts.push({ name: artifact.name, content: composed.content });
+        }
+
+        return { artifacts };
+      },
+    });
+  }
+
+  async #verifyApproval(
+    featureId: string,
+    stage: WorkStage,
+    state: WorkflowState,
+  ): Promise<ComposeOutcome> {
     try {
-      current = await this.#store.load(featureId);
+      const context = await this.#store.readContext(featureId);
+      const verification = await verifyPlanApproval(context, stage, state);
+
+      return verification.ok ? { ok: true, content: undefined } : { ok: false, error: verification.error };
     } catch (error) {
-      return this.#result({
-        ...reported,
-        status: "persistence_error",
-        state: fromState,
+      return {
+        ok: false,
         error: orchestrationError(
           "persistence_failed",
-          `Unable to reload the authoritative session: ${describeError(error)}`,
+          `Unable to verify the plan approval: ${describeError(error)}`,
         ),
-      });
+      };
     }
-
-    if (!snapshotsMatch(current.machine, session.machine)) {
-      return this.#result({
-        ...reported,
-        status: "rejected",
-        state: current.machine.state,
-        error: orchestrationError(
-          "state_conflict",
-          `The session moved to "${current.machine.state}" while stage "${stage}" was executing.`,
-        ),
-      });
-    }
-
-    const persisted = await this.#persistArtifacts(featureId, current, stage, outcome.artifacts, reported);
-
-    if (!persisted.ok) {
-      return persisted.result;
-    }
-
-    if (outcome.outcome === "inconclusive") {
-      return this.#result({
-        ...reported,
-        status: "inconclusive",
-        state: fromState,
-        artifacts: persisted.artifacts,
-      });
-    }
-
-    return this.#applyEvent(
-      featureId,
-      persisted.session,
-      outcome.outcome === "needs_fix" ? "request_fix" : definition.successEvent,
-      outcome.outcome === "needs_fix" ? "fix_requested" : "stage_completed",
-      { ...reported, artifacts: persisted.artifacts },
-    );
   }
 
   async #gatherContext(
@@ -375,77 +462,39 @@ export class WorkflowOrchestrator {
     return { ok: true, context };
   }
 
-  async #persistArtifacts(
-    featureId: string,
-    session: FeatureSession,
-    stage: WorkStage,
-    artifacts: readonly StageArtifactOutput[],
-    extra: ResultExtras,
-  ): Promise<PersistOutcome> {
-    let current = session;
-    const persisted: FeatureArtifactName[] = [];
-
-    for (const artifact of artifacts) {
-      const composed = await this.#composeArtifactContent(
-        featureId,
-        stage,
-        artifact.name,
-        artifact.content,
-      );
-
-      if (!composed.ok) {
-        return {
-          ok: false,
-          result: this.#result({
-            ...extra,
-            status: "rejected",
-            state: current.machine.state,
-            artifacts: persisted,
-            error: composed.error,
-          }),
-        };
-      }
-
-      try {
-        current = await this.#store.writeArtifact(featureId, artifact.name, composed.content);
-      } catch (error) {
-        return {
-          ok: false,
-          result: this.#result({
-            ...extra,
-            status: "persistence_error",
-            state: current.machine.state,
-            artifacts: persisted,
-            error: orchestrationError(
-              "persistence_failed",
-              `Unable to persist artifact "${artifact.name}": ${describeError(error)}`,
-            ),
-          }),
-        };
-      }
-
-      persisted.push(artifact.name);
-    }
-
-    return { ok: true, session: current, artifacts: persisted };
-  }
-
   async #composeArtifactContent(
-    featureId: string,
+    reader: FeatureMutationReader,
     stage: WorkStage,
     name: FeatureArtifactName,
     content: unknown,
   ): Promise<ComposeOutcome> {
     const spec = outputSpecFor(stage, name);
 
-    if (spec.envelopeKey === null) {
+    if (spec.kind === "history") {
+      const fixReturnState = reader.session.machine.fixReturnState;
+
+      if (fixReturnState === undefined) {
+        return {
+          ok: false,
+          error: orchestrationError(
+            "inconsistent_fix_state",
+            "A fix report cannot be recorded without a recorded fix return state.",
+          ),
+        };
+      }
+
+      const appended = await appendFixHistoryEntry(reader, fixReturnState, content);
+      return appended.ok ? { ok: true, content: appended.document } : { ok: false, error: appended.error };
+    }
+
+    if (spec.kind === "document") {
       return { ok: true, content };
     }
 
     let existing: unknown;
 
     try {
-      existing = await this.#store.readArtifact(featureId, name);
+      existing = await reader.readArtifact(name);
     } catch (error) {
       if (!isArtifactMissing(error)) {
         return {
@@ -461,7 +510,7 @@ export class WorkflowOrchestrator {
     }
 
     if (existing === undefined) {
-      return { ok: true, content: { [spec.envelopeKey]: content } };
+      return { ok: true, content: { [spec.envelopeKey as string]: content } };
     }
 
     if (!isRecord(existing)) {
@@ -474,65 +523,140 @@ export class WorkflowOrchestrator {
       };
     }
 
-    return { ok: true, content: { ...existing, [spec.envelopeKey]: content } };
+    return { ok: true, content: { ...existing, [spec.envelopeKey as string]: content } };
   }
 
-  async #applyEvent(
-    featureId: string,
-    session: FeatureSession,
-    event: WorkflowEvent,
-    successStatus: OrchestrationStatus,
-    extra: ResultExtras,
-  ): Promise<OrchestrationResult> {
-    const fromState = session.machine.state;
-    const machine = new WorkflowStateMachine(session.machine);
-    const preview = machine.transition(event);
+  /**
+   * The single mutation path. Every authoritative change flows through here so a stale caller is
+   * rejected before it can write an artifact or move the workflow, and so a reported failure can
+   * always be classified against the revision the caller expected to produce.
+   */
+  async #commit(input: CommitInput): Promise<OrchestrationResult> {
+    const { featureId, session, event, extras } = input;
+    const baseRevision = session.revision;
+    const expectedRevision = baseRevision + 1;
+    const baseMachine = session.machine;
+    let expected: WorkflowMachineSnapshot | null = null;
 
-    if (!preview.ok) {
-      return this.#result({
-        ...extra,
-        status: "rejected",
-        state: fromState,
-        event,
-        error: orchestrationError("illegal_transition", preview.message),
-      });
-    }
+    if (event !== undefined) {
+      const preview = previewMachine(session, event);
 
-    const expected = machine.snapshot;
-
-    try {
-      const applied = await this.#store.transition(featureId, event);
-
-      if (!applied.ok) {
+      if (!preview.ok) {
         return this.#result({
-          ...extra,
+          ...extras,
           status: "rejected",
-          state: fromState,
+          state: baseMachine.state,
           event,
-          error: orchestrationError("illegal_transition", applied.message),
+          error: preview.error,
         });
       }
+
+      expected = preview.snapshot;
+    }
+
+    try {
+      const outcome = await this.#store.mutate(featureId, {
+        expectedRevision: baseRevision,
+        prepare: async (reader) => {
+          const prepared = input.prepare === undefined ? {} : await input.prepare(reader);
+          return event === undefined ? prepared : { ...prepared, event };
+        },
+      });
+
+      if (event !== undefined) {
+        if (outcome.transition === null) {
+          throw new PersistenceError("INVALID_EVENT", "Workflow event is not recognized.");
+        }
+
+        if (!outcome.transition.ok) {
+          return this.#result({
+            ...extras,
+            status: "rejected",
+            state: baseMachine.state,
+            event,
+            error: orchestrationError("illegal_transition", outcome.transition.message),
+          });
+        }
+      }
+
+      return this.#result({
+        ...extras,
+        status: input.successStatus,
+        state: outcome.session.machine.state,
+        fixReturnState: outcome.session.machine.fixReturnState ?? null,
+        committed: true,
+        artifacts: outcome.artifacts,
+        event: event ?? null,
+      });
     } catch (error) {
-      return this.#recoverTransition(featureId, fromState, expected, event, error, extra);
+      if (error instanceof StageFinalizeError) {
+        return this.#result({
+          ...extras,
+          status: "rejected",
+          state: baseMachine.state,
+          event: event ?? null,
+          error: error.orchestrationError,
+        });
+      }
+
+      if (isRevisionConflict(error)) {
+        return this.#conflictResult(featureId, baseMachine.state, event, extras, error);
+      }
+
+      return this.#recoverMutation(
+        featureId,
+        baseRevision,
+        expectedRevision,
+        baseMachine,
+        expected,
+        event,
+        extras,
+        error,
+      );
+    }
+  }
+
+  /**
+   * A conflict is recoverable and never re-executes anything: the caller is told to run
+   * `runNext` again, which will pick up whatever the winning mutation left behind.
+   */
+  async #conflictResult(
+    featureId: string,
+    fromState: WorkflowState,
+    event: WorkflowEvent | undefined,
+    extras: ResultExtras,
+    failure: unknown,
+  ): Promise<OrchestrationResult> {
+    let state = fromState;
+
+    try {
+      state = (await this.#store.load(featureId)).machine.state;
+    } catch {
+      // Reporting the state the caller started from is still correct and never guesses.
     }
 
     return this.#result({
-      ...extra,
-      status: successStatus,
-      state: expected.state,
-      fixReturnState: expected.fixReturnState ?? null,
-      committed: true,
-      event,
+      ...extras,
+      status: "conflict",
+      state,
+      event: event ?? null,
+      committed: false,
+      error: orchestrationError(
+        "revision_conflict",
+        `Another mutation changed this feature while the stage result was in flight (${describeError(failure)}); nothing was written and no stage was re-executed.`,
+      ),
     });
   }
 
-  async #recoverTransition(
+  async #recoverMutation(
     featureId: string,
-    fromState: WorkflowState,
-    expected: WorkflowMachineSnapshot,
-    event: WorkflowEvent,
+    baseRevision: number,
+    expectedRevision: number,
+    baseMachine: WorkflowMachineSnapshot,
+    expected: WorkflowMachineSnapshot | null,
+    event: WorkflowEvent | undefined,
+    extras: ResultExtras,
     failure: unknown,
-    extra: ResultExtras,
   ): Promise<OrchestrationResult> {
     let observed: FeatureSession;
 
@@ -540,30 +664,62 @@ export class WorkflowOrchestrator {
       observed = await this.#store.load(featureId);
     } catch (error) {
       return this.#result({
-        ...extra,
+        ...extras,
         status: "persistence_error",
-        state: fromState,
-        event,
+        state: baseMachine.state,
+        event: event ?? null,
         error: orchestrationError(
           "persistence_verification_failed",
-          `Transition "${event}" failed (${describeError(failure)}) and the session could not be reloaded: ${describeError(error)}`,
+          `The mutation failed (${describeError(failure)}) and the session could not be reloaded: ${describeError(error)}`,
         ),
       });
     }
 
-    const committed = snapshotsMatch(observed.machine, expected);
+    const committed =
+      expected !== null &&
+      observed.revision === expectedRevision &&
+      snapshotsMatch(observed.machine, expected);
+
+    if (committed) {
+      return this.#result({
+        ...extras,
+        status: "persistence_error",
+        state: observed.machine.state,
+        event: event ?? null,
+        committed: true,
+        error: orchestrationError(
+          "persistence_transition_committed",
+          `The mutation committed at revision ${String(observed.revision)} before reporting failed; the event was not retried.`,
+        ),
+      });
+    }
+
+    const unchanged =
+      observed.revision === baseRevision && snapshotsMatch(observed.machine, baseMachine);
+
+    if (unchanged) {
+      return this.#result({
+        ...extras,
+        status: "persistence_error",
+        state: observed.machine.state,
+        event: event ?? null,
+        committed: false,
+        error: orchestrationError(
+          "persistence_transition_not_committed",
+          `The mutation did not commit; the feature is still at revision ${String(observed.revision)} in "${observed.machine.state}" and the stage stays retryable.`,
+        ),
+      });
+    }
 
     return this.#result({
-      ...extra,
+      ...extras,
       status: "persistence_error",
       state: observed.machine.state,
-      event,
-      committed,
+      event: event ?? null,
+      committed: false,
       error: orchestrationError(
-        committed ? "persistence_transition_committed" : "persistence_transition_not_committed",
-        committed
-          ? `Transition "${event}" committed before reporting failed; the session is now in "${observed.machine.state}" and the event was not retried.`
-          : `Transition "${event}" did not commit; the session remains in "${observed.machine.state}".`,
+        "persistence_transition_superseded",
+        `The mutation failed and the feature has already advanced to revision ${String(observed.revision)} in "${observed.machine.state}", so another mutation won the race.`,
       ),
     });
   }

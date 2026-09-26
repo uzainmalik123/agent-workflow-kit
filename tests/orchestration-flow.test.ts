@@ -226,7 +226,7 @@ describe("orchestrator full flow", () => {
       fromState: WorkflowState.Fixing,
       state: WorkflowState.RuntimeVerification,
       event: "complete_fix",
-      artifacts: [],
+      artifacts: ["fixes"],
     });
 
     const rechecked = await orchestrator.runNext("F-001");

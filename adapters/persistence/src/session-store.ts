@@ -10,9 +10,12 @@ import {
 import {
   FEATURE_ARTIFACT_FILENAMES,
   FEATURE_SESSION_SCHEMA_VERSION,
+  createEmptyApprovals,
   createEmptyArtifactReferences,
   type Clock,
   type CreateFeatureSessionInput,
+  type FeatureApprovals,
+  type FeatureArtifactReference,
   type FeatureEvent,
   type FeatureEventInput,
   type FeatureSession,
@@ -21,6 +24,14 @@ import {
 } from "./contracts.js";
 import { isFeatureArtifactName, parseArtifact, serializeArtifact } from "./artifacts.js";
 import { hasErrorCode, PersistenceError } from "./errors.js";
+import { FeatureLock, type FeatureLockOptions } from "./lock.js";
+import type {
+  FeatureArtifactWrite,
+  FeatureMutationPlan,
+  FeatureMutationReader,
+  FeatureReadContext,
+  FeatureMutationRequest,
+} from "./mutation.js";
 import {
   assertFeatureId,
   formatFeatureDirectoryName,
@@ -38,6 +49,15 @@ const EVENTS_FILENAME = "events.jsonl";
 
 export interface FeatureSessionStoreOptions {
   readonly clock?: Clock;
+  /** Tuning for the short-lived per-feature mutation lock. */
+  readonly lock?: FeatureLockOptions;
+}
+
+export interface FeatureMutationOutcome {
+  readonly session: FeatureSession;
+  readonly event: FeatureEvent | null;
+  readonly transition: TransitionResult | null;
+  readonly artifacts: readonly FeatureArtifactName[];
 }
 
 export interface FeatureSessionStoreConfig extends FeatureSessionStoreOptions {
@@ -104,6 +124,7 @@ interface ValidatedEventFields {
   readonly event: WorkflowEvent;
   readonly resultingState: WorkflowState;
   readonly success: boolean;
+  readonly revision: number;
   readonly errorCode?: string;
 }
 
@@ -128,16 +149,21 @@ function readEventFields(value: Record<string, unknown>, subject: string): Valid
     throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid success value.`);
   }
 
+  const revision = value["revision"];
+  if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 0) {
+    throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid revision.`);
+  }
+
   const errorCode = value["errorCode"];
   if (errorCode !== undefined && (typeof errorCode !== "string" || errorCode.length === 0)) {
     throw new PersistenceError("MALFORMED_EVENT_LOG", `${subject} has an invalid errorCode.`);
   }
 
   if (errorCode === undefined) {
-    return { previousState, event, resultingState, success };
+    return { previousState, event, resultingState, success, revision };
   }
 
-  return { previousState, event, resultingState, success, errorCode };
+  return { previousState, event, resultingState, success, revision, errorCode };
 }
 
 function makeEvent(
@@ -182,6 +208,7 @@ export class FeatureSessionStore {
   readonly agentflowRoot: string;
   readonly featuresRoot: string;
   readonly #clock: Clock;
+  readonly #lock: FeatureLock;
 
   constructor(repositoryRoot: string, options?: FeatureSessionStoreOptions);
   constructor(config: FeatureSessionStoreConfig);
@@ -209,6 +236,9 @@ export class FeatureSessionStore {
     this.agentflowRoot = join(this.repositoryRoot, ".agentflow");
     this.featuresRoot = join(this.agentflowRoot, "features");
     this.#clock = clock ?? systemClock;
+    this.#lock = new FeatureLock(
+      (typeof repositoryRootOrConfig === "string" ? options : repositoryRootOrConfig).lock,
+    );
   }
 
   featureDirectoryPath(featureId: string, slug: string): string {
@@ -261,10 +291,12 @@ export class FeatureSessionStore {
       featureId,
       slug,
       title,
+      revision: 0,
       createdAt: timestamp,
       updatedAt: timestamp,
       machine: new WorkflowStateMachine().snapshot,
       artifacts: createEmptyArtifactReferences(),
+      approvals: createEmptyApprovals(),
     };
 
     const sessionPath = join(directoryPath, SESSION_FILENAME);
@@ -283,6 +315,11 @@ export class FeatureSessionStore {
     return (await this.#loadLocation(featureId)).session;
   }
 
+  /**
+   * Low-level escape hatch: writes a session verbatim. Because it is not guarded by an
+   * optimistic precondition the caller owns the derivation, so a session may only replace a
+   * persisted revision exactly one lower than its own. Use `mutate` for workflow changes.
+   */
   async save(session: FeatureSession): Promise<FeatureSession> {
     const normalized = parseFeatureSessionDocument(session);
     const directoryName = formatFeatureDirectoryName(normalized.featureId, normalized.slug);
@@ -304,70 +341,286 @@ export class FeatureSessionStore {
     }
 
     const directoryExists = await this.#pathExists(directoryPath);
+
     if (directoryExists) {
       await this.#assertDirectory(directoryPath);
-      const existingSerialized = await this.#readOptionalText(join(directoryPath, SESSION_FILENAME));
-
-      if (existingSerialized !== undefined) {
-        const existingDocument = this.#parseSessionJson(existingSerialized, join(directoryPath, SESSION_FILENAME));
-        const existing = parseFeatureSessionDocument(existingDocument, {
-          expectedFeatureId: normalized.featureId,
-          expectedDirectoryName: directoryName,
-        });
-
-        if (existing.featureId !== normalized.featureId) {
-          throw new PersistenceError(
-            "FEATURE_MISMATCH",
-            "Refusing to overwrite a session belonging to a different feature.",
-          );
-        }
-      }
     } else {
       await this.#ensureFeaturesRoot();
 
       try {
         await mkdir(directoryPath);
       } catch (error) {
-        if (hasErrorCode(error, "EEXIST")) {
-          await this.#assertDirectory(directoryPath);
-        } else {
+        if (!hasErrorCode(error, "EEXIST")) {
           throw new PersistenceError(
             "IO_ERROR",
             `Unable to create feature directory "${directoryPath}".`,
             { cause: error, path: directoryPath },
           );
         }
+
+        await this.#assertDirectory(directoryPath);
       }
     }
 
-    const sessionPath = join(directoryPath, SESSION_FILENAME);
-    await this.atomicWriteFile(sessionPath, this.#serializeSession(normalized));
-    return normalized;
+    return this.#lock.withLock(directoryPath, async () => {
+      const existing = await this.#readExistingSession(
+        directoryPath,
+        normalized.featureId,
+        directoryName,
+      );
+
+      if (existing !== undefined && existing.revision + 1 !== normalized.revision) {
+        throw new PersistenceError(
+          "REVISION_CONFLICT",
+          `Refusing to write revision ${String(normalized.revision)} over persisted revision ${String(existing.revision)} for feature "${normalized.featureId}".`,
+          { path: join(directoryPath, SESSION_FILENAME) },
+        );
+      }
+
+      await this.#persistSessionFile(directoryPath, normalized);
+      return normalized;
+    });
   }
 
+  /**
+   * Metadata-only patch applied to the freshly re-read session, so a concurrent writer can
+   * never make the patch land on top of a newer revision. Workflow state is not patchable here.
+   */
   async update(featureId: string, update: FeatureSessionUpdater): Promise<FeatureSession> {
-    const current = await this.load(featureId);
-    const patch = typeof update === "function" ? update(current) : update;
+    const located = await this.#loadLocation(featureId);
 
-    if (!isRecord(patch)) {
-      throw new PersistenceError("INVALID_ARGUMENT", "Session update must be an object or function.");
+    return this.#lock.withLock(located.directoryPath, async () => {
+      const location = await this.#loadLocation(featureId);
+      const patch = typeof update === "function" ? update(location.session) : update;
+
+      if (!isRecord(patch)) {
+        throw new PersistenceError("INVALID_ARGUMENT", "Session update must be an object or function.");
+      }
+
+      if (patch["machine"] !== undefined) {
+        throw new PersistenceError(
+          "INVALID_ARGUMENT",
+          "Session update cannot patch the workflow state machine. Use a revision guarded event mutation instead.",
+        );
+      }
+
+      const next: FeatureSession = {
+        ...location.session,
+        title: patch["title"] === undefined ? location.session.title : patch["title"] as string,
+        revision: location.session.revision + 1,
+        updatedAt: requireTimestamp(this.#clock()),
+        artifacts:
+          patch["artifacts"] === undefined
+            ? location.session.artifacts
+            : patch["artifacts"] as FeatureSession["artifacts"],
+        approvals:
+          patch["approvals"] === undefined
+            ? location.session.approvals
+            : patch["approvals"] as FeatureApprovals,
+      };
+
+      await this.#persistSessionFile(location.directoryPath, next);
+      return next;
+    });
+  }
+
+  /**
+   * The single authoritative mutation path.
+   *
+   * The per-feature lock is held for the whole critical section, the persisted revision is
+   * re-checked inside it, and the plan is prepared against the state the mutation replaces.
+   * Artifacts are written first, then the session with the next revision, then the event log,
+   * so a reported failure can always be classified by reloading the session.
+   */
+  async mutate(featureId: string, request: FeatureMutationRequest): Promise<FeatureMutationOutcome> {
+    if (!isRecord(request) || typeof request.prepare !== "function") {
+      throw new PersistenceError("INVALID_ARGUMENT", "Mutation request must provide a prepare function.");
     }
 
+    const { expectedRevision, prepare } = request;
+
+    if (
+      expectedRevision !== undefined &&
+      (typeof expectedRevision !== "number" ||
+        !Number.isInteger(expectedRevision) ||
+        expectedRevision < 0)
+    ) {
+      throw new PersistenceError("INVALID_ARGUMENT", "expectedRevision must be a non-negative integer.");
+    }
+
+    const located = await this.#loadLocation(featureId);
+
+    return this.#lock.withLock(located.directoryPath, async () => {
+      const location = await this.#loadLocation(featureId);
+      const { session, directoryPath } = location;
+
+      if (expectedRevision !== undefined && session.revision !== expectedRevision) {
+        throw new PersistenceError(
+          "REVISION_CONFLICT",
+          `Feature "${featureId}" is at revision ${String(session.revision)} but the mutation expected revision ${String(expectedRevision)}.`,
+          { path: join(directoryPath, SESSION_FILENAME) },
+        );
+      }
+
+      const timestamp = requireTimestamp(this.#clock());
+      const plan = await prepare(this.#mutationReader(location, timestamp));
+
+      if (!isRecord(plan)) {
+        throw new PersistenceError("INVALID_ARGUMENT", "Mutation plan must be an object.");
+      }
+
+      return this.#commitMutation(location, plan, timestamp);
+    });
+  }
+
+  async #commitMutation(
+    location: FeatureLocation,
+    plan: FeatureMutationPlan,
+    timestamp: string,
+  ): Promise<FeatureMutationOutcome> {
+    const { session, directoryPath } = location;
+    const event = plan.event;
+    let machine = session.machine;
+    let transition: TransitionResult | null = null;
+    const previousState = session.machine.state;
+
+    if (event !== undefined) {
+      if (!isWorkflowEvent(event)) {
+        throw new PersistenceError("INVALID_EVENT", "Workflow event is not recognized.");
+      }
+
+      const workflow = new WorkflowStateMachine(session.machine);
+      const applied = workflow.transition(event);
+      transition = applied;
+
+      if (!applied.ok) {
+        const refused = makeEvent(session.featureId, timestamp, {
+          previousState,
+          event,
+          resultingState: applied.state,
+          success: false,
+          errorCode: applied.code,
+          revision: session.revision,
+        });
+
+        await this.#appendEventAt(directoryPath, refused);
+
+        return { session, event: refused, transition: applied, artifacts: [] };
+      }
+
+      machine = workflow.snapshot;
+    }
+
+    const written = await this.#writeArtifacts(directoryPath, plan.artifacts ?? [], timestamp);
     const next: FeatureSession = {
-      schemaVersion: current.schemaVersion,
-      featureId: current.featureId,
-      slug: current.slug,
-      title: patch["title"] === undefined ? current.title : patch["title"] as string,
-      createdAt: current.createdAt,
-      updatedAt: requireTimestamp(this.#clock()),
-      machine: patch["machine"] === undefined ? current.machine : patch["machine"] as FeatureSession["machine"],
-      artifacts:
-        patch["artifacts"] === undefined
-          ? current.artifacts
-          : patch["artifacts"] as FeatureSession["artifacts"],
+      ...session,
+      title: plan.title === undefined ? session.title : plan.title,
+      revision: session.revision + 1,
+      updatedAt: timestamp,
+      machine,
+      artifacts: { ...session.artifacts, ...written.references },
+      approvals: plan.approvals === undefined ? session.approvals : plan.approvals,
     };
 
-    return this.save(next);
+    try {
+      await this.#persistSessionFile(directoryPath, next);
+    } catch (error) {
+      await written.rollback(error);
+      throw error;
+    }
+
+    let appended: FeatureEvent | null = null;
+
+    if (event !== undefined && transition !== null && transition.ok) {
+      appended = makeEvent(session.featureId, timestamp, {
+        previousState,
+        event,
+        resultingState: transition.state,
+        success: true,
+        revision: next.revision,
+      });
+      await this.#appendEventAt(directoryPath, appended);
+    }
+
+    return { session: next, event: appended, transition, artifacts: written.names };
+  }
+
+  #readContext(location: FeatureLocation): FeatureReadContext {
+    return {
+      session: location.session,
+      readArtifact: async (name) => this.#readArtifactAt(location, name),
+      readArtifactText: async (name) => this.#readArtifactTextAt(location, name),
+    };
+  }
+
+  /**
+   * A read-only view for coordination-free verification, such as checking an approval checkpoint
+   * before an executor is called. It never mutates and takes no lock.
+   */
+  async readContext(featureId: string): Promise<FeatureReadContext> {
+    return this.#readContext(await this.#loadLocation(featureId));
+  }
+
+  #mutationReader(location: FeatureLocation, timestamp: string): FeatureMutationReader {
+    return {
+      ...this.#readContext(location),
+      timestamp,
+      nextRevision: location.session.revision + 1,
+    };
+  }
+
+  async #writeArtifacts(
+    directoryPath: string,
+    writes: readonly FeatureArtifactWrite[],
+    timestamp: string,
+  ): Promise<{
+    readonly references: Readonly<Record<string, FeatureArtifactReference>>;
+    readonly names: FeatureArtifactName[];
+    readonly rollback: (failure: unknown) => Promise<void>;
+  }> {
+    const references: Record<string, FeatureArtifactReference> = {};
+    const names: FeatureArtifactName[] = [];
+    const previous: { readonly path: string; readonly serialized: string | undefined }[] = [];
+
+    const rollback = async (failure: unknown): Promise<void> => {
+      for (const entry of [...previous].reverse()) {
+        await this.#restoreArtifact(entry.path, entry.serialized, failure);
+      }
+    };
+
+    for (const write of writes) {
+      if (!isRecord(write) || !isFeatureArtifactName(write.name)) {
+        throw new PersistenceError(
+          "INVALID_ARTIFACT_NAME",
+          "Artifact name is not controlled by the library.",
+        );
+      }
+
+      if (names.includes(write.name)) {
+        throw new PersistenceError(
+          "INVALID_ARGUMENT",
+          `Artifact "${write.name}" is written twice in one mutation.`,
+        );
+      }
+
+      const filename = FEATURE_ARTIFACT_FILENAMES[write.name];
+      const artifactPath = join(directoryPath, filename);
+      const earlier = await this.#readOptionalText(artifactPath);
+      const serialized = serializeArtifact(write.name, write.content);
+
+      try {
+        await this.atomicWriteFile(artifactPath, serialized);
+      } catch (error) {
+        await rollback(error);
+        throw error;
+      }
+
+      previous.push({ path: artifactPath, serialized: earlier });
+      names.push(write.name);
+      references[write.name] = { filename, status: "present", updatedAt: timestamp };
+    }
+
+    return { references, names, rollback };
   }
 
   async list(): Promise<FeatureSession[]> {
@@ -377,6 +630,7 @@ export class FeatureSessionStore {
 
     for (const candidate of candidates) {
       const session = await this.#loadDirectory(candidate, candidate.featureId);
+
       if (featureIds.has(session.featureId)) {
         throw new PersistenceError(
           "DUPLICATE_FEATURE_DIRECTORY",
@@ -414,44 +668,27 @@ export class FeatureSessionStore {
     }
   }
 
-  async transition(featureId: string, event: WorkflowEvent): Promise<TransitionResult> {
+  async transition(
+    featureId: string,
+    event: WorkflowEvent,
+    expectedRevision?: number,
+  ): Promise<TransitionResult> {
     if (!isWorkflowEvent(event)) {
       throw new PersistenceError("INVALID_EVENT", "Workflow event is not recognized.");
     }
 
-    const location = await this.#loadLocation(featureId);
-    const machine = new WorkflowStateMachine(location.session.machine);
-    const previousState = machine.state;
-    const result = machine.transition(event);
-    const timestamp = requireTimestamp(this.#clock());
+    const result = await this.mutate(
+      featureId,
+      expectedRevision === undefined
+        ? { prepare: () => ({ event }) }
+        : { expectedRevision, prepare: () => ({ event }) },
+    );
 
-    if (result.ok) {
-      const updatedSession: FeatureSession = {
-        ...location.session,
-        updatedAt: timestamp,
-        machine: machine.snapshot,
-      };
-
-      await this.save(updatedSession);
+    if (result.transition === null) {
+      throw new PersistenceError("INVALID_EVENT", "Workflow event is not recognized.");
     }
 
-    const eventInput: FeatureEventInput = result.ok
-      ? {
-          previousState,
-          event,
-          resultingState: result.state,
-          success: true,
-        }
-      : {
-          previousState,
-          event,
-          resultingState: result.state,
-          success: false,
-          errorCode: result.code,
-        };
-
-    await this.#appendEventAt(location.directoryPath, makeEvent(featureId, timestamp, eventInput));
-    return result;
+    return result.transition;
   }
 
   async writeArtifact(
@@ -463,58 +700,87 @@ export class FeatureSessionStore {
       throw new PersistenceError("INVALID_ARTIFACT_NAME", "Artifact name is not controlled by the library.");
     }
 
-    const location = await this.#loadLocation(featureId);
-    const filename = FEATURE_ARTIFACT_FILENAMES[name];
-    const artifactPath = join(location.directoryPath, filename);
-    const previous = await this.#readOptionalText(artifactPath);
-    const serialized = serializeArtifact(name, content);
-    const timestamp = requireTimestamp(this.#clock());
-    await this.atomicWriteFile(artifactPath, serialized);
-    const updatedSession: FeatureSession = {
-      ...location.session,
-      updatedAt: timestamp,
-      artifacts: {
-        ...location.session.artifacts,
-        [name]: {
-          filename,
-          status: "present",
-          updatedAt: timestamp,
-        },
-      },
-    };
+    const result = await this.mutate(featureId, {
+      prepare: () => ({ artifacts: [{ name, content }] }),
+    });
 
-    try {
-      return await this.save(updatedSession);
-    } catch (error) {
-      await this.#restoreArtifact(artifactPath, previous, error);
-      throw error;
-    }
+    return result.session;
   }
 
   async readArtifact(featureId: string, name: FeatureArtifactName): Promise<unknown> {
-    if (!isFeatureArtifactName(name)) {
-      throw new PersistenceError("INVALID_ARTIFACT_NAME", "Artifact name is not controlled by the library.");
-    }
+    return this.#readArtifactAt(await this.#loadLocation(featureId), name);
+  }
 
+  /** The exact persisted artifact bytes, which is what approval digests are taken over. */
+  async readArtifactText(featureId: string, name: FeatureArtifactName): Promise<string> {
     const location = await this.#loadLocation(featureId);
-    const filename = FEATURE_ARTIFACT_FILENAMES[name];
-    const artifactPath = join(location.directoryPath, filename);
-    const serialized = await this.#readOptionalText(artifactPath);
+    const serialized = await this.#readArtifactTextAt(location, name);
 
     if (serialized === undefined) {
       throw new PersistenceError(
         "ARTIFACT_NOT_FOUND",
         `Artifact "${name}" does not exist for feature "${featureId}".`,
-        { path: artifactPath },
+        { path: this.#artifactPath(location, name) },
+      );
+    }
+
+    return serialized;
+  }
+
+  async readEvents(featureId: string): Promise<FeatureEvent[]> {
+    const location = await this.#loadLocation(featureId);
+    return this.#readEventsAt(location.directoryPath, featureId);
+  }
+
+  #artifactPath(location: FeatureLocation, name: FeatureArtifactName): string {
+    return join(location.directoryPath, FEATURE_ARTIFACT_FILENAMES[name]);
+  }
+
+  async #readArtifactTextAt(
+    location: FeatureLocation,
+    name: FeatureArtifactName,
+  ): Promise<string | undefined> {
+    if (!isFeatureArtifactName(name)) {
+      throw new PersistenceError("INVALID_ARTIFACT_NAME", "Artifact name is not controlled by the library.");
+    }
+
+    return this.#readOptionalText(this.#artifactPath(location, name));
+  }
+
+  async #readArtifactAt(location: FeatureLocation, name: FeatureArtifactName): Promise<unknown> {
+    const serialized = await this.#readArtifactTextAt(location, name);
+
+    if (serialized === undefined) {
+      throw new PersistenceError(
+        "ARTIFACT_NOT_FOUND",
+        `Artifact "${name}" does not exist for feature "${location.session.featureId}".`,
+        { path: this.#artifactPath(location, name) },
       );
     }
 
     return parseArtifact(name, serialized);
   }
 
-  async readEvents(featureId: string): Promise<FeatureEvent[]> {
-    const location = await this.#loadLocation(featureId);
-    return this.#readEventsAt(location.directoryPath, featureId);
+  async #readExistingSession(
+    directoryPath: string,
+    featureId: string,
+    directoryName: string,
+  ): Promise<FeatureSession | undefined> {
+    const sessionPath = join(directoryPath, SESSION_FILENAME);
+    const serialized = await this.#readOptionalText(sessionPath);
+
+    if (serialized === undefined) {
+      return undefined;
+    }
+
+    const document = this.#parseSessionJson(serialized, sessionPath);
+
+    return parseFeatureSessionDocument(document, { expectedFeatureId: featureId, expectedDirectoryName: directoryName });
+  }
+
+  async #persistSessionFile(directoryPath: string, session: FeatureSession): Promise<void> {
+    await this.#assertDirectory(directoryPath);
+    await this.atomicWriteFile(join(directoryPath, SESSION_FILENAME), this.#serializeSession(session));
   }
 
   async #loadLocation(featureId: string): Promise<FeatureLocation> {

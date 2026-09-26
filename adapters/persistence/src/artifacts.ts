@@ -14,6 +14,7 @@ const jsonArtifactNames = new Set<FeatureArtifactName>([
   "scope_review",
   "verification",
   "security_review",
+  "fixes",
 ]);
 
 const textArtifactNames = new Set<FeatureArtifactName>(["request", "final_summary"]);
