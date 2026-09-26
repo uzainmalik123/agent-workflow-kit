@@ -210,6 +210,9 @@ importers:
       '@agent-workflow-kit/core':
         specifier: workspace:*
         version: link:core
+      '@agent-workflow-kit/opencode':
+        specifier: workspace:*
+        version: link:adapters/opencode
       '@agent-workflow-kit/orchestration':
         specifier: workspace:*
         version: link:orchestration
@@ -234,6 +237,18 @@ importers:
       vitest:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@22.20.4)(vite@8.3.0(@types/node@22.20.4))
+
+  adapters/opencode:
+    dependencies:
+      '@agent-workflow-kit/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@agent-workflow-kit/orchestration':
+        specifier: workspace:*
+        version: link:../../orchestration
+      '@agent-workflow-kit/persistence':
+        specifier: workspace:*
+        version: link:../persistence
 
   adapters/persistence:
     dependencies:

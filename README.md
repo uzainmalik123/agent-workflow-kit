@@ -2,7 +2,7 @@
 
 Agent Workflow Kit provides a coding-agent-independent software development workflow that can be installed into arbitrary repositories.
 
-Milestones 1–4 establish the repository, domain contracts, the deterministic in-memory lifecycle engine, repository-local persistent feature sessions, and the agent-independent workflow orchestrator. Milestone 4.1 hardens that orchestrator: optimistic revision concurrency, a frozen plan approval checkpoint, and a durable fix history. The project still does not execute features: no AI model, project command, Git operation, agent integration, template, or CLI behavior is implemented.
+Milestones 1–4 establish the repository, domain contracts, the deterministic in-memory lifecycle engine, repository-local persistent feature sessions, and the agent-independent workflow orchestrator. Milestone 4.1 hardens that orchestrator: optimistic revision concurrency, a frozen plan approval checkpoint, and a durable fix history. Milestone 5 adds the first real agent adapter: `adapters/opencode/` drives a workflow stage with OpenCode, under eleven role definitions, least-privilege generated permissions, deterministic prompts, and a structured response protocol. The project still does not execute features on its own: no project command, Git operation, third-party agent integration, template, installer, or CLI behavior is implemented.
 
 ## Workspace
 
@@ -11,10 +11,10 @@ The repository is a pnpm workspace:
 - `core/` contains the agent-independent domain model and public core package.
 - `orchestration/` maps workflow state to work, artifacts, and a legal transition; it depends on the core and on the persistence adapter.
 - `apps/cli/` reserves the future CLI package and its dependency on the core; it contains no CLI implementation yet.
-- `adapters/` is the boundary for agent adapters and project adapters; `adapters/persistence/` provides the repository-local session and artifact store.
+- `adapters/` is the boundary for agent adapters and project adapters; `adapters/persistence/` provides the repository-local session and artifact store, and `adapters/opencode/` provides the OpenCode agent adapter.
 - `integrations/` is the boundary for external-system integrations.
 - `templates/` will hold reusable workflow and project templates.
-- `fixtures/` contains deterministic sample data for tests, including a fake stage executor that never calls a model.
+- `fixtures/` contains deterministic sample data for tests, including a fake stage executor and a fake OpenCode transport, neither of which ever calls a model.
 - `tests/` contains cross-package contract and behavior tests.
 
 The workspace configuration also reserves package locations below `adapters/`, `integrations/`, and `apps/` so those boundaries can grow independently.
@@ -45,7 +45,11 @@ Every decision is a revision-guarded mutation, so a stage result produced agains
 
 ### Agent adapters and other outer layers
 
-Agent adapters translate between core contracts and a specific coding agent's capabilities, payloads, and responses. An agent adapter implements the orchestration `StageExecutor` port, so agent-specific APIs stay inside adapter packages. The core must never import an adapter or depend on a coding-agent SDK, and the orchestrator must never import an adapter. Agent adapters, integrations, templates, and the user-facing CLI remain deferred.
+Agent adapters translate between core contracts and a specific coding agent's capabilities, payloads, and responses. An agent adapter implements the orchestration `StageExecutor` port, so agent-specific APIs stay inside adapter packages. The core must never import an adapter or depend on a coding-agent SDK, and the orchestrator must never import an adapter.
+
+`adapters/opencode/` is the first such adapter. It maps the thirteen workflow stages onto eleven OpenCode roles, generates each role's agent file and least-privilege permission map, builds a deterministic prompt from the orchestrator-routed request alone, runs the agent through a substitutable transport, and translates exactly one fenced JSON payload back into a `StageExecutionResult`. It refuses anything else: prose, a foreign feature or stage, an artifact the stage does not own, a workflow-control field, an empty response, a non-zero exit, or a timeout. Nothing in it chooses a transition, approves a gate, runs a command, or touches Git. The roles, permissions, prompt boundary, response protocol, transport properties, generated files, and the recorded installer policy are described in `adapters/opencode/README.md`.
+
+Other agent adapters, integrations, templates, the installer, and the user-facing CLI remain deferred.
 
 ### Project adapters
 
@@ -55,7 +59,7 @@ Project adapters encapsulate access to project resources and tools, such as repo
 
 Integrations connect the kit to external systems and services. They own external I/O and service-specific representations while depending on shared contracts. External behavior must not leak into or become a dependency of the core.
 
-The dependency direction is intentionally one-way: outer layers may depend on core contracts; core never depends on a CLI, adapter, integration, or coding agent. The orchestrator sits above the core and the persistence adapter and is depended on only by adapters and the future CLI.
+The dependency direction is intentionally one-way: outer layers may depend on core contracts; core never depends on a CLI, adapter, integration, or coding agent. The orchestrator sits above the core and the persistence adapter and is depended on only by adapters and the future CLI. The OpenCode adapter sits above all three and is depended on by nothing.
 
 ## Toolchain
 

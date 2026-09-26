@@ -1,6 +1,11 @@
 # Adapters
 
-This boundary contains project adapters and is reserved for agent adapters. The `persistence/` project adapter depends on the workflow core and owns repository-local sessions, artifacts, and event logs; the workflow core must never depend on an adapter. Agent adapters and external integrations remain deferred.
+This boundary contains project adapters and agent adapters. The `persistence/` project adapter depends on the workflow core and owns repository-local sessions, artifacts, and event logs; the `opencode/` agent adapter depends on the core, the persistence adapter, and the orchestrator. The workflow core must never depend on an adapter, and the orchestrator must never import one. Other agent adapters and external integrations remain deferred.
+
+| Adapter | Kind | Depends on | Owns |
+| --- | --- | --- | --- |
+| `persistence/` | project adapter | core | sessions, controlled artifacts, event logs, locks, path safety |
+| `opencode/` | agent adapter | core, persistence, orchestration | roles, permissions, prompt boundary, response protocol, transport |
 
 ## persistence
 

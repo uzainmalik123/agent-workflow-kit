@@ -1,0 +1,155 @@
+import {
+  type StageExecutionRequest,
+  type StageExecutionResult,
+  type StageExecutor,
+} from "@agent-workflow-kit/orchestration";
+import { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
+import { buildStagePrompt } from "./prompts.js";
+import {
+  loadProjectInstructions,
+  type LoadProjectInstructionsOptions,
+  type ProjectInstructions,
+} from "./project-instructions.js";
+import { parseStageResponse } from "./response-protocol.js";
+import { agentForRole, agentForStage } from "./roles.js";
+import { DEFAULT_TIMEOUT_MS, type OpenCodeTransport } from "./transport.js";
+
+export interface OpenCodeStageExecutorOptions {
+  readonly transport: OpenCodeTransport;
+  /** The repository the agent runs in, and the only project the adapter knows about. */
+  readonly workingDirectory: string;
+  readonly model?: string | null;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal | null;
+  /**
+   * Repository guidance, overriding the file lookup. Always subordinate to the framework rules.
+   */
+  readonly projectInstructions?: ProjectInstructions | null;
+  /**
+   * Reads `AGENTS.md` from the working directory when guidance is not supplied explicitly. A
+   * missing file is not an error: most projects have none, and the adapter simply sends no
+   * repository instructions. An unreadable or unsafe one is a refusal, not a silent downgrade.
+   */
+  readonly loadProjectInstructionsFromDisk?: boolean;
+  readonly projectInstructionsOptions?: LoadProjectInstructionsOptions;
+}
+
+/**
+ * The OpenCode implementation of the orchestration `StageExecutor` port.
+ *
+ * ```
+ * StageExecutionRequest
+ *   -> prompt and agent id            (deterministic, orchestrator-routed context only)
+ *   -> OpenCodeTransport              (substitutable; the real one spawns the CLI)
+ *   -> structured response parsing     (a fenced JSON payload, never prose)
+ *   -> StageExecutionResult
+ * ```
+ *
+ * The adapter translates and refuses. It never decides a workflow transition, never approves a
+ * gate, and never turns an unusable agent response into a stage outcome: a transport failure, a
+ * timeout, a non-zero exit, malformed output, a mismatched feature or stage, a forbidden artifact
+ * name, or a smuggled workflow field is thrown as an `OpenCodeAdapterError` so the orchestrator
+ * reports an executor failure instead of trusting the agent.
+ */
+export class OpenCodeStageExecutor implements StageExecutor {
+  readonly #transport: OpenCodeTransport;
+  readonly #options: OpenCodeStageExecutorOptions;
+
+  constructor(options: OpenCodeStageExecutorOptions) {
+    this.#transport = options.transport;
+    this.#options = options;
+  }
+
+  async execute(request: StageExecutionRequest): Promise<StageExecutionResult> {
+    const agent = agentForStage(request.stage);
+
+    if (agentForRole(request.role) !== agent) {
+      throw new OpenCodeAdapterError(
+        "role_mismatch",
+        `Stage "${request.stage}" runs as agent "${agent}", but the request asked for role "${request.role}".`,
+      );
+    }
+
+    const prompt = buildStagePrompt({
+      request,
+      projectInstructions: await this.#projectInstructions(),
+    });
+
+    const raw = await this.#invoke(agent, prompt, request);
+
+    if (raw.agent !== agent) {
+      throw new OpenCodeAdapterError(
+        "transport_failed",
+        `The OpenCode transport answered for agent "${raw.agent}" but was asked to run "${agent}".`,
+      );
+    }
+
+    if (raw.exitCode !== 0) {
+      throw new OpenCodeAdapterError(
+        "non_zero_exit",
+        `The OpenCode run for agent "${agent}" exited with code ${String(raw.exitCode)}.`,
+      );
+    }
+
+    if (raw.text.trim().length === 0) {
+      throw new OpenCodeAdapterError(
+        "empty_response",
+        `The OpenCode run for agent "${agent}" returned no response text.`,
+      );
+    }
+
+    return parseStageResponse(raw.text, request);
+  }
+
+  async #projectInstructions(): Promise<ProjectInstructions | null> {
+    if (this.#options.projectInstructions !== undefined) {
+      return this.#options.projectInstructions;
+    }
+
+    if (this.#options.loadProjectInstructionsFromDisk === false) {
+      return null;
+    }
+
+    return loadProjectInstructions(
+      this.#options.workingDirectory,
+      this.#options.projectInstructionsOptions,
+    );
+  }
+
+  async #invoke(
+    agent: string,
+    prompt: string,
+    request: StageExecutionRequest,
+  ): Promise<Awaited<ReturnType<OpenCodeTransport["run"]>>> {
+    try {
+      return await this.#transport.run({
+        agent,
+        prompt,
+        workingDirectory: this.#options.workingDirectory,
+        featureId: request.feature.featureId,
+        stage: request.stage,
+        role: request.role,
+        fixReturnState: request.fixReturnState,
+        model: this.#options.model ?? null,
+        timeoutMs: this.#options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        signal: this.#options.signal ?? null,
+      });
+    } catch (error) {
+      if (isOpenCodeAdapterError(error)) {
+        throw error;
+      }
+
+      throw new OpenCodeAdapterError(
+        "transport_failed",
+        `The OpenCode transport failed while running agent "${agent}".`,
+        { cause: error },
+      );
+    }
+  }
+}
+
+export function createOpenCodeStageExecutor(
+  options: OpenCodeStageExecutorOptions,
+): OpenCodeStageExecutor {
+  return new OpenCodeStageExecutor(options);
+}
