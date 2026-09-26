@@ -5,7 +5,6 @@ import {
   createFeatureSessionStore,
   FeatureSessionStore,
   PersistenceError,
-  type FeatureSessionUpdate,
 } from "@agent-workflow-kit/persistence";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -148,39 +147,6 @@ describe("feature session revisions", () => {
       code: "ARTIFACT_NOT_FOUND",
     });
     expect((await store.load("F-001")).revision).toBe(current.revision);
-  });
-
-  it("refuses a raw session save that does not advance the persisted revision", async () => {
-    const store = await createStore(await makeRoot());
-    const before = (await store.load("F-001")).revision;
-
-    await store.mutate("F-001", {
-      expectedRevision: before,
-      prepare: () => ({ artifacts: [{ name: "plan", content: { plan: true } }] }),
-    });
-
-    const session = await store.load("F-001");
-
-    expect(session.revision).toBe(before + 1);
-
-    for (const revision of [0, before, before + 3]) {
-      await expect(
-        store.save({ ...session, revision, updatedAt: fixedTimestamp }),
-      ).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
-    }
-
-    expect((await store.load("F-001")).revision).toBe(before + 1);
-  });
-
-  it("rejects a patch that tries to replace the state machine", async () => {
-    const store = await createStore(await makeRoot());
-    const patch = { machine: { state: "complete" } } as unknown as FeatureSessionUpdate;
-
-    await expect(store.update("F-001", patch)).rejects.toMatchObject({
-      code: "INVALID_ARGUMENT",
-    });
-
-    expect((await store.load("F-001")).machine.state).toBe("draft");
   });
 
   it("survives a restart with the same revision and event history", async () => {

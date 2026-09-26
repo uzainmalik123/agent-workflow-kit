@@ -14,12 +14,10 @@ import {
   createEmptyArtifactReferences,
   type Clock,
   type CreateFeatureSessionInput,
-  type FeatureApprovals,
   type FeatureArtifactReference,
   type FeatureEvent,
   type FeatureEventInput,
   type FeatureSession,
-  type FeatureSessionUpdater,
   type FeatureArtifactName,
 } from "./contracts.js";
 import { isFeatureArtifactName, parseArtifact, serializeArtifact } from "./artifacts.js";
@@ -46,6 +44,14 @@ import {
 
 const SESSION_FILENAME = "session.json";
 const EVENTS_FILENAME = "events.jsonl";
+
+/** The only fields a mutation plan is allowed to set. */
+const MUTATION_PLAN_FIELDS: ReadonlySet<string> = new Set([
+  "title",
+  "artifacts",
+  "approvals",
+  "event",
+]);
 
 export interface FeatureSessionStoreOptions {
   readonly clock?: Clock;
@@ -316,116 +322,14 @@ export class FeatureSessionStore {
   }
 
   /**
-   * Low-level escape hatch: writes a session verbatim. Because it is not guarded by an
-   * optimistic precondition the caller owns the derivation, so a session may only replace a
-   * persisted revision exactly one lower than its own. Use `mutate` for workflow changes.
-   */
-  async save(session: FeatureSession): Promise<FeatureSession> {
-    const normalized = parseFeatureSessionDocument(session);
-    const directoryName = formatFeatureDirectoryName(normalized.featureId, normalized.slug);
-    const directoryPath = join(this.featuresRoot, directoryName);
-    const candidates = await this.#findCandidates(normalized.featureId);
-
-    if (candidates.length > 1) {
-      throw new PersistenceError(
-        "DUPLICATE_FEATURE_DIRECTORY",
-        `Feature "${normalized.featureId}" has multiple session directories.`,
-      );
-    }
-
-    if (candidates.length === 1 && candidates[0]?.directoryName !== directoryName) {
-      throw new PersistenceError(
-        "DUPLICATE_FEATURE_DIRECTORY",
-        `Feature "${normalized.featureId}" has a conflicting session directory.`,
-      );
-    }
-
-    const directoryExists = await this.#pathExists(directoryPath);
-
-    if (directoryExists) {
-      await this.#assertDirectory(directoryPath);
-    } else {
-      await this.#ensureFeaturesRoot();
-
-      try {
-        await mkdir(directoryPath);
-      } catch (error) {
-        if (!hasErrorCode(error, "EEXIST")) {
-          throw new PersistenceError(
-            "IO_ERROR",
-            `Unable to create feature directory "${directoryPath}".`,
-            { cause: error, path: directoryPath },
-          );
-        }
-
-        await this.#assertDirectory(directoryPath);
-      }
-    }
-
-    return this.#lock.withLock(directoryPath, async () => {
-      const existing = await this.#readExistingSession(
-        directoryPath,
-        normalized.featureId,
-        directoryName,
-      );
-
-      if (existing !== undefined && existing.revision + 1 !== normalized.revision) {
-        throw new PersistenceError(
-          "REVISION_CONFLICT",
-          `Refusing to write revision ${String(normalized.revision)} over persisted revision ${String(existing.revision)} for feature "${normalized.featureId}".`,
-          { path: join(directoryPath, SESSION_FILENAME) },
-        );
-      }
-
-      await this.#persistSessionFile(directoryPath, normalized);
-      return normalized;
-    });
-  }
-
-  /**
-   * Metadata-only patch applied to the freshly re-read session, so a concurrent writer can
-   * never make the patch land on top of a newer revision. Workflow state is not patchable here.
-   */
-  async update(featureId: string, update: FeatureSessionUpdater): Promise<FeatureSession> {
-    const located = await this.#loadLocation(featureId);
-
-    return this.#lock.withLock(located.directoryPath, async () => {
-      const location = await this.#loadLocation(featureId);
-      const patch = typeof update === "function" ? update(location.session) : update;
-
-      if (!isRecord(patch)) {
-        throw new PersistenceError("INVALID_ARGUMENT", "Session update must be an object or function.");
-      }
-
-      if (patch["machine"] !== undefined) {
-        throw new PersistenceError(
-          "INVALID_ARGUMENT",
-          "Session update cannot patch the workflow state machine. Use a revision guarded event mutation instead.",
-        );
-      }
-
-      const next: FeatureSession = {
-        ...location.session,
-        title: patch["title"] === undefined ? location.session.title : patch["title"] as string,
-        revision: location.session.revision + 1,
-        updatedAt: requireTimestamp(this.#clock()),
-        artifacts:
-          patch["artifacts"] === undefined
-            ? location.session.artifacts
-            : patch["artifacts"] as FeatureSession["artifacts"],
-        approvals:
-          patch["approvals"] === undefined
-            ? location.session.approvals
-            : patch["approvals"] as FeatureApprovals,
-      };
-
-      await this.#persistSessionFile(location.directoryPath, next);
-      return next;
-    });
-  }
-
-  /**
-   * The single authoritative mutation path.
+   * The single authoritative mutation path, and deliberately the only way to write a session.
+   *
+   * A `save(session)` or a metadata patch would let a caller replace the workflow state machine,
+   * the revision, the feature identity, or the approval checkpoint with anything that parses,
+   * which is exactly the authority this method exists to withhold: every workflow change has to
+   * arrive as a real `WorkflowEvent` that the state machine accepts, committed against a revision
+   * the caller read. Renaming a feature is `mutate(featureId, { expectedRevision, prepare })`
+   * returning `{ title }`; there is no shortcut and no escape hatch.
    *
    * The per-feature lock is held for the whole critical section, the persisted revision is
    * re-checked inside it, and the plan is prepared against the state the mutation replaces.
@@ -468,6 +372,8 @@ export class FeatureSessionStore {
       if (!isRecord(plan)) {
         throw new PersistenceError("INVALID_ARGUMENT", "Mutation plan must be an object.");
       }
+
+      this.#assertPlanIsChangeable(plan);
 
       return this.#commitMutation(location, plan, timestamp);
     });
@@ -559,6 +465,24 @@ export class FeatureSessionStore {
    */
   async readContext(featureId: string): Promise<FeatureReadContext> {
     return this.#readContext(await this.#loadLocation(featureId));
+  }
+
+  /**
+   * A mutation plan may only carry the fields the store itself derives. Anything else, especially
+   * `machine` or `revision`, is refused rather than ignored, so a caller can never believe it
+   * replaced workflow state.
+   */
+  #assertPlanIsChangeable(plan: Record<string, unknown>): void {
+    for (const key of Object.keys(plan)) {
+      if (!MUTATION_PLAN_FIELDS.has(key)) {
+        throw new PersistenceError(
+          "INVALID_ARGUMENT",
+          `Mutation plan may not carry "${key}". A mutation can only change ${[
+            ...MUTATION_PLAN_FIELDS,
+          ].join(", ")}; workflow state changes exclusively through a WorkflowEvent.`,
+        );
+      }
+    }
   }
 
   #mutationReader(location: FeatureLocation, timestamp: string): FeatureMutationReader {
@@ -759,23 +683,6 @@ export class FeatureSessionStore {
     }
 
     return parseArtifact(name, serialized);
-  }
-
-  async #readExistingSession(
-    directoryPath: string,
-    featureId: string,
-    directoryName: string,
-  ): Promise<FeatureSession | undefined> {
-    const sessionPath = join(directoryPath, SESSION_FILENAME);
-    const serialized = await this.#readOptionalText(sessionPath);
-
-    if (serialized === undefined) {
-      return undefined;
-    }
-
-    const document = this.#parseSessionJson(serialized, sessionPath);
-
-    return parseFeatureSessionDocument(document, { expectedFeatureId: featureId, expectedDirectoryName: directoryName });
   }
 
   async #persistSessionFile(directoryPath: string, session: FeatureSession): Promise<void> {
@@ -1082,23 +989,6 @@ export class FeatureSessionStore {
     }
 
     await this.#inspectStorageDirectory(this.featuresRoot);
-  }
-
-  async #pathExists(path: string): Promise<boolean> {
-    try {
-      await lstat(path);
-      return true;
-    } catch (error) {
-      if (hasErrorCode(error, "ENOENT")) {
-        return false;
-      }
-
-      throw new PersistenceError(
-        "IO_ERROR",
-        `Unable to inspect path "${path}".`,
-        { cause: error, path },
-      );
-    }
   }
 
   async #readOptionalText(path: string): Promise<string | undefined> {

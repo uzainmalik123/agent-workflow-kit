@@ -20,8 +20,6 @@ import {
   FEATURE_SESSION_SCHEMA_VERSION,
   FeatureSessionStore,
   PersistenceError,
-  createEmptyApprovals,
-  createEmptyArtifactReferences,
   createFeatureSessionStore,
   restoreWorkflowStateMachine,
   sanitizeFeatureSlug,
@@ -100,21 +98,6 @@ async function expectPersistenceError(
   await expect(operation()).rejects.toMatchObject({ code });
 }
 
-function buildSession(): FeatureSession {
-  return {
-    schemaVersion: FEATURE_SESSION_SCHEMA_VERSION,
-    featureId: "F-001",
-    slug: "unsafe",
-    title: "Unsafe feature",
-    revision: 0,
-    createdAt: fixedTimestamp,
-    updatedAt: fixedTimestamp,
-    machine: { state: WorkflowState.Draft },
-    artifacts: createEmptyArtifactReferences(),
-    approvals: createEmptyApprovals(),
-  };
-}
-
 async function replaceWithSymlink(root: string, path: string): Promise<void> {
   const target = join(root, "outside-target");
   await writeFile(target, "{}", "utf8");
@@ -132,13 +115,15 @@ async function expectUnsafeTopology(store: FeatureSessionStore): Promise<void> {
     () => store.create({ featureId: "F-002", title: "Unsafe feature" }),
     "UNSAFE_PATH",
   );
-  await expectPersistenceError(() => store.save(buildSession()), "UNSAFE_PATH");
-  await expectPersistenceError(() => store.update("F-001", { title: "Updated" }), "UNSAFE_PATH");
   await expectPersistenceError(
     () => store.writeArtifact("F-001", "request", "# Request\n"),
     "UNSAFE_PATH",
   );
   await expectPersistenceError(() => store.transition("F-001", "advance"), "UNSAFE_PATH");
+  await expectPersistenceError(
+    () => store.mutate("F-001", { prepare: () => ({ title: "Renamed" }) }),
+    "UNSAFE_PATH",
+  );
 }
 
 async function readSessionDocument(path: string): Promise<Record<string, unknown>> {
@@ -190,9 +175,14 @@ describe("FeatureSessionStore sessions", () => {
     expect(await store.load("F-001")).toEqual(created);
     expect(await store.exists("F-001")).toBe(true);
 
-    const updated = await store.update("F-001", { title: "Google OAuth integration" });
-    expect(updated.title).toBe("Google OAuth integration");
-    expect(await store.load("F-001")).toEqual(updated);
+    const before = await store.load("F-001");
+    const renamed = await store.mutate("F-001", {
+      expectedRevision: before.revision,
+      prepare: () => ({ title: "Google OAuth integration" }),
+    });
+    expect(renamed.session.title).toBe("Google OAuth integration");
+    expect(renamed.session.revision).toBe(before.revision + 1);
+    expect(await store.load("F-001")).toEqual(renamed.session);
 
     await store.create({ featureId: "F-002", title: "Second feature" });
     expect((await store.list()).map((session) => session.featureId)).toEqual(["F-001", "F-002"]);
@@ -499,8 +489,9 @@ describe("FeatureSessionStore corruption and safety", () => {
     const conflicting = JSON.stringify({ ...document, featureId: "F-002" });
     await writeFile(sessionPath, conflicting, "utf8");
 
-    await expectPersistenceError(() => store.save(created), "FEATURE_MISMATCH");
+    await expectPersistenceError(() => store.mutate("F-001", { prepare: () => ({}) }), "FEATURE_MISMATCH");
     expect(await readFile(sessionPath, "utf8")).toBe(conflicting);
+    expect(created.revision).toBe(0);
   });
 
   it("rejects a symlinked workflow root for reads and writes", async () => {
@@ -538,9 +529,12 @@ describe("FeatureSessionStore corruption and safety", () => {
     await expectPersistenceError(() => store.list(), "UNSAFE_PATH");
     await expectPersistenceError(() => store.exists("F-001"), "UNSAFE_PATH");
     await expectPersistenceError(() => store.readEvents("F-001"), "UNSAFE_PATH");
-    await expectPersistenceError(() => store.save(created), "UNSAFE_PATH");
-    await expectPersistenceError(() => store.update("F-001", { title: "Updated" }), "UNSAFE_PATH");
+    await expectPersistenceError(
+      () => store.mutate("F-001", { prepare: () => ({ title: "Renamed" }) }),
+      "UNSAFE_PATH",
+    );
     await expectPersistenceError(() => store.transition("F-001", "advance"), "UNSAFE_PATH");
+    expect(created.revision).toBe(0);
   });
 
   it("rejects a symlinked artifact file for reads and writes", async () => {

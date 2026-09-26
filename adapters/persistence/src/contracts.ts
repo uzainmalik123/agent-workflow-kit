@@ -99,16 +99,6 @@ export interface CreateFeatureSessionInput {
  * Metadata-only patch. Workflow state cannot be set here: moving the machine requires a real
  * event through `mutate`.
  */
-export interface FeatureSessionUpdate {
-  readonly title?: string;
-  readonly artifacts?: FeatureArtifactReferences;
-  readonly approvals?: FeatureApprovals;
-}
-
-export type FeatureSessionUpdater =
-  | FeatureSessionUpdate
-  | ((session: FeatureSession) => FeatureSessionUpdate);
-
 export type Clock = () => string;
 
 /** Entry recorded in the durable fix-history artifact. */

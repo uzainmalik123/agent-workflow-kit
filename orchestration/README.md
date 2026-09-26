@@ -212,13 +212,15 @@ Failures are classified instead of collapsed: `workflow` (a legal-decision probl
 
 ## Concurrency
 
-The authoritative session carries a `revision`. It starts at `0` and every successful mutation increments it by exactly one, in the same atomic write that moves the state. Orchestration never mutates a session except through `FeatureSessionStore.mutate`:
+The authoritative session carries a `revision`. It starts at `0` and every successful mutation increments it by exactly one, in the same atomic write that moves the state. Orchestration never mutates a session except through `FeatureSessionStore.mutate`, and the store offers no whole-session save or generic patch for anything to go around it with: a mutation plan may only carry `title`, `artifacts`, `approvals`, and `event`, and every other key is refused.
 
 ```ts
 store.mutate(featureId, { expectedRevision, prepare });
 ```
 
 The per-feature lock is held for the critical section only: the revision is re-checked inside the lock, `prepare` sees the state it is about to replace, and the lock is released before any executor, AI, or external call runs. The write order inside a mutation is artifacts, then `session.json`, then `events.jsonl`.
+
+Lock ownership is real, not best effort. Each acquisition mints a unique `token` in the lock's `owner.json`, and release only removes the directory when that token is still the current owner's, so a writer whose lock was already taken over cannot delete the lock that replaced it. A lock is reclaimed only when it can be proven abandoned: a dead `pid` on this host, or an owner record that is missing or unreadable and whose directory has passed `staleAfterMs`. A live local `pid` is never reclaimed on age, and a lock owned by another host is never stolen, so a concurrent `runNext` fails fast as `persistence_lock_timeout` instead of corrupting the session.
 
 That gives one guarantee for the one-stage rule: **a stale result can neither overwrite a newer artifact nor skip a stage.** A planner that executed against revision *n* and finishes after someone else committed revision *n + 1* gets `status: "conflict"`, `committed: false`, `error.code: "revision_conflict"`, and the persisted plan stays the winner's. The losing `plan_review` never happens, so `awaiting_plan_approval` still requires a real review of the plan that is actually stored. Nothing is retried automatically and no second stage is executed; the caller decides whether to re-run.
 
@@ -237,4 +239,4 @@ Artifacts are written before the transition, so durable state never claims progr
 
 No AI model, OpenCode, Freebuff, project command, Git operation, or third-party skill is used or simulated. `runUntilBlocked()` is deliberately not implemented: it belongs on top of `runNext` once the one-stage guarantee is trusted in production use.
 
-A lock is a directory created with an exclusive `mkdir` plus an owner record, so a lock left behind by a dead process can be taken over. It is deliberately **not** a distributed lock: it serializes writers on one machine, and cross-machine coordination is the caller's problem to solve.
+A lock is a directory created with an exclusive `mkdir` plus an owner record carrying a token, the owner `pid`, and the host, so a lock left behind by a dead process on this machine can be taken over without any age-based guesswork. It is deliberately **not** a distributed lock: it serializes writers on one machine, a lock held by another host is respected rather than reclaimed, and cross-machine coordination is the caller's problem to solve.

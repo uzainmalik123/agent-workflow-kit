@@ -20,8 +20,6 @@ export type {
   FeatureSession,
   FeatureApprovals,
   FeatureSessionSchemaVersion,
-  FeatureSessionUpdate,
-  FeatureSessionUpdater,
   FixHistoryDocument,
   FixHistoryEntry,
   PlanApprovalRecord,

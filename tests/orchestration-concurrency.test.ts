@@ -13,6 +13,7 @@ import {
   createFeatureSessionStore,
   type FeatureSessionStore,
 } from "@agent-workflow-kit/persistence";
+import { writeSessionDocument } from "../fixtures/session-documents.js";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -571,11 +572,15 @@ describe("human plan approval checkpoint", () => {
   it("refuses to run any post approval stage without a checkpoint and never re-approves", async () => {
     const { store } = await approveInFreshFeature("Approval missing");
     const session = await store.load("F-001");
-    const withoutApproval = { ...session, approvals: { plan: null }, revision: session.revision + 1 };
+
+    // A cleared checkpoint is not something the public API can produce, so the document is edited
+    // the way a hand-edited or older session file would be. The orchestrator must still refuse.
+    await writeSessionDocument(store, "F-001", {
+      ...session,
+      approvals: { plan: null },
+    });
+
     const harness = createHarness(store.repositoryRoot);
-
-    await store.save(withoutApproval);
-
     const orchestrator = createWorkflowOrchestrator({
       store: createFeatureSessionStore(harness.root, { clock: fixedClock }),
       executor: new FakeStageExecutor(),

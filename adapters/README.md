@@ -52,7 +52,7 @@ The digests cover the exact persisted bytes of `spec.json`, `plan.json`, and `pl
 
 `new FeatureSessionStore(repositoryRoot, { clock })` and `createFeatureSessionStore(repositoryRoot, { clock })` expose:
 
-- `create`, `load`, `save`, `update`, `list`, and `exists` for sessions.
+- `create`, `load`, `list`, and `exists` for sessions. There is no `save` and no `update`: a caller cannot hand the store a whole session document, so identity, revision, and workflow state cannot be replaced from outside.
 - `mutate(featureId, { expectedRevision, prepare })`, the single authoritative mutation path: it re-checks the revision under the lock, hands `prepare` a read-only view of the state it is about to replace, and commits artifacts, session, then event log.
 - `transition(featureId, event)` to apply a workflow event through the same mutation path.
 - `writeArtifact` and `readArtifact` for the controlled artifact set, and `readArtifactText` for the exact persisted bytes.
@@ -62,13 +62,24 @@ The digests cover the exact persisted bytes of `spec.json`, `plan.json`, and `pl
 
 `mutate` returns the committed session, the appended event, whether the event was applied, and the artifact references it wrote. A `prepare` that returns an event the state machine refuses produces a refused event record and no revision change.
 
+A mutation plan may only carry `title`, `artifacts`, `approvals`, and `event`. Any other key, including `machine`, `revision`, `featureId`, `slug`, or `createdAt`, is refused with `INVALID_ARGUMENT` rather than ignored, so a caller can never believe it replaced workflow state or identity. The store does not interpret approval semantics; it stores the checkpoint the orchestrator computed inside the same revision-guarded mutation, and an approval paired with an event the state machine refuses is not written.
+
 ### Concurrency
 
-A mutation holds a per-feature lock for its critical section only. The lock is a `.lock/` directory created with an exclusive `mkdir` plus an `owner.json` record, so a lock left behind by a dead process can be taken over, and it is released before any executor, AI, or external call runs. A `prepare` must stay short and must never call out to anything slow.
+A mutation holds a per-feature lock for its critical section only. The lock is a `.lock/` directory created with an exclusive `mkdir` plus an `owner.json` record holding a unique acquisition `token`, the owner `pid`, the `hostname`, and a `createdAt` stamp. It is released before any executor, AI, or external call runs. A `prepare` must stay short and must never call out to anything slow.
+
+A lock is only reclaimed when it can be proven abandoned:
+
+| Owner record | Reclaimed? |
+| --- | --- |
+| Same host, `pid` still alive | No, at any age. A long-running process is never judged dead by the clock. |
+| Same host, `pid` gone | Yes. The lock is released on the next attempt. |
+| Different host | No. PID liveness is meaningless across machines, so the attempt ends in `LOCK_TIMEOUT` like any other contention. This is not a distributed lock. |
+| Missing, unparseable, or incomplete `owner.json` | Yes, once the lock directory is older than `staleAfterMs`. Age is the only signal available, so it is bounded. |
+
+Release removes the directory only when the current `owner.json` still holds the caller's own `token`, so a writer whose lock was already taken over can never delete the lock that replaced it. `now` is injectable through `FeatureLockOptions`, which lets tests cover a lock that is an hour old without waiting for one.
 
 `expectedRevision` is optional, and coordination-sensitive callers must always pass it. A mismatch throws `REVISION_CONFLICT` **before** `prepare` runs, so a losing writer never reads or writes anything. This is optimistic concurrency, not blocking: the caller decides whether to re-read and retry. In-process contention is serialized through a promise chain, and different features never wait on each other. This is deliberately not a distributed lock.
-
-`save` refuses to write a revision that does not exactly continue the persisted one, and `update` re-reads the session under the lock so it can never move the revision backwards. `update` also refuses a patch that carries a `machine` key: workflow state changes only through a revision-guarded event.
 
 `restoreWorkflowStateMachine(session)` rebuilds the core state machine from a loaded session, including a pending fix return state.
 
