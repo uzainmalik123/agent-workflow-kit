@@ -36,11 +36,16 @@ export interface OpenCodeCapabilities {
   readonly formatFlagAvailable: boolean | null;
   /** Whether `--format json` is advertised, which is what the event-stream transport needs. */
   readonly formatJsonAvailable: boolean | null;
-  readonly dirFlagAvailable: boolean | null;
   readonly modelFlagAvailable: boolean | null;
   readonly autoFlagAvailable: boolean | null;
-  /** `--pure` is a global flag, so it is read from the root help rather than the run help. */
-  readonly pureFlagAvailable: boolean | null;
+  /**
+   * Whether `--standalone` is advertised, which `buildOpenCodeInvocation` always passes.
+   *
+   * This is required, not optional. A stage run has to be isolated from any background service, so a
+   * binary that cannot start a private one is a binary this adapter must refuse rather than run a
+   * stage against a shared, already-loaded configuration.
+   */
+  readonly standaloneFlagAvailable: boolean | null;
   /**
    * Whether `opencode debug agents` exists, which the configuration smoke test needs.
    *
@@ -91,8 +96,16 @@ export function parseMajorVersion(version: string | null): number | null {
   return Number.isNaN(major) ? null : major;
 }
 
-/** A run is only safe if the binary advertises every flag the invocation depends on. */
-export const REQUIRED_RUN_FLAGS = ["--agent", "--format", "--dir"] as const;
+/**
+ * The flags `buildOpenCodeInvocation` passes, in the order it passes them.
+ *
+ * This list and the transport's argument builder are the same contract written down once. `--dir`
+ * and `--pure` are absent on purpose: V2 removed both, the working directory comes from the child
+ * process's own `cwd`, and plugin isolation is the generated `plugins` configuration rather than a
+ * flag. Every entry here is something the transport sends unconditionally, so a binary that lacks
+ * one cannot be driven correctly and is reported as missing rather than being run anyway.
+ */
+export const REQUIRED_RUN_FLAGS = ["--standalone", "--agent", "--format"] as const;
 
 interface HelpProbe {
   readonly available: boolean | null;
@@ -214,10 +227,9 @@ export async function probeOpenCodeCapabilities(
       agentFlagAvailable: null,
       formatFlagAvailable: null,
       formatJsonAvailable: null,
-      dirFlagAvailable: null,
       modelFlagAvailable: null,
       autoFlagAvailable: null,
-      pureFlagAvailable: null,
+      standaloneFlagAvailable: null,
       debugAgentsAvailable: null,
       failures,
     };
@@ -267,10 +279,10 @@ export async function probeOpenCodeCapabilities(
     agentFlagAvailable: unadvertised(runHelp, "--agent"),
     formatFlagAvailable: unadvertised(runHelp, "--format"),
     formatJsonAvailable: advertisesJsonFormat(runHelp),
-    dirFlagAvailable: unadvertised(runHelp, "--dir"),
     modelFlagAvailable: unadvertised(runHelp, "--model"),
     autoFlagAvailable: unadvertised(runHelp, "--auto"),
-    pureFlagAvailable: rootHelp.available === true ? advertisesFlag(rootHelp.text, "--pure") : null,
+    // `--standalone` is a global flag, so it is read from the root help rather than the run help.
+    standaloneFlagAvailable: rootHelp.available === true ? advertisesFlag(rootHelp.text, "--standalone") : null,
     debugAgentsAvailable: advertiseDebugAgents(debugHelp, debugAgentsHelp),
     failures,
   };
@@ -300,9 +312,9 @@ function advertiseDebugAgents(debugHelp: HelpProbe, debugAgentsHelp: HelpProbe):
  * required flag has to be named in exactly one place.
  */
 const RUN_FLAG_FIELDS: Readonly<Record<(typeof REQUIRED_RUN_FLAGS)[number], keyof OpenCodeCapabilities>> = {
+  "--standalone": "standaloneFlagAvailable",
   "--agent": "agentFlagAvailable",
   "--format": "formatFlagAvailable",
-  "--dir": "dirFlagAvailable",
 };
 
 /**
@@ -335,8 +347,7 @@ export function describeCapabilities(capabilities: OpenCodeCapabilities): string
     `run: ${known(capabilities.runCommandAvailable)},`,
     `--agent: ${known(capabilities.agentFlagAvailable)},`,
     `--format json: ${known(capabilities.formatJsonAvailable)},`,
-    `--dir: ${known(capabilities.dirFlagAvailable)},`,
-    `--pure: ${known(capabilities.pureFlagAvailable)},`,
+    `--standalone: ${known(capabilities.standaloneFlagAvailable)},`,
     `debug agents: ${known(capabilities.debugAgentsAvailable)}.`,
   ].join(" ");
 }

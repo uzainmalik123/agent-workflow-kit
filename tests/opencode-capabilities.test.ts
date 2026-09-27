@@ -445,10 +445,9 @@ function unknownCapabilities(command: string): OpenCodeCapabilities {
     agentFlagAvailable: null,
     formatFlagAvailable: null,
     formatJsonAvailable: null,
-    dirFlagAvailable: null,
     modelFlagAvailable: null,
     autoFlagAvailable: null,
-    pureFlagAvailable: null,
+    standaloneFlagAvailable: null,
     debugAgentsAvailable: null,
     failures: [],
   };
@@ -525,16 +524,19 @@ describe("probing a local binary", () => {
     expect(capabilities.failures).toEqual([]);
   });
 
-  it("reports the flags this V2 binary genuinely does not have", async () => {
-    // V2.0.18 takes the working directory as a positional argument and has no `--pure` flag. The
-    // probe must say so rather than assume a V2 binary has whatever the invocation happens to pass,
-    // because `missingRunCapabilities` is what stands between a wrong flag and a stage run.
+  it("reports a real V2 binary as having every flag the invocation needs", async () => {
+    // A real 2.0.18 advertises `--standalone`, `--agent`, and `--format json`. It has no `--dir` and
+    // no `--pure`, and the invocation sends neither, so the probe must find nothing missing. If it
+    // ever does, `missingRunCapabilities` is what stops a stage run against a binary that cannot
+    // accept the arguments the adapter sends.
     const command = await fakeBinary(V2_REPLIES);
     const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
 
-    expect(capabilities.dirFlagAvailable).toBe(false);
-    expect(capabilities.pureFlagAvailable).toBe(false);
-    expect(missingRunCapabilities(capabilities)).toEqual(["--dir"]);
+    expect(capabilities.standaloneFlagAvailable).toBe(true);
+    expect(capabilities.agentFlagAvailable).toBe(true);
+    expect(capabilities.formatJsonAvailable).toBe(true);
+    expect(missingRunCapabilities(capabilities)).toEqual([]);
+    expect(capabilities.failures).toEqual([]);
   });
 
   it("asks only version and help commands, and never runs a model", async () => {
@@ -639,8 +641,9 @@ describe("probing a local binary", () => {
 
     expect(capabilities.agentFlagAvailable).toBe(false);
     expect(capabilities.formatFlagAvailable).toBe(false);
-    expect(capabilities.dirFlagAvailable).toBe(true);
-    expect(missingRunCapabilities(capabilities)).toEqual(["--agent", "--format"]);
+    // This V1 help has no `--standalone` at all, so a stage run cannot be isolated on it.
+    expect(capabilities.standaloneFlagAvailable).toBe(false);
+    expect(missingRunCapabilities(capabilities)).toEqual(["--standalone", "--agent", "--format"]);
   });
 
   it("never turns an unreadable help into a missing flag", async () => {

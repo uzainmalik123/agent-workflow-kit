@@ -253,6 +253,12 @@ export function parseAgentListing(stdout: string): readonly OpenCodeListedAgent[
 /**
  * Runs `opencode debug agents` once and parses it.
  *
+ * `debug agents` is the one command the smoke test cannot ask to be standalone. A real 2.0.18
+ * binary advertises `--standalone` on `run` and on the root command, but not on `debug agents`:
+ * `opencode debug agents --standalone` prints its usage and exits 1. So unlike a stage run, this
+ * listing is answered by the shared background service, and the start-up race below is the price of
+ * that. It is the only reason this file polls.
+ *
  * A failure is reported as a rejection rather than an empty list, so a binary that cannot answer is
  * never mistaken for a binary that discovered nothing.
  */

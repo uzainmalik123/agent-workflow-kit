@@ -5,6 +5,7 @@ import {
   DEFAULT_MAX_OUTPUT_BYTES,
   DEFAULT_OPENCODE_COMMAND,
   OpenCodeAdapterError,
+  REQUIRED_RUN_FLAGS,
   buildOpenCodeInvocation,
   createOpenCodeCliTransport,
   extractResponseText,
@@ -77,17 +78,31 @@ describe("invocation construction", () => {
     expect(invocation.args[0]).toBe("run");
   });
 
-  it("passes the agent, the format, and the working directory", () => {
-    const { args } = buildOpenCodeInvocation(requestFor({ workingDirectory: "/tmp/project" }));
+  it("passes the agent, the format, and the working directory as the child cwd", () => {
+    const { args, cwd } = buildOpenCodeInvocation(requestFor({ workingDirectory: "/tmp/project" }));
 
     expect(args).toContain("--agent");
     expect(args[args.indexOf("--agent") + 1]).toBe("planner");
-    expect(args[args.indexOf("--dir") + 1]).toBe("/tmp/project");
+    // V2 removed `--dir`; the repository comes from the child process's own working directory.
+    expect(args).not.toContain("--dir");
+    expect(cwd).toBe("/tmp/project");
   });
 
-  it("runs in pure mode by default so a project plugin cannot alter a role", () => {
-    expect(buildOpenCodeInvocation(requestFor()).args).toContain("--pure");
-    expect(buildOpenCodeInvocation(requestFor(), { pure: false }).args).not.toContain("--pure");
+  it("runs standalone, so no stage shares a background service with another", () => {
+    const { args } = buildOpenCodeInvocation(requestFor());
+
+    expect(args).toContain("--standalone");
+    // V2 removed `--pure`. Plugin isolation is the generated `plugins` configuration now, so a
+    // flag that no longer exists must not be sent in its place.
+    expect(args).not.toContain("--pure");
+  });
+
+  it("sends exactly the flags the capability probe requires", () => {
+    const { args } = buildOpenCodeInvocation(requestFor());
+
+    for (const flag of REQUIRED_RUN_FLAGS) {
+      expect(args).toContain(flag);
+    }
   });
 
   it("never auto-approves unless asked", () => {
@@ -275,11 +290,14 @@ describe("running a child process", () => {
     const seen = JSON.parse(result.text) as { argv: string[]; cwd: string };
 
     expect(seen.argv[0]).toBe("run");
-    expect(seen.argv).toContain("--pure");
+    expect(seen.argv).toContain("--standalone");
+    expect(seen.argv).not.toContain("--pure");
+    expect(seen.argv).not.toContain("--dir");
     expect(seen.argv[seen.argv.indexOf("--agent") + 1]).toBe("planner");
-    expect(seen.argv[seen.argv.indexOf("--dir") + 1]).toBe(root);
     expect(seen.argv.at(-1)).toBe(prompt);
     expect(seen.argv.filter((argument) => argument === prompt)).toHaveLength(1);
+    // The child runs in the stage's repository, which is how V2 discovers the project config and the
+    // generated agents now that there is no `--dir`.
     expect(seen.cwd).toBe(root);
   });
 

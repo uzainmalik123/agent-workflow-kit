@@ -85,7 +85,26 @@ V2 renamed several actions, and the generated files use the current names: `bash
 
 `matchesResourcePattern` is a faithful port of OpenCode's own wildcard matcher, so a decision made in a test is the decision the CLI makes at run time. Backslashes normalize to `/`, `*` stands for any run of characters including `/`, `?` stands for exactly one, a pattern ending in a space and a star also matches the bare value, and matching is anchored and case-insensitive only on Windows.
 
-`mode: primary` is set for every agent, and `--pure` is passed to the CLI by default so a project plugin cannot alter a role's behaviour at runtime.
+The `permissions` list is emitted as YAML in the agent frontmatter, and it has to be a real YAML
+block sequence: every rule is its own list item, with its own `action`, `resource`, and `effect`. The
+emitter once wrote the `- ` marker only before the first rule, which folded every later rule's keys
+into that first mapping as repeats. YAML answers duplicate keys in a mapping with an error, OpenCode
+rejected the whole frontmatter, and every role silently fell back to its untouched default
+capability set - a malformed emitter that handed every stage full access. The regression tests parse
+the emitted frontmatter as YAML and count list items, so a folded rule fails a unit test instead of
+appearing as eleven unrestricted agents in a live smoke test.
+
+`mode: primary` is set for every agent. V2 removed `--pure`, so plugin isolation is generated
+configuration instead: `opencode.json` sets `plugins: ["-*", "opencode.*"]`, which disables every
+plugin and then re-enables the `opencode.` namespace. A plugin is arbitrary code that can rewrite a
+system prompt, replace a tool, or register a new one, so a repository plugin discovered under
+`.opencode/plugins/` would otherwise be able to change what a verifier, reviewer, or implementer is
+allowed to do, and therefore what it reports. Everything OpenCode itself ships lives under
+`opencode.`, including `opencode.config.agent`, which loads the generated agents, and the permission
+machinery the generated rules depend on; disabling the namespace would not harden a run, it would
+break it. Verified against OpenCode 2.0.18: a local plugin is listed without the directive and gone
+with it, and all eighteen agents and all thirty-five resolved rules for a read-only role are
+unchanged.
 
 ## The prompt boundary
 
@@ -130,7 +149,7 @@ The executor depends on the `OpenCodeTransport` port, not on a process, so tests
 The invocation is exactly this, and nothing else:
 
 ```text
-opencode run --pure --agent <agent> --format <default|json> [--model <id>] --dir <repository> [prompt]
+opencode run --standalone --agent <agent> --format <default|json> [--model <id>] [prompt]
 ```
 
 No session continuation, no `--attach`, no shared server. One stage run is one fresh session, and nothing about the previous stage's session is reused. The adapter's own name for the formatted output, `text`, maps to the CLI's `default`; the CLI has never accepted `text` as a format value.
@@ -199,15 +218,22 @@ The probe reads the real CLIs, not an idealised one, and the two differ in ways 
 
 - **The version string is tagged.** V1 prints `1.18.18`; V2 prints `opencode v2.0.18`. A reader that only accepts a leading digit reports every real V2 binary as having no version at all, which is the one answer that cannot be acted on.
 - **The agent listing is the plural `debug agents`.** V1 has `agent list` and a singular `debug agent <name>`; V2 has neither, and its `debug --help` lists `agents`, `config`, and `paths`. A probe that matched the substring `agent` would accept the V1 command and then send V2 an argument list it rejects.
-- **Some flags are gone in V2.** OpenCode 2.0.18 takes the working directory as a positional argument and has no `--pure` flag, so a real V2 binary reports `dirFlagAvailable: false` and `pureFlagAvailable: false`. That is the probe doing its job, and `missingRunCapabilities` naming `--dir` is the fail-closed outcome, not a bug in the probe.
+- **Two V1 flags are gone, and the invocation no longer sends either.** V2 has no `--dir` and no `--pure`; the working directory comes from the child process's own `cwd`, and plugin isolation is generated configuration. V2 adds `--standalone`, and the invocation always passes it, so `standaloneFlagAvailable` is a required capability rather than an optional one. `REQUIRED_RUN_FLAGS` is exactly the flags `buildOpenCodeInvocation` sends unconditionally, so the probe and the transport cannot drift: a binary missing one of them is reported by `missingRunCapabilities` instead of being driven with an argument it rejects. A run never silently falls back to the shared background service.
 
-Flags alone cannot tell V1 from V2. A real OpenCode 1.18.18 binary advertises `--agent`, `--format`, `--dir`, `--model`, and `--auto` just as V2 does. What a V1 binary does instead is silently ignore a `permissions:` list and leave every role with the default capability set, which is exactly the failure this milestone exists to prevent. The probe therefore reads the version separately and reports `versionSupportsV2`; the smoke test skips on a binary that predates V2 instead of reporting the ignored rules as a failure.
+Flags alone cannot tell V1 from V2. A real OpenCode 1.18.18 binary advertises `--agent`, `--format`, `--model`, and `--auto` just as V2 does. What a V1 binary does instead is silently ignore a `permissions:` list and leave every role with the default capability set, which is exactly the failure this milestone exists to prevent. The probe therefore reads the version separately and reports `versionSupportsV2`; the smoke test skips on a binary that predates V2 instead of reporting the ignored rules as a failure.
 
 `runOpenCodeConfigSmokeTest` writes the generated files to a temporary directory, asks the binary to report the agents it discovered there with `opencode debug agents`, and replays the policy against the rulesets it reported. V2 answers that command from a background service and prints a JSON array of agent objects sorted by id, each carrying `id`, `name`, `mode`, `hidden`, and the `permissions` array it resolved. `parseAgentListing` reads exactly that shape and returns `null` for anything else — a payload it cannot recognise is never treated as an empty listing, because "the binary found nothing" and "the payload was not readable" are different facts.
 
 The listing is polled rather than taken once, because on a real 2.0.18 binary the first answer is not authoritative. When no service is running yet, the CLI starts one, reports it healthy, and asks it for the agent list before that service has finished loading the directory: the first call returned an empty array and an immediate second call returned only the seven built-in agents, with the generated ones appearing about two seconds later. Believing the first answer reports all eleven roles as missing, which is a fact about start-up rather than about the generated files. So the test keeps asking until the listing accounts for every generated agent, within `DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS`. That condition is one a correctly generated project satisfies and a genuinely wrong one never does, so the wait cannot turn a defect into a pass — the loop simply runs out of time and the last real answer is reported as the failure it is.
 
 The report fails closed at every step. A generated role the binary did not list fails. A role whose listing carries no readable `permissions` array is left unverified (`null`), never passed. A listing that could not be produced at all is a failure rather than an empty discovery. And a binary that reports every role with OpenCode's untouched base ruleset — `{action: "*", resource: "*", effect: "allow"}` plus the `external_directory` and `.env` entries — is reported as a failure for all eleven roles, because that is the exact shape of a generated policy the binary did not read.
+
+The smoke test is the one place the standing isolation is not available. `run` is always invoked
+`--standalone`, but `opencode debug agents --standalone` is rejected: a real 2.0.18 binary advertises
+`--standalone` on `run` and on the root command, and not on `debug agents`, where it prints its usage
+and exits 1. The listing is therefore answered by the shared background service, which is why this
+one call is polled and why the poll is bounded and fail-closed. The alternative, inventing a flag the
+binary does not support, would have turned a working listing into a hard error.
 
 The smoke test runs no `run` command, forces `OPENCODE_DISABLE_MODELS_FETCH` and `OPENCODE_DISABLE_AUTOUPDATE` on every child after the caller's own environment so they cannot be switched off, and reports `skipped` with a reason when the binary is missing, of an unknown version, older than V2, or has no `debug agents` — so an environment without a V2 OpenCode never fails a build. It is a diagnostic, not a gate. The listing call gets `DEFAULT_AGENT_LISTING_TIMEOUT_MS` per attempt rather than the 30-second default used for help output, because it is the one command that may have to start a background service first.
 

@@ -27,13 +27,20 @@ function yamlString(value: string): string {
  * It quotes every key and value, because a bare `*` is a YAML alias and a pattern such as
  * `*.agentflow/*` is a plain scalar that must not be re-interpreted. It renders rules in the order
  * the module produced them, because in V2 the order is the policy.
+ *
+ * Every rule gets its own `-` sequence entry. The list item marker is what makes one rule one
+ * mapping, and it has to be repeated for every rule: emitting it only on the first line folds every
+ * later rule's `action`, `resource`, and `effect` into that first mapping as repeated keys. YAML
+ * answers duplicate keys in one mapping with an error, so the whole frontmatter fails to parse and
+ * OpenCode falls back to its own defaults. That is not a cosmetic mistake - it silently hands every
+ * role an unrestricted capability set, which is exactly what the generated rules exist to prevent.
  */
 function renderPermissionRules(rules: OpenCodePermissionRuleset): readonly string[] {
   const lines: string[] = [];
 
-  for (const [index, entry] of rules.entries()) {
+  for (const entry of rules) {
     lines.push(
-      `${index === 0 ? "  - " : "    "}action: ${yamlString(entry.action)}`,
+      `  - action: ${yamlString(entry.action)}`,
       `    resource: ${yamlString(entry.resource)}`,
       `    effect: ${yamlString(entry.effect)}`,
     );
@@ -148,15 +155,48 @@ export function agentFileName(role: StageRole): string {
 }
 
 /**
+ * The V2 plugin directives that isolate a workflow run from everything the repository did not
+ * generate.
+ *
+ * V2 removed the `--pure` flag this adapter used to pass, so plugin isolation is a configuration
+ * concern now. V2's `plugins` field is an ordered list applied in order, and a string beginning with
+ * `-` disables plugins matching that id, where `*` matches every id and a `.*` suffix matches a
+ * prefix.
+ *
+ * `OPENCODE_PLUGIN_DISABLE_ALL` disables every plugin. `OPENCODE_PLUGIN_TRUSTED_NAMESPACE` re-enables
+ * the whole `opencode.` namespace afterwards, and directives are applied in order, so the second
+ * entry undoes the first for exactly one namespace.
+ *
+ * Every plugin OpenCode itself ships is built under that namespace, and that set is what a run
+ * cannot work without: `opencode.config.agent` loads the generated agents, `opencode.agent`
+ * registers the agent runtime, and the `opencode.config.policy` and permission machinery is what
+ * turns the generated `permissions` list into an actual denial. Disabling them would not harden the
+ * run, it would break it - and an empty agent list, not a restricted one, would be the result.
+ *
+ * What is left disabled is everything else, which is the point. A plugin is arbitrary code that can
+ * rewrite an agent's system prompt, replace a tool, or register a new one, so a repository plugin
+ * discovered under `.opencode/plugins/` would otherwise be able to change what a verifier, reviewer,
+ * or implementer is allowed to do, and therefore what it reports. The generated rules and the
+ * framework's hard rules are the only sources of behaviour for a workflow stage.
+ */
+export const OPENCODE_PLUGIN_DISABLE_ALL = "-*";
+export const OPENCODE_PLUGIN_TRUSTED_NAMESPACE = "opencode.*";
+
+/**
  * The project configuration OpenCode needs for this adapter. It is intentionally minimal: the
  * per-role capability model lives in the agent files, and model, temperature, prompts, and shared
  * defaults are left to the repository and the user.
+ *
+ * Plugin isolation is the one thing this file must set, and it sets it for the same reason the
+ * capability model lives in the agent files: a stage run has to be the configuration the adapter
+ * generated, not the configuration the repository happened to have lying around.
  */
 export function renderOpenCodeProjectConfig(): string {
   return `${JSON.stringify(
     {
       $schema: OPENCODE_CONFIG_SCHEMA,
       share: "disabled",
+      plugins: [OPENCODE_PLUGIN_DISABLE_ALL, OPENCODE_PLUGIN_TRUSTED_NAMESPACE],
     },
     null,
     2,

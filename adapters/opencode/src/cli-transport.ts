@@ -48,9 +48,10 @@ export interface OpenCodeCliTransportOptions {
   readonly inheritEnv?: boolean;
   /** Extra environment entries, merged over the inherited environment. Never logged. */
   readonly env?: Readonly<Record<string, string>>;
-  /** `--pure` skips external plugins, so a project plugin cannot alter a role's behaviour. */
-  readonly pure?: boolean;
-  /** `--auto` approves anything not explicitly denied. Off by default: it is dangerous. */
+  /**
+   * `--auto` approves anything not explicitly denied. Off by default: it is dangerous. A generated
+   * role denies what it must not do, so approving the remainder is not needed to let it work.
+   */
   readonly autoApprove?: boolean;
 }
 
@@ -64,11 +65,23 @@ export interface OpenCodeInvocation {
  * The invocation surface, kept as small as the contract allows:
  *
  * ```text
- * opencode run --agent <agent> --format <default|json> --dir <repository> [--pure] [--model …] [prompt]
+ * opencode run --standalone --agent <agent> --format <default|json> [--model …] [prompt]
  * ```
  *
- * No session continuation, no `--attach`, no shared server, and no `--auto`. One stage run is one
- * fresh session, and nothing about the previous stage's session is reused.
+ * The working directory is not a flag. V2 dropped `--dir` and takes the repository from the child
+ * process's own working directory, which `runProcess` already sets to the stage's repository, so
+ * config and agent discovery resolve against the project the stage is meant to be working on rather
+ * than against whatever directory the adapter happened to be launched from.
+ *
+ * `--standalone` is not optional. Each stage is an independent run that reuses no OpenCode session,
+ * and a private server per run is what makes that true: there is no background service whose
+ * already-loaded configuration, cached agents, or warmed state could carry over from an earlier
+ * stage or from an unrelated project. It is also the only isolation this CLI offers now that
+ * `--pure` is gone, so a run that silently fell back to the shared service would inherit whatever
+ * that service had loaded.
+ *
+ * There is no session continuation, no `--server`, and no `--auto`. One stage run is one fresh
+ * session, and nothing about the previous stage's session is reused.
  */
 export function buildOpenCodeInvocation(
   request: OpenCodeTransportRequest,
@@ -85,11 +98,7 @@ export function buildOpenCodeInvocation(
   const args: string[] = [...(options?.extraArgs ?? [])];
 
   args.push("run");
-
-  if (options?.pure !== false) {
-    args.push("--pure");
-  }
-
+  args.push("--standalone");
   args.push("--agent", request.agent);
   args.push("--format", toCliFormat(options?.responseFormat ?? "text"));
 
@@ -98,8 +107,6 @@ export function buildOpenCodeInvocation(
   if (model !== null && model.length > 0) {
     args.push("--model", model);
   }
-
-  args.push("--dir", request.workingDirectory);
 
   if (options?.autoApprove === true) {
     args.push("--auto");

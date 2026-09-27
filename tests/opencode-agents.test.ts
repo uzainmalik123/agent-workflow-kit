@@ -22,6 +22,7 @@ import {
   renderOpenCodeProjectFiles,
   roleDefinition,
   writeOpenCodeProjectFiles,
+  type OpenCodePermissionEffect,
   type OpenCodePermissionRule,
 } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
@@ -111,6 +112,59 @@ describe("generated agent markdown", () => {
   it("round-trips the ruleset it was given, in order, with no drift", () => {
     for (const role of OPENCODE_ROLES) {
       expect(permissionRulesOf(role)).toEqual(permissionRulesForRole(role));
+    }
+  });
+
+  it("opens a YAML list item for every single rule", () => {
+    // The regression this guards is the emitter writing `- ` only before the first rule, which folds
+    // every later rule's keys into one mapping as repeats. That is not a formatting nit: YAML
+    // answers duplicate keys in a mapping with an error, OpenCode rejects the whole frontmatter, and
+    // every role falls back to an unrestricted default capability set.
+    for (const role of OPENCODE_ROLES) {
+      const expected = permissionRulesForRole(role);
+      const listItems = frontmatterOf(role)
+        .split("\n")
+        .filter((line) => /^ {2}- action: /u.test(line));
+
+      expect(listItems).toHaveLength(expected.length);
+      expect(permissionRulesOf(role)).toHaveLength(expected.length);
+    }
+  });
+
+  it("keeps every rule in its own mapping, with each key appearing once", () => {
+    for (const role of OPENCODE_ROLES) {
+      const block = frontmatterOf(role).split("\n");
+      const start = block.findIndex((line) => line === "permissions:") + 1;
+      const lines = block.slice(start).filter((line) => line !== "");
+
+      // One rule is exactly three lines, and the keys come in policy order. Anything else means a
+      // key was written into the previous rule's mapping.
+      expect(lines.length % 3).toBe(0);
+
+      for (let index = 0; index < lines.length; index += 3) {
+        const [first, second, third] = lines.slice(index, index + 3) as [string, string, string];
+
+        expect(first).toMatch(/^ {2}- action: ".*"$/u);
+        expect(second).toMatch(/^ {4}resource: ".*"$/u);
+        expect(third).toMatch(/^ {4}effect: ".*"$/u);
+      }
+
+      expect(lines).toHaveLength(permissionRulesForRole(role).length * 3);
+    }
+  });
+
+  it("emits a list, not a mapping, so nothing is folded into one item", () => {
+    for (const role of OPENCODE_ROLES) {
+      const permissions = frontmatterOf(role)
+        .split("\n")
+        .slice(
+          frontmatterOf(role).split("\n").findIndex((line) => line === "permissions:") + 1,
+        )
+        .filter((line) => /^ {2}\S/u.test(line));
+
+      // Every line at the item indent opens a new mapping. If the emitter ever stops doing that,
+      // these become `resource`/`effect` continuations and the count collapses to one.
+      expect(permissions).toHaveLength(permissionRulesForRole(role).length);
     }
   });
 
@@ -225,11 +279,20 @@ function frontmatterOf(role: (typeof OPENCODE_ROLES)[number]): string {
 }
 
 /**
- * Reads the generated `permissions:` list back out of the frontmatter.
+ * Reads the generated `permissions:` list back out of the frontmatter, the way YAML reads it.
  *
  * The adapter emits YAML by hand, so the only way to know the file says what the policy says is to
- * parse what was actually written. This deliberately reads the emitted text rather than calling the
- * renderer, and it fails loudly on any rule that is not in the emitted three-key shape.
+ * parse what was actually written. This walks the block sequence structurally: a `- ` at the item
+ * indent opens a new mapping, the keys indented under it belong to that mapping, and a second
+ * occurrence of the same key inside one mapping is an error rather than an overwrite.
+ *
+ * That strictness is the whole point. An earlier version of this reader made the `- ` marker
+ * optional and started a fresh rule at every `action:` line, which reconstructed the intended rule
+ * list perfectly from frontmatter that was not valid YAML at all. OpenCode parses that file by
+ * rejecting it, so every role silently fell back to its default capabilities and the real smoke test
+ * reported all eleven roles as unrestricted. A reader that recovers the intent from broken output
+ * cannot see the defect, so a repeated key inside one list item fails here for exactly the reason it
+ * fails there.
  */
 function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermissionRule[] {
   const lines = frontmatterOf(role).split("\n");
@@ -239,44 +302,98 @@ function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermi
     throw new Error(`Agent ${role} has no permissions list.`);
   }
 
-  const rules: OpenCodePermissionRule[] = [];
-  let pending: Partial<OpenCodePermissionRule> | undefined;
+  type RuleKey = keyof OpenCodePermissionRule;
+  // Mutable while the mapping is still being read; `OpenCodePermissionRule` is readonly because the
+  // renderer has finished by the time anything holds one.
+  type PartialRule = { -readonly [K in RuleKey]?: OpenCodePermissionRule[K] };
 
-  const flush = (): void => {
-    if (pending === undefined) {
+  const EFFECTS: readonly OpenCodePermissionEffect[] = ["allow", "deny", "ask"];
+  const rules: OpenCodePermissionRule[] = [];
+  let item: PartialRule | undefined;
+
+  // Assigns through the key rather than returning a value, so each field keeps its own type: an
+  // `effect` that is not one of the three real effects is rejected here, not silently accepted as
+  // any string and compared away in a test assertion.
+  const setValue = (target: PartialRule, line: string, key: RuleKey, quoted: string): void => {
+    const value: unknown = JSON.parse(quoted);
+
+    if (typeof value !== "string") {
+      throw new Error(`Agent ${role} has a non-string ${key}: ${JSON.stringify(line)}`);
+    }
+
+    if (key === "effect") {
+      if (!EFFECTS.includes(value as OpenCodePermissionEffect)) {
+        throw new Error(`Agent ${role} has an effect that is not an effect: ${JSON.stringify(line)}`);
+      }
+
+      target.effect = value as OpenCodePermissionEffect;
       return;
     }
 
-    if (pending.action === undefined || pending.resource === undefined || pending.effect === undefined) {
-      throw new Error(`Agent ${role} has an incomplete permission rule: ${JSON.stringify(pending)}`);
+    if (key === "action") {
+      target.action = value;
+      return;
     }
 
-    rules.push({
-      action: pending.action,
-      resource: pending.resource,
-      effect: pending.effect,
-    });
-    pending = undefined;
+    target.resource = value;
+  };
+
+  const flush = (): void => {
+    if (item === undefined) {
+      return;
+    }
+
+    if (
+      Object.keys(item).length !== 3 ||
+      item.action === undefined ||
+      item.resource === undefined ||
+      item.effect === undefined
+    ) {
+      throw new Error(
+        `Agent ${role} has a permission list item that is not a complete rule: ${JSON.stringify(item)}`,
+      );
+    }
+
+    rules.push({ action: item.action, resource: item.resource, effect: item.effect });
+    item = undefined;
   };
 
   for (const line of lines.slice(start + 1)) {
+    // A blank line ends the block: everything after it is the markdown body.
     if (line === "") {
       break;
     }
 
-    const match = /^\s+(?:-\s*)?(action|resource|effect):\s(".*")$/u.exec(line);
-    const key = match?.[1];
-    const quoted = match?.[2];
+    const opened = /^ {2}- (action|resource|effect): ("(?:[^"\\]|\\.)*")$/u.exec(line);
 
-    if (key === undefined || quoted === undefined) {
-      throw new Error(`Agent ${role} has an unparseable permission line: ${line}`);
-    }
-
-    if (key === "action") {
+    if (opened?.[1] !== undefined && opened[2] !== undefined) {
       flush();
+      item = {};
+      setValue(item, line, opened[1] as RuleKey, opened[2]);
+      continue;
     }
 
-    pending = { ...pending, [key]: JSON.parse(quoted) as string };
+    const continued = /^ {4}(action|resource|effect): ("(?:[^"\\]|\\.)*")$/u.exec(line);
+
+    if (continued?.[1] === undefined || continued[2] === undefined) {
+      throw new Error(`Agent ${role} has an unparseable permission line: ${JSON.stringify(line)}`);
+    }
+
+    if (item === undefined) {
+      throw new Error(
+        `Agent ${role} has a permission key before any list item opened: ${JSON.stringify(line)}`,
+      );
+    }
+
+    const key = continued[1] as RuleKey;
+
+    if (item[key] !== undefined) {
+      throw new Error(
+        `Agent ${role} repeats "${key}" inside one permission list item, so the frontmatter is not valid YAML and OpenCode ignores all of it: ${JSON.stringify(line)}`,
+      );
+    }
+
+    setValue(item, line, key, continued[2]);
   }
 
   flush();
@@ -285,20 +402,33 @@ function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermi
 }
 
 describe("generated project configuration", () => {
-  it("is minimal, valid JSON, and points at the OpenCode schema", () => {
+  it("is valid JSON and points at the OpenCode schema", () => {
     const config = renderOpenCodeProjectConfig();
 
     expect(JSON.parse(config)).toEqual({
       $schema: OPENCODE_CONFIG_SCHEMA,
       share: "disabled",
+      plugins: ["-*", "opencode.*"],
     });
     expect(config.endsWith("\n")).toBe(true);
+  });
+
+  it("disables every non-OpenCode plugin and keeps the OpenCode namespace", () => {
+    const config = JSON.parse(renderOpenCodeProjectConfig()) as { plugins: string[] };
+
+    // V2 removed `--pure`, so plugin isolation is configuration. `-*` disables every plugin, and a
+    // later entry re-enables one namespace, so a repository plugin under `.opencode/plugins/`
+    // cannot load. Everything OpenCode ships lives under `opencode.`, including the agent loader
+    // and the permission machinery the generated rules depend on.
+    expect(config.plugins[0]).toBe("-*");
+    expect(config.plugins).toContain("opencode.*");
+    expect(config.plugins.indexOf("-*")).toBeLessThan(config.plugins.indexOf("opencode.*"));
   });
 
   it("configures no model, no permissions, and no defaults", () => {
     const config = JSON.parse(renderOpenCodeProjectConfig()) as Record<string, unknown>;
 
-    expect(Object.keys(config).sort()).toEqual(["$schema", "share"]);
+    expect(Object.keys(config).sort()).toEqual(["$schema", "plugins", "share"]);
   });
 });
 
