@@ -262,6 +262,7 @@ function renderCheck(check: VerificationCommandEvidence): string {
       check.script === null ? "script: none, the command is declared rather than discovered" : `script: \`${check.script}\``,
       `duration: ${String(check.durationMs)}ms`,
       `reason: ${check.reason ?? "the command was not run and recorded no reason"}`,
+      `detail: ${check.detail}`,
     ]),
   ];
 
@@ -306,6 +307,40 @@ function renderCapabilities(bundle: VerificationEvidenceBundle): string {
     .join("\n");
 }
 
+/**
+ * The pair of measurements that bracket the run, and what they mean when they disagree.
+ *
+ * A verifier that sees only a list of passing exit codes has no way to know that the command it was
+ * judging rewrote the file it was judging, so the measurement is shown rather than summarised, and a
+ * change is stated as a fact the response cannot argue with.
+ */
+function renderWorkspace(bundle: VerificationEvidenceBundle): string {
+  const { before, after, changed } = bundle.workspace;
+
+  if (!changed) {
+    return [
+      bulletList([
+        `measured before the commands: \`${before}\``,
+        `measured after they finished: \`${after}\``,
+        "the working tree was not modified while these checks ran, so their results describe the code as it is now",
+      ]),
+    ].join("\n");
+  }
+
+  return [
+    bulletList([
+      `measured before the commands: \`${before}\``,
+      `measured after they finished: \`${after}\``,
+    ]),
+    "",
+    "**The working tree changed while these checks were running.** At least one command modified the",
+    "implementation it was verifying, so these results describe code that no longer exists and the stage",
+    "cannot pass, whatever they say. This is a fact about the run and not a question for you to weigh. Do",
+    "not treat a passing check above as evidence about the current tree: say which command did it and what it",
+    "wrote, and whether the check should be declared in agent-workflow.config.json so it runs the tool directly.",
+  ].join("\n");
+}
+
 function renderEvidence(bundle: VerificationEvidenceBundle): string {
   return [
     "## Deterministic verification evidence",
@@ -335,10 +370,14 @@ function renderEvidence(bundle: VerificationEvidenceBundle): string {
       ? "No command was selected for this stage."
       : bundle.checks.map(renderCheck).join("\n\n"),
     "",
+    "### Workspace measurement",
+    "",
+    renderWorkspace(bundle),
+    "",
     "### What this means for your response",
     "",
     bulletList([
-      `The framework recorded this stage as \`${bundle.outcome}\` before you were invoked. A recorded failure or a blocked check cannot be turned into a pass by any response you give; the orchestrator enforces that independently.`,
+      `The framework recorded this stage as \`${bundle.outcome}\` before you were invoked. A recorded failure, a blocked check, or a workspace that changed under the run cannot be turned into a pass by any response you give; the orchestrator enforces that independently.`,
       "Judge the implementation against the code and against these records. Do not repeat them as your own findings and do not contradict them.",
       "For every failing or blocked check, localize the defect precisely enough that a repair targets it, and state plainly what you could not determine.",
       "If the recorded outcome and your reading of the code disagree, report the disagreement as a finding. Do not resolve it by reclassifying the result.",

@@ -205,6 +205,7 @@ describe("deterministic verification evidence in the prompt", () => {
       outcome: "failed",
       revision: 7,
       implementationFingerprint: "b".repeat(64),
+      workspace: { before: "b".repeat(64), after: "b".repeat(64), changed: false },
       collectedAt: created,
       projectRoot: "/repo",
       project: {
@@ -251,6 +252,7 @@ describe("deterministic verification evidence in the prompt", () => {
           signal: null,
           status: "failed",
           reason: null,
+          detail: "pnpm run lint exited 2 after 1540ms.",
           stdoutExcerpt: "",
           stderrExcerpt: "src/app.ts\n  1:1  error  Unexpected any",
           truncated: false,
@@ -288,6 +290,55 @@ describe("deterministic verification evidence in the prompt", () => {
     expect(prompt).toContain("working directory: `/repo`");
     expect(prompt).toContain("duration: 1540ms");
     expect(prompt).toContain("src/app.ts\n  1:1  error  Unexpected any");
+  });
+
+  it("shows the check's own explanation, so a blocked command is reported as more than a status", () => {
+    const prompt = promptFor("static_verification", {
+      verification: evidence({
+        checks: [
+          {
+            ...failingCheck(),
+            id: "lint",
+            status: "blocked",
+            exitCode: null,
+            executable: "pnpm",
+            args: ["run", "lint"],
+            reason: "implicit_script_hook",
+            detail: 'The "lint" script declares a "prelint" hook, so running it through pnpm would execute code this stage did not declare. Declare the tool directly instead.',
+          },
+        ],
+      }),
+    });
+
+    expect(prompt).toContain("reason: implicit_script_hook");
+    expect(prompt).toContain('declares a "prelint" hook');
+    expect(prompt).toContain("Declare the tool directly instead.");
+  });
+
+  it("shows the unchanged workspace measurement as what lets the results be trusted", () => {
+    const prompt = promptFor("static_verification", { verification: evidence() });
+
+    expect(prompt).toContain("### Workspace measurement");
+    expect(prompt).toContain("measured before the commands");
+    expect(prompt).toContain("the working tree was not modified while these checks ran");
+    expect(prompt).not.toContain("The working tree changed while these checks were running.");
+  });
+
+  it("refuses to present results as evidence about a tree the run itself modified", () => {
+    const changed = "a".repeat(64);
+    const prompt = promptFor("static_verification", {
+      verification: evidence({
+        workspace: { before: changed, after: "b".repeat(64), changed: true },
+      }),
+    });
+
+    expect(prompt).toContain("The working tree changed while these checks were running.");
+    expect(prompt).toContain("these results describe code that no longer exists");
+    expect(prompt).toContain("Do");
+    expect(prompt).toContain("not treat a passing check above as evidence about the current tree");
+    // The pair is shown as measured, not summarised.
+    expect(prompt).toContain(`\`${changed}\``);
+    expect(prompt).toContain(`\`${"b".repeat(64)}\``);
   });
 
   it("reports the recorded outcome, the revision, and the fingerprint as framework facts", () => {

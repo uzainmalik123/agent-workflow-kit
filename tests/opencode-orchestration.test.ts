@@ -9,10 +9,12 @@ import {
   type StageExecutionRequest,
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore, type FeatureSessionStore } from "@agent-workflow-kit/persistence";
+import type { VerificationProvider } from "@agent-workflow-kit/orchestration";
 import { ProjectVerificationProvider } from "@agent-workflow-kit/project";
 import { createOpenCodeStageExecutor, isOpenCodeAdapterError } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakeOpenCodeTransport, renderFencedJson } from "../fixtures/opencode-transport.js";
+import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
 const roots: string[] = [];
@@ -34,10 +36,18 @@ async function makeRoot(): Promise<string> {
   return root;
 }
 
+/**
+ * A harness for adapter tests, so it carries a verification provider by default.
+ *
+ * These tests are about the OpenCode adapter, and a verification stage reached without a provider is
+ * now refused rather than passed on the agent's word, which would stop every one of them at the first
+ * verification stage. `verification: null` is the way to ask for the refusal on purpose, and an
+ * explicit provider replaces the default so a test can drive the real project adapter end to end.
+ */
 function createHarness(
   root: string,
   options: {
-    readonly verification?: ProjectVerificationProvider;
+    readonly verification?: ProjectVerificationProvider | VerificationProvider | null;
     readonly projectRoot?: string;
   } = {},
 ): Harness {
@@ -47,8 +57,11 @@ function createHarness(
   const orchestrator = createWorkflowOrchestrator({
     store,
     executor,
-    ...(options.verification === undefined ? {} : { verification: options.verification }),
-    ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+    verification:
+      options.verification === null
+        ? null
+        : (options.verification ?? createFakeVerificationProvider()),
+    projectRoot: root,
   });
 
   return { root, store, transport, orchestrator };

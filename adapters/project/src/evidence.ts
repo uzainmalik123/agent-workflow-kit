@@ -77,12 +77,41 @@ export function absentCheck(input: {
     signal: null,
     status: input.status === "blocked" ? "blocked" : "skipped",
     reason: input.reason,
+    detail: input.detail,
     stdoutExcerpt: "",
     stderrExcerpt: "",
     truncated: false,
     revision: input.revision,
     implementationFingerprint: input.fingerprint,
   };
+}
+
+/**
+ * The sentence a passed or failed check carries, built from the runner's own result.
+ *
+ * It is derived from the termination and the exit code and from nothing else, in the same way the
+ * status is, so a check's explanation cannot disagree with its verdict. The command is quoted as it
+ * was run, because "the lint check failed" is a much worse thing to debug than
+ * "`pnpm run lint` exited 2".
+ */
+export function describeCommandOutcome(outcome: ChildProcessOutcome, command: PlannedVerificationCommand): string {
+  const invocation = `${command.executable} ${command.args.join(" ")}`.trim();
+  const duration = `${String(outcome.durationMs)}ms`;
+
+  switch (outcome.termination) {
+    case "exited":
+      return `${invocation} exited ${String(outcome.exitCode)} after ${duration}.`;
+    case "signalled":
+      return `${invocation} was terminated by signal ${outcome.signal ?? "unknown"} after ${duration}.`;
+    case "timed_out":
+      return `${invocation} exceeded the ${duration} deadline and was killed.`;
+    case "cancelled":
+      return `${invocation} was cancelled before it finished.`;
+    case "spawn_failed":
+      return `${invocation} could not be started (${outcome.reason ?? "no reason recorded"}).`;
+    case "output_truncated":
+      return `${invocation} produced more output than this framework captures, which is treated as a failure rather than a pass.`;
+  }
 }
 
 export function commandEvidence(input: {
@@ -110,6 +139,7 @@ export function commandEvidence(input: {
     signal: outcome.signal,
     status: statusForOutcome(outcome),
     reason: outcome.reason,
+    detail: describeCommandOutcome(outcome, command),
     stdoutExcerpt: outcome.stdout.text,
     stderrExcerpt: outcome.stderr.text,
     truncated: outcome.stdout.truncated || outcome.stderr.truncated,
@@ -119,14 +149,26 @@ export function commandEvidence(input: {
 }
 
 /**
- * The stage verdict, and it is a function of the checks alone.
+ * The stage verdict, and it is a function of the checks and the workspace alone.
  *
  * Any check that did not pass makes the stage fail; a check that could not start makes it blocked;
  * and a stage with nothing but skipped checks is deferred. A stage whose applicable checks all passed
  * passes, with no weight given to how many there were: a project with one lint script and a project
  * with four are both verified when what they have passed.
+ *
+ * A workspace that changed while the commands ran is a failure regardless of every check's status,
+ * including all of them passing. The checks described a tree the run itself replaced, so a pass would
+ * be a statement about code that no longer exists, and a lint run that rewrote the source it was
+ * checking is precisely the case this exists for.
  */
-export function outcomeForChecks(checks: readonly VerificationCommandEvidence[]): VerificationOutcome {
+export function outcomeForChecks(
+  checks: readonly VerificationCommandEvidence[],
+  workspaceChanged = false,
+): VerificationOutcome {
+  if (workspaceChanged) {
+    return "failed";
+  }
+
   if (checks.length === 0) {
     return "deferred";
   }
@@ -162,16 +204,23 @@ export function buildBundle(input: {
   readonly verification: VerificationStage;
   readonly revision: number;
   readonly fingerprint: string;
+  readonly workspaceAfter: string;
   readonly collectedAt: string;
   readonly projectRoot: string;
   readonly project: ProjectProfile;
   readonly checks: readonly VerificationCommandEvidence[];
 }): VerificationEvidenceBundle {
+  // The bundle carries the fingerprint its commands saw, which is the measurement from before the run.
+  // `changed` is derived here rather than accepted, so no caller can report an unchanged workspace
+  // over two different digests.
+  const changed = input.workspaceAfter !== input.fingerprint;
+
   return {
     verification: input.verification,
-    outcome: outcomeForChecks(input.checks),
+    outcome: outcomeForChecks(input.checks, changed),
     revision: input.revision,
     implementationFingerprint: input.fingerprint,
+    workspace: { before: input.fingerprint, after: input.workspaceAfter, changed },
     collectedAt: input.collectedAt,
     projectRoot: input.projectRoot,
     project: profileSummary(input.project),

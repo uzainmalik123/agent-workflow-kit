@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   createWorkflowOrchestrator,
+  DETERMINISTIC_EVIDENCE_KEY,
   type OrchestrationResult,
   type StageExecutionRequest,
 } from "@agent-workflow-kit/orchestration";
@@ -12,6 +13,7 @@ import {
   type FeatureSessionStore,
 } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
+import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
@@ -36,7 +38,7 @@ async function makeRoot(): Promise<string> {
 function createHarness(root: string): Harness {
   const store = createFeatureSessionStore(root, { clock: fixedClock });
   const executor = new FakeStageExecutor();
-  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor }) };
+  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() }) };
 }
 
 function contextNames(request: StageExecutionRequest | undefined): readonly string[] {
@@ -303,11 +305,14 @@ describe("orchestrator full flow", () => {
       unknown
     >;
 
-    expect(Object.keys(verification)).toEqual([
+    // The three model sections in the order the stages ran, beside the framework's own key, which is
+    // appended to rather than taking a section of its own.
+    expect(Object.keys(verification).filter((key) => key !== DETERMINISTIC_EVIDENCE_KEY)).toEqual([
       "static_verification",
       "test_verification",
       "runtime_verification",
     ]);
+    expect(Object.keys(verification)).toContain(DETERMINISTIC_EVIDENCE_KEY);
 
     expect(await store.readEvents("F-001")).toHaveLength(17);
     expect(await store.readEvents("F-001")).toEqual(

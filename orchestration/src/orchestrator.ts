@@ -16,6 +16,7 @@ import {
   type FeatureSession,
   type FeatureSessionStore,
 } from "@agent-workflow-kit/persistence";
+import { resolve } from "node:path";
 import { buildPlanApproval, verifyPlanApproval } from "./approval.js";
 import { describeError, orchestrationError, type OrchestrationError } from "./errors.js";
 import { appendFixHistoryEntry } from "./fix-history.js";
@@ -45,6 +46,7 @@ import {
 } from "./stages.js";
 import {
   applyDeterministicEvidence,
+  bindVerificationEvidenceToRequest,
   mergeDeterministicEvidence,
   validateVerificationEvidenceBundle,
   verificationEvidenceSummaries,
@@ -52,6 +54,7 @@ import {
   VERIFICATION_STAGE_BY_WORK_STAGE,
   type VerificationEvidenceBundle,
   type VerificationProvider,
+  type VerificationRequest,
   type VerificationStage,
 } from "./verification.js";
 
@@ -66,17 +69,21 @@ export interface WorkflowOrchestratorOptions {
   readonly store: FeatureSessionStore;
   readonly executor: StageExecutor;
   /**
-   * Where deterministic verification evidence comes from. Optional: without it the three
-   * verification stages run exactly as they always have, on the executor's word alone. With it, the
-   * orchestrator collects evidence before the executor is called and the exit statuses in that
-   * evidence decide whether the stage may pass. The provider is constructed by whoever wires the kit
-   * up; it is never an agent, and it never receives a command from one.
+   * Where deterministic verification evidence comes from.
+   *
+   * Optional only so that a workflow which never reaches a verification stage, and the tests for
+   * everything before one, can be built without one. The three verification stages have no model-only
+   * mode: reaching one without a provider is a structured `verification_not_configured` refusal that
+   * never calls the executor, rather than a stage that passes on an opinion. The provider is
+   * constructed by whoever wires the kit up; it is never an agent, and it never receives a command
+   * from one.
    */
   readonly verification?: VerificationProvider | null;
   /**
-   * The project the verification provider may run commands in. Defaults to `process.cwd()`. It is
-   * handed to the provider as data; no stage, agent, or artifact can change it, and the provider
-   * refuses a command whose working directory is anywhere else.
+   * The project the verification provider may run commands in. Defaults to `process.cwd()`, and is
+   * resolved once at construction so that a bundle for the same directory reaches the identity check
+   * in the same form however the caller spelled it. It is handed to the provider as data; no stage,
+   * agent, or artifact can change it, and the provider refuses a request for anywhere else.
    */
   readonly projectRoot?: string | null;
 }
@@ -155,7 +162,7 @@ export class WorkflowOrchestrator {
     this.#store = options.store;
     this.#executor = options.executor;
     this.#verification = options.verification ?? null;
-    this.#projectRoot = options.projectRoot ?? process.cwd();
+    this.#projectRoot = resolve(options.projectRoot ?? process.cwd());
   }
 
   get store(): FeatureSessionStore {
@@ -287,12 +294,16 @@ export class WorkflowOrchestrator {
     const featureId = session.featureId;
     const fromState = session.machine.state;
     const definition = STAGE_DEFINITIONS[stage];
+    // `executedStages` is not in this base on purpose. It is added at each point where the stage
+    // executor was actually involved, because a stage that was refused before the executor ran has
+    // not been executed, and a result that listed it would claim an opinion was recorded when the
+    // whole point of the refusal is that none was.
     const base: ResultExtras = {
       featureId,
       fromState,
       stage,
       role: definition.role,
-      executedStages: [stage],
+      executedStages: [],
     };
     const contextPlan = resolveStageContextPlan(stage, session.machine.fixReturnState);
 
@@ -354,6 +365,7 @@ export class WorkflowOrchestrator {
     } catch (error) {
       return this.#result({
         ...base,
+        executedStages: [stage],
         status: "executor_error",
         state: fromState,
         verification: evidence.bundle,
@@ -369,6 +381,7 @@ export class WorkflowOrchestrator {
     if (!validation.ok) {
       return this.#result({
         ...base,
+        executedStages: [stage],
         status: "rejected",
         state: fromState,
         verification: evidence.bundle,
@@ -389,6 +402,7 @@ export class WorkflowOrchestrator {
     const extraFindings: readonly ReviewFinding[] = applied.findings;
     const reported: ResultExtras = {
       ...base,
+      executedStages: [stage],
       findings: [...outcome.findings, ...extraFindings],
       evidence:
         evidence.bundle === null
@@ -466,9 +480,13 @@ export class WorkflowOrchestrator {
   /**
    * Asks the deterministic provider for this stage's evidence and refuses a bundle it cannot verify.
    *
-   * A provider failure, a malformed bundle, or a bundle that contradicts itself is reported as an
-   * orchestration error and nothing is written: an unverifiable verification is not a passing
-   * verification, and it is not silently downgraded to a model-only opinion either.
+   * There is no fallback path. A verification stage reached without a provider is refused here,
+   * before the executor exists, because the alternative is the behaviour this milestone exists to
+   * remove: a stage whose only evidence is a model's description of a run nobody performed. A
+   * provider failure, a malformed bundle, a bundle that contradicts itself, and a well-formed bundle
+   * belonging to a different stage, revision, or repository are all the same kind of answer, which is
+   * no: an unverifiable verification is not a passing verification, and it is never downgraded to an
+   * opinion.
    */
   async #collectVerification(
     session: FeatureSession,
@@ -479,20 +497,32 @@ export class WorkflowOrchestrator {
   > {
     const verification: VerificationStage | undefined = VERIFICATION_STAGE_BY_WORK_STAGE[stage];
 
-    if (verification === undefined || this.#verification === null) {
+    if (verification === undefined) {
       return { ok: true, bundle: null };
     }
+
+    if (this.#verification === null) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "verification_not_configured",
+          `The "${stage}" stage requires a verification provider and none is configured, so there is no process result to verify it against. It is refused rather than passed on the verifier's word.`,
+        ),
+      };
+    }
+
+    const request: VerificationRequest = {
+      featureId: session.featureId,
+      stage,
+      verification,
+      revision: session.revision,
+      projectRoot: this.#projectRoot,
+    };
 
     let raw: unknown;
 
     try {
-      raw = await this.#verification.collect({
-        featureId: session.featureId,
-        stage,
-        verification,
-        revision: session.revision,
-        projectRoot: this.#projectRoot,
-      });
+      raw = await this.#verification.collect(request);
     } catch (error) {
       return {
         ok: false,
@@ -509,17 +539,16 @@ export class WorkflowOrchestrator {
       return { ok: false, error: orchestrationError(validated.code, validated.message) };
     }
 
-    if (validated.bundle.verification !== verification) {
-      return {
-        ok: false,
-        error: orchestrationError(
-          "verification_evidence_invalid",
-          `The verification provider returned ${validated.bundle.verification} evidence for the ${verification} stage.`,
-        ),
-      };
+    // Identity, not shape. A bundle that is internally perfect and belongs to a superseded revision
+    // is exactly the thing that must not reach the verifier, so this runs before the executor is
+    // called and before anything is written.
+    const bound = bindVerificationEvidenceToRequest(validated.bundle, request);
+
+    if (!bound.ok) {
+      return { ok: false, error: orchestrationError(bound.code, bound.message) };
     }
 
-    return { ok: true, bundle: validated.bundle };
+    return { ok: true, bundle: bound.bundle };
   }
 
   async #verifyApproval(

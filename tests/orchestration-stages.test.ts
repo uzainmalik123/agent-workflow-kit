@@ -29,6 +29,7 @@ import {
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
+import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 const roots: string[] = [];
@@ -308,7 +309,11 @@ describe("context routing", () => {
     const root = await makeRoot();
     const store = createFeatureSessionStore(root, { clock: fixedClock });
     const executor = new FakeStageExecutor();
-    const orchestrator = createWorkflowOrchestrator({ store, executor });
+    const orchestrator = createWorkflowOrchestrator({
+      store,
+      executor,
+      verification: createFakeVerificationProvider(),
+    });
 
     await orchestrator.createFeature({
       featureId: "F-001",

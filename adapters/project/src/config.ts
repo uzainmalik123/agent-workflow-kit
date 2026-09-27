@@ -1,6 +1,11 @@
 import { resolve } from "node:path";
 import type { VerificationStage } from "@agent-workflow-kit/orchestration";
-import { buildVerificationCommand, type PlannedVerificationCommand } from "./commands.js";
+import {
+  buildVerificationCommand,
+  CAPABILITIES_BY_STAGE,
+  capabilityBelongsToStage,
+  type PlannedVerificationCommand,
+} from "./commands.js";
 import { ProjectAdapterError } from "./errors.js";
 import { isFile, isRecord, parseJsonFile, readProjectFile, resolveInsideRoot } from "./fs-safe.js";
 
@@ -12,10 +17,13 @@ import { isFile, isRecord, parseJsonFile, readProjectFile, resolveInsideRoot } f
  * declares the command itself, and the framework still executes it as an executable plus an argument
  * array, still refuses lifecycle and install invocations, and still records the exit status.
  *
- * Two things are structurally impossible here. A shell line cannot be written: the only accepted
- * shape is `{ id, capability, executable, args }`, any other field is refused, and a `command` or
- * `shell` string has nowhere to go. And the file is project configuration, not agent output: the
- * OpenCode adapter denies writing it to every role, and this adapter never writes it.
+ * Three things are structurally impossible here. A shell line cannot be written: the only accepted
+ * shape is `{ id, capability, executable, args }` plus an optional `cwd`, any other field is refused,
+ * and a `command` or `shell` string has nowhere to go. A shell wrapper cannot do the same thing one
+ * level down, because `{ "executable": "/bin/sh", "args": ["-c", ...] }` is refused by name. And a
+ * command cannot claim a capability its section does not cover, so a test command cannot answer the
+ * static stage. The file is also project configuration rather than agent output: the OpenCode
+ * adapter denies writing it to every role, and this adapter never writes it.
  */
 export const PROJECT_CONFIG_FILENAME = "agent-workflow.config.json";
 
@@ -82,6 +90,16 @@ function parseCommand(
     capability !== "runtime"
   ) {
     refuse(`The configured command "${id}" must name a capability: lint, typecheck, test, build, or runtime.`);
+  }
+
+  if (!capabilityBelongsToStage(stage, capability)) {
+    const allowed = CAPABILITIES_BY_STAGE[stage]
+      .map((entry) => `"${entry}"`)
+      .join(", ");
+
+    refuse(
+      `The configured command "${id}" claims capability "${capability}" in the "${stage}" section, which may only cover ${allowed}. A stage runs the capabilities it is defined by, so a command claiming another one would be recorded as evidence about the wrong stage.`,
+    );
   }
 
   const executable = raw["executable"];

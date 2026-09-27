@@ -59,10 +59,12 @@ export type { StageResultValidation } from "./result-validation.js";
 
 export {
   applyDeterministicEvidence,
+  bindVerificationEvidenceToRequest,
   CAPABILITY_REASONS,
   CAPABILITY_STATUSES,
   DETERMINISTIC_EVIDENCE_KEY,
   evidenceBlocksSuccess,
+  MAX_EVIDENCE_DETAIL_CHARS,
   MAX_EVIDENCE_EXCERPT_CHARS,
   mergeDeterministicEvidence,
   validateVerificationEvidenceBundle,
@@ -91,6 +93,7 @@ export type {
   VerificationProvider,
   VerificationRequest,
   VerificationStage,
+  WorkspaceIntegrity,
 } from "./verification.js";
 
 export { buildOrchestrationResult, ORCHESTRATION_STATUSES } from "./result.js";

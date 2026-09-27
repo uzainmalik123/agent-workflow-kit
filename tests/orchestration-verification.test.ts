@@ -5,10 +5,11 @@ import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   createWorkflowOrchestrator,
   DETERMINISTIC_EVIDENCE_KEY,
+  type VerificationCommandEvidence,
   type VerificationEvidenceBundle,
   type VerificationProvider,
-  type VerificationStage,
   type VerificationRequest,
+  type VerificationStage,
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore, type FeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
@@ -23,114 +24,146 @@ interface Harness {
   readonly orchestrator: ReturnType<typeof createWorkflowOrchestrator>;
 }
 
+/** What a provider may answer with for one request. */
+type BundleAnswer = VerificationEvidenceBundle | Error;
+
 /**
- * A provider that returns whatever it is told to return and records every request.
+ * A provider that answers with exactly what it is told to and records every request.
  *
- * It exists to test the orchestration contract rather than the project adapter: that the evidence is
- * collected after approval and before the stage runs, that it reaches the verifier, and that a bundle
- * the framework cannot verify is refused rather than trusted.
+ * It returns the bundle verbatim. An earlier version of this fixture patched `verification`,
+ * `revision`, and `projectRoot` from the request on the way out, which meant no test could ever
+ * present the framework with a bundle belonging to something else. A provider is substitutable and
+ * the orchestrator is the thing that has to notice, so the fixture stopped helping.
  */
 class RecordingProvider implements VerificationProvider {
   readonly requests: VerificationRequest[] = [];
-  readonly #bundles: Readonly<Partial<Record<VerificationStage, VerificationEvidenceBundle | Error>>>;
+  readonly #answer: (request: VerificationRequest) => BundleAnswer;
 
-  constructor(bundles: Readonly<Partial<Record<VerificationStage, VerificationEvidenceBundle | Error>>>) {
-    this.#bundles = bundles;
+  constructor(answer: (request: VerificationRequest) => BundleAnswer) {
+    this.#answer = answer;
   }
 
   collect(request: VerificationRequest): Promise<VerificationEvidenceBundle> {
     this.requests.push(request);
 
-    const bundle = this.#bundles[request.verification];
+    const answer = this.#answer(request);
 
-    if (bundle === undefined) {
-      return Promise.reject(new Error(`no bundle configured for ${request.verification}`));
+    if (answer instanceof Error) {
+      return Promise.reject(answer);
     }
 
-    if (bundle instanceof Error) {
-      return Promise.reject(bundle);
-    }
-
-    return Promise.resolve({
-      ...bundle,
-      verification: request.verification,
-      revision: request.revision,
-      projectRoot: request.projectRoot,
-    });
+    return Promise.resolve(answer);
   }
 }
 
-/** A passing, check-free bundle for every stage, so a test only names the stage it is about. */
-function passingStages(): Record<VerificationStage, VerificationEvidenceBundle> {
+const FINGERPRINT = "a".repeat(64);
+const OTHER_FINGERPRINT = "b".repeat(64);
+
+function profileSummary(): VerificationEvidenceBundle["project"] {
   return {
-    static: evidence(),
-    test: evidence(),
-    runtime: evidence(),
+    ecosystem: "node",
+    language: "typescript",
+    packageManager: "pnpm",
+    declaredPackageManager: "pnpm",
+    dependenciesInstalled: true,
+    frameworks: ["vitest"],
+    capabilities: [
+      { capability: "lint", status: "applicable", reason: "detected", script: "lint", detail: "A lint script." },
+      {
+        capability: "typecheck",
+        status: "unavailable",
+        reason: "script_absent",
+        script: null,
+        detail: "No typecheck script.",
+      },
+      { capability: "test", status: "unavailable", reason: "script_absent", script: null, detail: "No test script." },
+      { capability: "build", status: "unavailable", reason: "script_absent", script: null, detail: "No build." },
+      {
+        capability: "runtime",
+        status: "unsupported",
+        reason: "runtime_deferred",
+        script: null,
+        detail: "Runtime is deferred.",
+      },
+    ],
   };
 }
 
-function evidence(overrides: Partial<VerificationEvidenceBundle> = {}): VerificationEvidenceBundle {
+/** A passing, check-free bundle bound to the request that asked for it. */
+function evidenceFor(
+  request: VerificationRequest,
+  overrides: Partial<VerificationEvidenceBundle> = {},
+): VerificationEvidenceBundle {
   return {
-    verification: "static",
+    verification: request.verification,
     outcome: "passed",
-    revision: 1,
-    implementationFingerprint: "a".repeat(64),
+    revision: request.revision,
+    implementationFingerprint: FINGERPRINT,
+    workspace: { before: FINGERPRINT, after: FINGERPRINT, changed: false },
     collectedAt: fixedTimestamp,
-    projectRoot: "/tmp/project",
-    project: {
-      ecosystem: "node",
-      language: "typescript",
-      packageManager: "pnpm",
-      declaredPackageManager: "pnpm",
-      dependenciesInstalled: true,
-      frameworks: ["vitest"],
-      capabilities: [
-        { capability: "lint", status: "applicable", reason: "detected", script: "lint", detail: "A lint script." },
-        {
-          capability: "typecheck",
-          status: "unavailable",
-          reason: "script_absent",
-          script: null,
-          detail: "No typecheck script.",
-        },
-        { capability: "test", status: "unavailable", reason: "script_absent", script: null, detail: "No test script." },
-        { capability: "build", status: "unavailable", reason: "script_absent", script: null, detail: "No build." },
-        {
-          capability: "runtime",
-          status: "unsupported",
-          reason: "runtime_deferred",
-          script: null,
-          detail: "Runtime is deferred.",
-        },
-      ],
-    },
+    projectRoot: request.projectRoot,
+    project: profileSummary(),
     checks: [],
     ...overrides,
   };
 }
 
-const failedCheck = (kind: "static" | "test" | "runtime"): VerificationEvidenceBundle["checks"][number] => ({
-  id: "lint",
-  kind,
-  capability: "lint",
-  capabilityStatus: "applicable",
-  label: "Lint",
-  executable: "pnpm",
-  args: ["run", "lint"],
-  cwd: "/tmp/project",
-  script: "lint",
-  startedAt: fixedTimestamp,
-  durationMs: 1200,
-  exitCode: 2,
-  signal: null,
-  status: "failed",
-  reason: null,
-  stdoutExcerpt: "",
-  stderrExcerpt: "error: 2 problems",
-  truncated: false,
-  revision: 1,
-  implementationFingerprint: "a".repeat(64),
-});
+/** A provider that passes every stage, so a test only has to name the stage it is about. */
+function passingProvider(): RecordingProvider {
+  return new RecordingProvider((request) => evidenceFor(request));
+}
+
+/** A provider that fails one stage and passes the rest. */
+function failingStaticProvider(overrides: Partial<VerificationEvidenceBundle> = {}): RecordingProvider {
+  return new RecordingProvider((request) =>
+    request.verification === "static"
+      ? evidenceFor(request, { outcome: "failed", checks: [failedCheck(request)] , ...overrides })
+      : evidenceFor(request),
+  );
+}
+
+function failedCheck(request: VerificationRequest): VerificationCommandEvidence {
+  return {
+    id: "lint",
+    kind: request.verification,
+    capability: "lint",
+    capabilityStatus: "applicable",
+    label: "Lint",
+    executable: "pnpm",
+    args: ["run", "lint"],
+    cwd: request.projectRoot,
+    script: "lint",
+    startedAt: fixedTimestamp,
+    durationMs: 1200,
+    exitCode: 2,
+    signal: null,
+    status: "failed",
+    reason: null,
+    detail: "pnpm run lint exited 2 after 1200ms.",
+    stdoutExcerpt: "",
+    stderrExcerpt: "error: 2 problems",
+    truncated: false,
+    revision: request.revision,
+    implementationFingerprint: FINGERPRINT,
+  };
+}
+
+function skippedRuntimeCheck(request: VerificationRequest): VerificationCommandEvidence {
+  return {
+    ...failedCheck(request),
+    kind: "runtime",
+    capability: "runtime",
+    capabilityStatus: "unsupported",
+    executable: null,
+    args: [],
+    script: null,
+    exitCode: null,
+    status: "skipped",
+    reason: "runtime_deferred",
+    detail: "Runtime verification has no deterministic command yet.",
+    stderrExcerpt: "",
+  };
+}
 
 function makeHarness(
   root: string,
@@ -154,7 +187,7 @@ async function makeRoot(): Promise<string> {
   return root;
 }
 
-/** Drives the feature to the state before the plan approval gate. */
+/** Drives the feature to the state before the plan approval gate, then approves it. */
 async function driveToPlanGate(harness: Harness): Promise<void> {
   await harness.orchestrator.createFeature({
     featureId: "F-001",
@@ -169,6 +202,14 @@ async function driveToPlanGate(harness: Harness): Promise<void> {
   await harness.orchestrator.approvePlan("F-001");
 }
 
+/** Runs the three post-approval stages, so the next `runNext` is the static verification. */
+async function runToStaticVerification(harness: Harness): Promise<void> {
+  await driveToPlanGate(harness);
+  await harness.orchestrator.runNext("F-001");
+  await harness.orchestrator.runNext("F-001");
+  await harness.orchestrator.runNext("F-001");
+}
+
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
@@ -178,7 +219,7 @@ afterEach(async () => {
 describe("orchestrator verification integration", () => {
   it("collects no evidence before the plan is approved, and for no other stage", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider(passingStages());
+    const provider = passingProvider();
     const harness = makeHarness(root, provider);
 
     await driveToPlanGate(harness);
@@ -196,13 +237,10 @@ describe("orchestrator verification integration", () => {
 
   it("collects the evidence for a verification stage before the stage executor runs", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider(passingStages());
+    const provider = passingProvider();
     const harness = makeHarness(root, provider);
 
-    await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
+    await runToStaticVerification(harness);
 
     const result = await harness.orchestrator.runNext("F-001");
 
@@ -218,7 +256,7 @@ describe("orchestrator verification integration", () => {
 
   it("maps each verification stage to its own evidence stage", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider(passingStages());
+    const provider = passingProvider();
     const harness = makeHarness(root, provider);
 
     await driveToPlanGate(harness);
@@ -244,16 +282,9 @@ describe("orchestrator verification integration", () => {
 
   it("turns a verifier success into a fix request when the recorded evidence failed", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider({
-      ...passingStages(),
-      static: evidence({ outcome: "failed", checks: [failedCheck("static")] }),
-    });
-    const harness = makeHarness(root, provider);
+    const harness = makeHarness(root, failingStaticProvider());
 
-    await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
+    await runToStaticVerification(harness);
 
     const result = await harness.orchestrator.runNext("F-001");
 
@@ -264,30 +295,34 @@ describe("orchestrator verification integration", () => {
       event: "request_fix",
       committed: true,
     });
-    expect(result.findings).toEqual([
-      expect.objectContaining({
-        featureId: "F-001",
-        severity: "error",
-        message: expect.stringContaining("pnpm run lint") as unknown as string,
-      }),
-    ]);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ featureId: "F-001", severity: "error" });
+    expect(result.findings[0]?.message).toContain("pnpm run lint");
+    // The finding names the command as it ran, not just the capability that failed.
+    expect(result.findings[0]?.message).toContain("exited 2");
   });
 
   it("turns a verifier success into a fix request when a check was blocked", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider({
-      ...passingStages(),
-      static: evidence({
-        outcome: "blocked",
-        checks: [{ ...failedCheck("static"), status: "blocked", exitCode: null, reason: "dependency_missing" }],
-      }),
-    });
+    const provider = new RecordingProvider((request) =>
+      request.verification === "static"
+        ? evidenceFor(request, {
+            outcome: "blocked",
+            checks: [
+              {
+                ...failedCheck(request),
+                status: "blocked",
+                exitCode: null,
+                reason: "dependency_missing",
+                detail: "The project's dependencies are not installed.",
+              },
+            ],
+          })
+        : evidenceFor(request),
+    );
     const harness = makeHarness(root, provider);
 
-    await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
+    await runToStaticVerification(harness);
 
     expect(await harness.orchestrator.runNext("F-001")).toMatchObject({
       status: "fix_requested",
@@ -295,19 +330,34 @@ describe("orchestrator verification integration", () => {
     });
   });
 
+  it("refuses a passing bundle when the workspace changed underneath the checks", async () => {
+    const root = await makeRoot();
+    const provider = new RecordingProvider((request) =>
+      evidenceFor(request, {
+        outcome: "failed",
+        workspace: { before: FINGERPRINT, after: OTHER_FINGERPRINT, changed: true },
+      }),
+    );
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    const result = await harness.orchestrator.runNext("F-001");
+
+    expect(result).toMatchObject({ status: "fix_requested", state: WorkflowState.Fixing });
+    expect(result.findings[0]?.message).toContain("working tree changed");
+    expect(result.findings[0]?.message).toContain(OTHER_FINGERPRINT);
+  });
+
   it("accepts a verifier failure on evidence that passed, because a reader can see more than a code", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider(passingStages());
     const executor = new FakeStageExecutor().configure("static_verification", {
       outcome: "needs_fix",
       findings: [{ featureId: "F-001", severity: "error", message: "The criterion is not met despite a clean run." }],
     });
-    const harness = makeHarness(root, provider, executor);
+    const harness = makeHarness(root, passingProvider(), executor);
 
-    await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
+    await runToStaticVerification(harness);
 
     expect(await harness.orchestrator.runNext("F-001")).toMatchObject({
       status: "fix_requested",
@@ -317,27 +367,11 @@ describe("orchestrator verification integration", () => {
 
   it("accepts a deferred runtime stage as completed, because deferral is not failure", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider({
-      ...passingStages(),
-      runtime: evidence({
-        outcome: "deferred",
-        checks: [
-          {
-            ...failedCheck("runtime"),
-            kind: "runtime",
-            capability: "runtime",
-            capabilityStatus: "unsupported",
-            executable: null,
-            args: [],
-            script: null,
-            exitCode: null,
-            status: "skipped",
-            reason: "runtime_deferred",
-            stderrExcerpt: "",
-          },
-        ],
-      }),
-    });
+    const provider = new RecordingProvider((request) =>
+      request.verification === "runtime"
+        ? evidenceFor(request, { outcome: "deferred", checks: [skippedRuntimeCheck(request)] })
+        : evidenceFor(request),
+    );
     const harness = makeHarness(root, provider);
 
     await driveToPlanGate(harness);
@@ -356,13 +390,12 @@ describe("orchestrator verification integration", () => {
 
   it("refuses the stage and writes nothing when the provider itself fails", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider({ static: new Error("the toolchain is missing") });
+    const provider = new RecordingProvider((request) =>
+      request.verification === "static" ? new Error("the toolchain is missing") : evidenceFor(request),
+    );
     const harness = makeHarness(root, provider);
 
-    await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
+    await runToStaticVerification(harness);
 
     const before = await harness.store.load("F-001");
     const result = await harness.orchestrator.runNext("F-001");
@@ -376,16 +409,10 @@ describe("orchestrator verification integration", () => {
 
   it("refuses a bundle that contradicts itself instead of acting on it", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider({
-      ...passingStages(),
-      static: evidence({ outcome: "passed", checks: [failedCheck("static")] }),
-    });
+    const provider = failingStaticProvider({ outcome: "passed" });
     const harness = makeHarness(root, provider);
 
-    await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
+    await runToStaticVerification(harness);
 
     const before = await harness.store.load("F-001");
     const result = await harness.orchestrator.runNext("F-001");
@@ -398,16 +425,9 @@ describe("orchestrator verification integration", () => {
 
   it("persists each attempt under a framework-owned key, and never over the model's own section", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider({
-      ...passingStages(),
-      static: evidence({ outcome: "failed", checks: [failedCheck("static")] }),
-    });
-    const harness = makeHarness(root, provider);
+    const harness = makeHarness(root, failingStaticProvider());
 
-    await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
+    await runToStaticVerification(harness);
 
     const first = await harness.orchestrator.runNext("F-001");
 
@@ -432,44 +452,362 @@ describe("orchestrator verification integration", () => {
     expect(persisted.static_verification).toHaveLength(2);
     expect(persisted.static_verification[0]?.checks[0]).toMatchObject({ exitCode: 2, status: "failed" });
   });
+});
 
-  it("collects fresh evidence after a fix, so a repair cannot inherit the old result", async () => {
+describe("failing closed without a provider", () => {
+  it("refuses a verification stage rather than passing it on the verifier's word", async () => {
     const root = await makeRoot();
-    const provider = new RecordingProvider({
-      ...passingStages(),
-      static: evidence({ outcome: "failed", checks: [failedCheck("static")] }),
+    const harness = makeHarness(root, null);
+
+    await runToStaticVerification(harness);
+
+    const before = await harness.store.load("F-001");
+    const result = await harness.orchestrator.runNext("F-001");
+
+    expect(result).toMatchObject({
+      status: "rejected",
+      stage: "static_verification",
+      failureClass: "verification",
+      committed: false,
     });
+    expect(result.error?.code).toBe("verification_not_configured");
+    expect(result.error?.message).toContain("rather than passed on the verifier's word");
+    expect(await harness.store.load("F-001")).toEqual(before);
+  });
+
+  it("never calls the verifier executor, so there is no opinion to believe", async () => {
+    const root = await makeRoot();
+    const executor = new FakeStageExecutor().configure("static_verification", {
+      outcome: "success",
+      artifacts: [
+        {
+          name: "verification",
+          content: { featureId: "F-001", stage: "static_verification", kind: "static", results: [] },
+        },
+      ],
+    });
+    const harness = makeHarness(root, null, executor);
+
+    await runToStaticVerification(harness);
+
+    const result = await harness.orchestrator.runNext("F-001");
+
+    expect(result.status).toBe("rejected");
+    expect(executor.requestFor("static_verification")).toBeUndefined();
+    await expect(harness.store.readArtifact("F-001", "verification")).rejects.toThrow(
+      /does not exist/iu,
+    );
+  });
+
+  it("changes nothing at all, so the stage can be retried once a provider exists", async () => {
+    const root = await makeRoot();
+    const harness = makeHarness(root, null);
+
+    await runToStaticVerification(harness);
+
+    const before = await harness.store.load("F-001");
+    const first = await harness.orchestrator.runNext("F-001");
+    const second = await harness.orchestrator.runNext("F-001");
+
+    expect(first.error?.code).toBe("verification_not_configured");
+    expect(second.error?.code).toBe("verification_not_configured");
+    expect(await harness.store.load("F-001")).toEqual(before);
+  });
+
+  it("still runs every stage before the first verification stage, so the option can stay optional", async () => {
+    const root = await makeRoot();
+    const harness = makeHarness(root, null);
+
+    await harness.orchestrator.createFeature({
+      featureId: "F-001",
+      title: "No provider yet",
+      request: "# Request\n\nPlan only.\n",
+    });
+
+    const stages: string[] = [];
+
+    for (let step = 0; step < 6; step += 1) {
+      const result = await harness.orchestrator.runNext("F-001");
+
+      if (result.stage !== null) {
+        stages.push(result.stage);
+      }
+    }
+
+    expect(stages).toEqual(["grill", "planning", "plan_review"]);
+  });
+});
+
+describe("binding evidence to the request that asked for it", () => {
+  /**
+   * Each case below is a bundle that passes every structural rule and is nonetheless about something
+   * other than the stage about to run. None may reach the verifier, and none may write anything.
+   */
+  const hostile: readonly {
+    readonly name: string;
+    readonly answer: (request: VerificationRequest) => VerificationEvidenceBundle;
+    readonly expected: string;
+    readonly code?: string;
+  }[] = [
+    {
+      name: "evidence from a revision that has already been superseded",
+      answer: (request) => evidenceFor(request, { revision: request.revision - 1 }),
+      expected: "an earlier revision",
+    },
+    {
+      name: "evidence from a revision that has not happened yet",
+      answer: (request) => evidenceFor(request, { revision: request.revision + 1 }),
+      expected: "a later revision",
+    },
+    {
+      name: "evidence for another repository",
+      answer: (request) => evidenceFor(request, { projectRoot: join(request.projectRoot, "..", "elsewhere") }),
+      expected: "may only verify",
+    },
+    {
+      name: "evidence for another verification stage",
+      answer: (request) => evidenceFor(request, { verification: request.verification === "static" ? "test" : "static" }),
+      expected: "evidence for the",
+    },
+    {
+      name: "a check that disagrees with its own bundle about the revision",
+      answer: (request) =>
+        evidenceFor(request, {
+          outcome: "failed",
+          checks: [{ ...failedCheck(request), revision: request.revision + 3 }],
+        }),
+      expected: "claims revision",
+    },
+    {
+      name: "a check that disagrees with its own bundle about the fingerprint",
+      answer: (request) =>
+        evidenceFor(request, {
+          outcome: "failed",
+          checks: [{ ...failedCheck(request), implementationFingerprint: OTHER_FINGERPRINT }],
+        }),
+      expected: "claims fingerprint",
+    },
+    {
+      name: "a check that reports itself as another kind",
+      answer: (request) =>
+        evidenceFor(request, {
+          outcome: "failed",
+          checks: [{ ...failedCheck(request), kind: request.verification === "static" ? "test" : "static" }],
+        }),
+      // The structural validator catches this one before the identity check, because a check whose
+      // `kind` disagrees with the bundle it is inside is already a malformed record.
+      code: "verification_evidence_invalid",
+      expected: "does not belong to the",
+    },
+  ];
+
+  for (const scenario of hostile) {
+    it(`refuses ${scenario.name}`, async () => {
+      const root = await makeRoot();
+      const provider = new RecordingProvider(scenario.answer);
+      const harness = makeHarness(root, provider);
+
+      await runToStaticVerification(harness);
+
+      const before = await harness.store.load("F-001");
+      const result = await harness.orchestrator.runNext("F-001");
+
+      expect(result.status).toBe("rejected");
+      expect(result.error?.code).toBe(scenario.code ?? "verification_evidence_mismatch");
+      expect(result.error?.message).toContain(scenario.expected);
+      expect(harness.executor.requestFor("static_verification")).toBeUndefined();
+      expect(await harness.store.load("F-001")).toEqual(before);
+    });
+  }
+
+  it("accepts a bundle whose project root is the same directory spelled differently", async () => {
+    const root = await makeRoot();
+    const provider = new RecordingProvider((request) =>
+      evidenceFor(request, { projectRoot: `${request.projectRoot}/./` }),
+    );
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    expect(await harness.orchestrator.runNext("F-001")).toMatchObject({ status: "stage_completed" });
+  });
+
+  it("refuses a bundle whose workspace claim contradicts its own hashes", async () => {
+    const root = await makeRoot();
+    const provider = new RecordingProvider((request) =>
+      evidenceFor(request, {
+        workspace: { before: FINGERPRINT, after: OTHER_FINGERPRINT, changed: false },
+      }),
+    );
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    const result = await harness.orchestrator.runNext("F-001");
+
+    expect(result.status).toBe("rejected");
+    expect(result.error?.code).toBe("verification_evidence_invalid");
+    expect(result.error?.message).toContain("claims changed=false");
+  });
+});
+
+describe("evidence freshness after a fix", () => {
+  it("re-runs the commands after a repair, at a new revision and against a new fingerprint", async () => {
+    const root = await makeRoot();
+    const runs: VerificationRequest[] = [];
+    const provider = new RecordingProvider((request) => {
+      runs.push(request);
+
+      // The first attempt failed against the tree as it was. The fixer changes a source file, so the
+      // second attempt measures a different implementation and the provider says so with a new digest.
+      const repaired = runs.length > 1;
+      const fingerprint = repaired ? OTHER_FINGERPRINT : FINGERPRINT;
+
+      return repaired
+        ? evidenceFor(request, { implementationFingerprint: fingerprint, workspace: { before: fingerprint, after: fingerprint, changed: false } })
+        : evidenceFor(request, { outcome: "failed", checks: [failedCheck(request)] });
+    });
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    const first = await harness.orchestrator.runNext("F-001");
+
+    expect(first.status).toBe("fix_requested");
+    expect(first.verification?.implementationFingerprint).toBe(FINGERPRINT);
+
+    // The fixer repairs the source. Nothing the old evidence recorded applies to the new tree.
+    await harness.orchestrator.runNext("F-001");
+
+    expect(harness.executor.requestFor("fixing")?.fixReturnState).toBe(WorkflowState.StaticVerification);
+
+    const second = await harness.orchestrator.runNext("F-001");
+
+    expect(second.status).toBe("stage_completed");
+    expect(second.verification?.implementationFingerprint).toBe(OTHER_FINGERPRINT);
+    expect(runs).toHaveLength(2);
+    expect(runs[1]?.revision).toBeGreaterThan(runs[0]?.revision ?? 0);
+  });
+
+  it("cannot satisfy the stage with the attempt it already recorded", async () => {
+    const root = await makeRoot();
+    let answerCount = 0;
+    const provider = new RecordingProvider((request) => {
+      answerCount += 1;
+
+      // A provider that tried to replay a stored bundle would have to reuse the old revision, which
+      // is exactly the case the identity check refuses.
+      return answerCount === 1
+        ? evidenceFor(request, { outcome: "failed", checks: [failedCheck(request)] })
+        : evidenceFor(request, { revision: 1, checks: [failedCheck(request)], outcome: "failed" });
+    });
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    expect(await harness.orchestrator.runNext("F-001")).toMatchObject({ status: "fix_requested" });
+
+    await harness.orchestrator.runNext("F-001");
+
+    const replayed = await harness.orchestrator.runNext("F-001");
+
+    expect(replayed.status).toBe("rejected");
+    expect(replayed.error?.code).toBe("verification_evidence_mismatch");
+  });
+
+  it("runs exactly one stage per call, refusals included", async () => {
+    const root = await makeRoot();
+    const harness = makeHarness(root, null);
+
+    await runToStaticVerification(harness);
+
+    const before = await harness.store.load("F-001");
+    const result = await harness.orchestrator.runNext("F-001");
+
+    expect(result.executedStages).toEqual([]);
+    expect(result.committed).toBe(false);
+    expect(await harness.store.load("F-001")).toEqual(before);
+
+    // The session is still sitting in the state that expects a static verification, not one stage on.
+    expect((await harness.store.load("F-001")).machine.state).toBe(WorkflowState.StaticVerification);
+  });
+});
+
+describe("stage coverage", () => {
+  it("names every stage it collected, so a wiring mistake is visible in the result", async () => {
+    const root = await makeRoot();
+    const provider = passingProvider();
     const harness = makeHarness(root, provider);
 
     await driveToPlanGate(harness);
 
-    for (let step = 0; step < 3; step += 1) {
-      await harness.orchestrator.runNext("F-001");
+    for (let step = 0; step < 8; step += 1) {
+      const result = await harness.orchestrator.runNext("F-001");
+
+      if (result.stage !== null && result.verification !== null) {
+        expect(result.verification.verification).toBe(
+          result.stage === "static_verification"
+            ? "static"
+            : result.stage === "test_verification"
+              ? "test"
+              : "runtime",
+        );
+      }
     }
 
-    expect(await harness.orchestrator.runNext("F-001")).toMatchObject({ status: "fix_requested" });
-    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests.map((request) => request.verification)).toEqual(["static", "test", "runtime"]);
+  });
+});
 
+describe("the provider interface is what the framework requires", () => {
+  it("states the stage, the revision, and the root in the request it hands over", async () => {
+    const root = await makeRoot();
+    const provider = passingProvider();
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
     await harness.orchestrator.runNext("F-001");
 
-    expect(await harness.orchestrator.runNext("F-001")).toMatchObject({ status: "fix_requested" });
-    expect(provider.requests).toHaveLength(2);
-    expect(provider.requests[1]?.revision).toBeGreaterThan(provider.requests[0]?.revision ?? 0);
+    expect(provider.requests[0]).toMatchObject({
+      featureId: "F-001",
+      stage: "static_verification",
+      verification: "static",
+      projectRoot: root,
+    });
+    expect(typeof provider.requests[0]?.revision).toBe("number");
   });
 
-  it("writes no evidence key at all when no provider is configured", async () => {
+  it("hands the collected bundle to the verifier, workspace measurement included", async () => {
     const root = await makeRoot();
-    const harness = makeHarness(root, null);
+    const harness = makeHarness(root, passingProvider());
+
+    await runToStaticVerification(harness);
+    await harness.orchestrator.runNext("F-001");
+
+    const delivered = harness.executor.requestFor("static_verification")?.verification;
+
+    expect(delivered?.workspace).toEqual({ before: FINGERPRINT, after: FINGERPRINT, changed: false });
+  });
+});
+
+const STAGE_NAMES: readonly VerificationStage[] = ["static", "test", "runtime"];
+
+describe("every stage is verified the same way", () => {
+  it("collects one bundle per stage, in workflow order", async () => {
+    const root = await makeRoot();
+    const provider = passingProvider();
+    const harness = makeHarness(root, provider);
 
     await driveToPlanGate(harness);
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
-    await harness.orchestrator.runNext("F-001");
 
-    const artifact = (await harness.store.readArtifact("F-001", "verification")) as Record<string, unknown>;
+    for (let step = 0; step < 8; step += 1) {
+      const result = await harness.orchestrator.runNext("F-001");
 
-    expect(Object.keys(artifact)).toEqual(["static_verification"]);
-    expect(artifact[DETERMINISTIC_EVIDENCE_KEY]).toBeUndefined();
+      if (result.status === "stage_completed" && result.stage === "runtime_verification") {
+        break;
+      }
+    }
+
+    expect(provider.requests.map((request) => request.verification)).toEqual(STAGE_NAMES);
   });
 });

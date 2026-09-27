@@ -87,13 +87,25 @@ root or a subdirectory of it. There is no third shape:
 
 - `shell: false` unconditionally, so a script name, a feature title, or a task payload can never
   become shell syntax;
-- no interpolation, no template strings, no `sh -c`, and a configured `cwd` that leaves the project
-  root is refused;
+- no interpolation, no template strings, and a configured `cwd` that leaves the project root is
+  refused;
+- a command-string flag aimed at a known shell is refused by name. The shells are `sh`, `bash`,
+  `dash`, `zsh`, `ksh`, `ash`, `csh`, `tcsh`, `fish`, `busybox sh`, `cmd`, `command`, `command.com`,
+  `powershell`, and `pwsh`, matched case-insensitively and on the basename, so `/bin/sh -c` and
+  `C:\\Windows\\System32\\cmd.exe /c` are both refused while `/bin/sh script.sh` is not. A general
+  interpreter carrying one of those shells as an argument is refused the same way, which is why
+  `python -c`, `node -e`, and `bash scripts/lint.sh` stay legal: they read code this framework did
+  not assemble;
 - a missing dependency is reported and never repaired, because installing would execute
   repository-defined lifecycle hooks without a human having approved anything about it;
 - `add`, `install`, `remove`, `exec`, `dlx`, and lifecycle script names (`preinstall`, `install`,
   `postinstall`, `prepare`, `prepublish`, …) are refused by the command policy itself, so a project
   configuration cannot ask for them either;
+- a detected script that declares a `pre<name>` or `post<name>` hook is blocked, not run. Running
+  `pnpm run lint` where the manifest also declares `prelint` executes code the stage never offered,
+  through whichever manager happens to be installed, and the block says which hook was found and that
+  the tool should be declared directly instead. The policy is the same for pnpm, npm, yarn, and bun,
+  and it is a block rather than a fallback, because the fallback would be to execute a hook anyway;
 - no error message, evidence record, or excerpt contains an argument list or an environment value.
 
 ## Project configuration
@@ -117,6 +129,13 @@ A command entry accepts exactly `id`, `capability`, `executable`, `args`, and an
 other field is refused, including `command` and `shell`, so a shell line has nowhere to go. A file
 that exists and does not validate is a refusal, not a fallback to detection: silently ignoring a
 misconfigured command would report a project as verified when its own configuration says otherwise.
+
+A configured command may only cover the capability its own section exists for: `static` covers `lint`,
+`typecheck`, and `build`; `test` covers `test`; `runtime` covers `runtime`. Anything else is refused
+with the section named, so a `test` section cannot quietly acquire the build command and have the
+static stage report a pass it never measured. A configured command replaces the detected one for the
+same capability rather than running alongside it, so a capability is never checked twice under two
+different interpretations.
 
 The file is project configuration, not agent output. It is readable, because a fixer repairing a
 failing check has a legitimate reason to know which command produced it, and it is not writable by
@@ -150,11 +169,35 @@ The stage outcome is a function of the checks and nothing else. Any check that d
 stage, a check that could not start blocks it, and a stage whose checks were all skipped is deferred.
 A check that never ran is not a pass.
 
-The `implementationFingerprint` is a SHA-256 digest over each file's project-relative path, size, and
-content digest, in sorted path order, excluding generated and dependency directories. It is a
-fingerprint and not a cache: nothing is stored or looked up, and a mismatch only ever means "collect
-again". It exists so evidence from before a fix cannot prove the code that fix produced. A project
-that could not be measured at all records an all-zero fingerprint, which is visibly not a real digest.
+Every check also carries a `detail`: one sentence saying what actually happened, in the terms of the
+run rather than of a status. A failure reports the command and its exit code, a timeout says what was
+killed, and a blocked script names the hook that caused it. It is bounded, and it exists because a
+`blocked` check with no explanation is indistinguishable from a broken machine, which is a thing a
+verifier should not have to guess about.
+
+## Workspace integrity
+
+The run is bracketed. The tree is fingerprinted before the first command and again after the last, and
+both digests are kept as `workspace: { before, after, changed }`. The bundle and every check carry the
+`before` digest, so a check always describes the tree as it was when the command started, and the pair
+says whether that assumption survived the run.
+
+A command that rewrites the implementation it is verifying is a real failure mode: a formatter, a
+code generator, a snapshot updater, or a build step that writes into `src` produces green exit codes
+about code that no longer exists. So a changed workspace forces the stage to `failed` on its own, with
+no failed check to explain it, and adds a finding naming both digests. The check statuses stay exactly
+as the processes reported them, because the finding is the framework's judgment and the statuses are
+the run's record. A stage whose outcome would otherwise be `passed` or `deferred` is refused the same
+way, since neither is true of a tree that moved.
+
+The digest itself is a SHA-256 over each file's project-relative path, size, and content digest, in
+sorted path order, excluding generated and dependency directories. It is a fingerprint and not a
+cache: nothing is stored or looked up, and a mismatch only ever means "collect again". It exists so
+evidence from before a fix cannot prove the code that fix produced, which is why it is measured twice
+per run rather than once per session: a session-long digest could be correct when it was taken and
+stale by the time the commands finished. A project that could not be measured at all records an
+all-zero fingerprint, which is visibly not a real digest. The `maxFiles` and `maxFileBytes` bounds cap
+what is reported and hashed; they are not a defense against a hostile tree.
 
 ## Orchestration contract
 
@@ -162,8 +205,14 @@ The orchestrator collects evidence for a verification stage after the plan-appro
 re-verified and before the stage executor is involved, which is the only point at which project code
 runs, and running it is a consequence of a human having approved work in this repository. It then:
 
-- refuses a provider that throws, a bundle that fails validation, and a bundle that contradicts
-  itself, writing nothing in all three cases;
+- refuses a stage reached with no provider at all, with `verification_not_configured`, before the
+  stage executor is called and before anything is written, so there is no opinion left to believe;
+- refuses a provider that throws, a bundle that fails validation, a bundle that contradicts itself,
+  and a bundle that belongs to another request, writing nothing in all four cases;
+- binds a bundle to the request that asked for it. The verification stage, the session revision, the
+  resolved project root, and every check's kind, revision, and fingerprint must match, so an old
+  revision, a future revision, another feature's tree, and a single stale check are each refused with
+  `verification_evidence_mismatch`;
 - passes the bundle to the verifier in the prompt, rendered in full, so the verdict is traceable to a
   recorded result;
 - coerces a reported `success` to `needs_fix` when the evidence is `failed` or `blocked`, and adds a

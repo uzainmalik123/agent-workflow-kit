@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { ReviewFinding, VerificationEvidence } from "@agent-workflow-kit/core";
 import type { OrchestrationErrorCode } from "./errors.js";
 import type { StageOutcome } from "./executor.js";
@@ -115,6 +116,14 @@ export interface VerificationCommandEvidence {
   readonly signal: string | null;
   readonly status: VerificationCheckStatus;
   readonly reason: string | null;
+  /**
+   * One deterministic sentence about how this check reached its status, in the adapter's own words.
+   *
+   * A status is a code, and a code does not explain itself. A check that never ran because the
+   * manifest defines a `prelint` hook, or because the tree changed underneath it, would otherwise
+   * report a bare reason string and force a reader to guess which fact was meant.
+   */
+  readonly detail: string;
   readonly stdoutExcerpt: string;
   readonly stderrExcerpt: string;
   readonly truncated: boolean;
@@ -124,11 +133,38 @@ export interface VerificationCommandEvidence {
   readonly implementationFingerprint: string;
 }
 
+/**
+ * The measurement taken on both sides of a stage's commands.
+ *
+ * A verification command is arbitrary repository-defined code, and repository-defined code writes
+ * files: `lint --fix`, a test that rewrites a snapshot, a build that regenerates a checked-in file.
+ * A fingerprint taken only before the run describes a tree that no longer exists, so a passing check
+ * can end up describing code the command itself replaced. The two measurements bracket the run, and
+ * a difference forbids a pass rather than being reported as a curiosity.
+ *
+ * Generated and dependency directories are excluded from both measurements, so writing `dist/` is
+ * not a change; the only thing that counts is the implementation.
+ */
+export interface WorkspaceIntegrity {
+  /** The working tree as it was immediately before the stage's commands ran. */
+  readonly before: string;
+  /** The same measurement, taken immediately after the last command finished. */
+  readonly after: string;
+  /** True when the two differ. A provider that disagrees with its own hashes is refused. */
+  readonly changed: boolean;
+}
+
 export interface VerificationEvidenceBundle {
   readonly verification: VerificationStage;
   readonly outcome: VerificationOutcome;
   readonly revision: number;
+  /**
+   * The tree the stage's commands saw, which is `workspace.before`. When the workspace changed, this
+   * is deliberately not the tree that exists now: the evidence describes what ran, and
+   * `workspace.after` records what it left behind.
+   */
   readonly implementationFingerprint: string;
+  readonly workspace: WorkspaceIntegrity;
   readonly collectedAt: string;
   readonly projectRoot: string;
   readonly project: ProjectProfileSummary;
@@ -169,6 +205,9 @@ export const VERIFICATION_WORK_STAGES: readonly WorkStage[] = [
 /** Bounded evidence only. A provider that returns a transcript is refused, not truncated by us. */
 export const MAX_EVIDENCE_EXCERPT_CHARS = 20_000;
 
+/** A detail is one sentence of explanation, not a place to put a transcript. */
+export const MAX_EVIDENCE_DETAIL_CHARS = 2_000;
+
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 const NON_PASSING_STATUSES: ReadonlySet<VerificationCheckStatus> = new Set<VerificationCheckStatus>([
@@ -186,12 +225,30 @@ function invalid(message: string): VerificationBundleValidation {
   return { ok: false, code: "verification_evidence_invalid", message };
 }
 
+/**
+ * A different refusal from `invalid()`: the bundle is well formed and is not this request's. An
+ * operator reading an error needs to tell "the provider emitted nonsense" apart from "the provider
+ * answered the wrong question", because the second is a wiring or caching bug rather than a corrupt
+ * payload.
+ */
+function mismatched(message: string): VerificationBundleValidation {
+  return { ok: false, code: "verification_evidence_mismatch", message };
+}
+
 function isTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value));
 }
 
 function isBoundedExcerpt(value: unknown): value is string {
   return typeof value === "string" && value.length <= MAX_EVIDENCE_EXCERPT_CHARS;
+}
+
+function isBoundedDetail(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_EVIDENCE_DETAIL_CHARS;
+}
+
+function isFingerprint(value: unknown): value is string {
+  return typeof value === "string" && SHA256_PATTERN.test(value);
 }
 
 function isCount(value: unknown): value is number {
@@ -208,6 +265,51 @@ function optionalString(value: unknown): value is string | null {
 
 function optionalStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+type WorkspaceValidation =
+  | { readonly ok: true; readonly integrity: WorkspaceIntegrity }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * Validates the pair of measurements that bracket a stage's commands.
+ *
+ * The two hashes have to agree with the `changed` flag, in both directions. A provider that reports
+ * `changed: false` with two different digests has hidden a mutation, and one that reports
+ * `changed: true` with two identical digests has invented a reason to fail a stage. Either is a
+ * provider that cannot be believed about either.
+ */
+function validateWorkspaceIntegrity(value: unknown): WorkspaceValidation {
+  if (!isRecord(value)) {
+    return {
+      ok: false,
+      message:
+        "A verification evidence bundle must carry a workspace measurement taken before and after its commands ran.",
+    };
+  }
+
+  if (!isFingerprint(value["before"]) || !isFingerprint(value["after"])) {
+    return {
+      ok: false,
+      message: "A workspace measurement must carry a SHA-256 fingerprint for each side of the run.",
+    };
+  }
+
+  if (typeof value["changed"] !== "boolean") {
+    return { ok: false, message: "A workspace measurement must state whether the tree changed." };
+  }
+
+  if (value["changed"] !== (value["before"] !== value["after"])) {
+    return {
+      ok: false,
+      message: `A workspace measurement claims changed=${String(value["changed"])} while its own fingerprints are ${value["before"] === value["after"] ? "identical" : "different"}.`,
+    };
+  }
+
+  return {
+    ok: true,
+    integrity: { before: value["before"], after: value["after"], changed: value["changed"] },
+  };
 }
 
 function validateCapabilityDetections(value: unknown): readonly CapabilityDetection[] | null {
@@ -305,6 +407,10 @@ function validateCheck(value: unknown): VerificationCommandEvidence | null {
     return null;
   }
 
+  if (!isBoundedDetail(value["detail"])) {
+    return null;
+  }
+
   if (!isBoundedExcerpt(value["stdoutExcerpt"]) || !isBoundedExcerpt(value["stderrExcerpt"])) {
     return null;
   }
@@ -315,7 +421,7 @@ function validateCheck(value: unknown): VerificationCommandEvidence | null {
 
   const fingerprint = value["implementationFingerprint"];
 
-  if (typeof fingerprint !== "string" || !SHA256_PATTERN.test(fingerprint)) {
+  if (!isFingerprint(fingerprint)) {
     return null;
   }
 
@@ -335,6 +441,7 @@ function validateCheck(value: unknown): VerificationCommandEvidence | null {
     signal: value["signal"],
     status: value["status"],
     reason: value["reason"],
+    detail: value["detail"],
     stdoutExcerpt: value["stdoutExcerpt"],
     stderrExcerpt: value["stderrExcerpt"],
     truncated: value["truncated"],
@@ -370,8 +477,20 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
 
   const fingerprint = raw["implementationFingerprint"];
 
-  if (typeof fingerprint !== "string" || !SHA256_PATTERN.test(fingerprint)) {
+  if (!isFingerprint(fingerprint)) {
     return invalid("Verification evidence bundle must carry a SHA-256 implementation fingerprint.");
+  }
+
+  const workspace = validateWorkspaceIntegrity(raw["workspace"]);
+
+  if (!workspace.ok) {
+    return invalid(workspace.message);
+  }
+
+  if (workspace.integrity.before !== fingerprint) {
+    return invalid(
+      "A verification evidence bundle must carry the fingerprint its commands saw, which is the measurement taken before they ran.",
+    );
   }
 
   if (typeof raw["projectRoot"] !== "string" || raw["projectRoot"].length === 0) {
@@ -448,8 +567,28 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
     );
   }
 
-  if (outcome === "failed" && !checks.some((check) => check.status === "failed")) {
-    return invalid('Verification evidence claims "failed" without a failed check.');
+  // A run that rewrote the implementation it was checking cannot pass, whatever its exit codes said.
+  // The check that reported the pass described a tree the command itself replaced.
+  if (workspace.integrity.changed && outcome === "passed") {
+    return invalid(
+      "Verification evidence claims \"passed\" while the working tree changed while its commands ran, so the checks describe code that no longer exists.",
+    );
+  }
+
+  if (workspace.integrity.changed && outcome === "deferred") {
+    return invalid(
+      "Verification evidence claims \"deferred\" while the working tree changed while its commands ran, which means something did run.",
+    );
+  }
+
+  // A failure needs a witness. A failed check is the usual one, and a workspace that changed under a
+  // run of otherwise-passing checks is the other: those results describe code that no longer exists.
+  if (
+    outcome === "failed" &&
+    !checks.some((check) => check.status === "failed") &&
+    !workspace.integrity.changed
+  ) {
+    return invalid('Verification evidence claims "failed" without a failed check or a changed workspace.');
   }
 
   if (outcome === "blocked" && !checks.some((check) => check.status === "blocked")) {
@@ -460,10 +599,6 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
     return invalid('Verification evidence claims "deferred" without every check being skipped.');
   }
 
-  if ((outcome === "failed" || outcome === "blocked") && checks.length === 0) {
-    return invalid("A verification bundle that did not pass must explain itself with at least one check.");
-  }
-
   return {
     ok: true,
     bundle: {
@@ -471,6 +606,7 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
       outcome,
       revision: raw["revision"],
       implementationFingerprint: fingerprint,
+      workspace: workspace.integrity,
       collectedAt: raw["collectedAt"],
       projectRoot: raw["projectRoot"],
       project: {
@@ -496,6 +632,64 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
  */
 export function evidenceBlocksSuccess(bundle: VerificationEvidenceBundle): boolean {
   return bundle.outcome === "failed" || bundle.outcome === "blocked";
+}
+
+/**
+ * Binds a validated bundle to the request that asked for it.
+ *
+ * Structural validity is not identity. A well-formed bundle is easy to produce for the wrong stage,
+ * for a revision that has already been superseded, for a revision that has not happened yet, for a
+ * different repository entirely, or with one check quietly disagreeing with the bundle around it. Each
+ * of those is a bundle that would pass every check in the validator and then be applied to code it
+ * says nothing about, which is the failure this function exists to prevent.
+ *
+ * The project root is compared resolved, because the same directory reaches this code as
+ * `/repo`, `/repo/`, and `/repo/packages/app` for a monorepo, and all three are the same measurement
+ * target. Everything else is compared exactly: a revision is a number, not a path.
+ */
+export function bindVerificationEvidenceToRequest(
+  bundle: VerificationEvidenceBundle,
+  request: VerificationRequest,
+): VerificationBundleValidation {
+  if (bundle.verification !== request.verification) {
+    return mismatched(
+      `The verification provider returned ${bundle.verification} evidence for the ${request.verification} stage.`,
+    );
+  }
+
+  if (bundle.revision !== request.revision) {
+    const relation = bundle.revision < request.revision ? "an earlier" : "a later";
+
+    return mismatched(
+      `The verification provider returned evidence recorded against ${relation} revision (${String(bundle.revision)}), but this stage is revision ${String(request.revision)}. Evidence from a different revision cannot describe this session.`,
+    );
+  }
+
+  if (resolve(bundle.projectRoot) !== resolve(request.projectRoot)) {
+    return mismatched(
+      `The verification provider returned evidence for project root "${bundle.projectRoot}", but this stage may only verify "${request.projectRoot}".`,
+    );
+  }
+
+  for (const check of bundle.checks) {
+    if (check.kind !== bundle.verification) {
+      return mismatched(`Check "${check.id}" reports itself as ${check.kind} inside ${bundle.verification} evidence.`);
+    }
+
+    if (check.revision !== bundle.revision) {
+      return mismatched(
+        `Check "${check.id}" claims revision ${String(check.revision)} inside evidence for revision ${String(bundle.revision)}.`,
+      );
+    }
+
+    if (check.implementationFingerprint !== bundle.implementationFingerprint) {
+      return mismatched(
+        `Check "${check.id}" claims fingerprint ${check.implementationFingerprint} inside evidence for ${bundle.implementationFingerprint}.`,
+      );
+    }
+  }
+
+  return { ok: true, bundle };
 }
 
 export type DeterministicEvidenceApplication =
@@ -535,7 +729,7 @@ export function verificationFailureFindings(
   bundle: VerificationEvidenceBundle,
   featureId: string,
 ): readonly ReviewFinding[] {
-  return bundle.checks
+  const checkFindings: ReviewFinding[] = bundle.checks
     .filter((check) => NON_PASSING_STATUSES.has(check.status))
     .map((check) => ({
       featureId,
@@ -545,8 +739,28 @@ export function verificationFailureFindings(
         check.executable === null
           ? `No command ran: ${check.reason ?? "no reason recorded"}.`
           : `${check.executable} ${check.args.join(" ")} exited with ${String(check.exitCode)}.`,
+        check.detail,
       ].join(" "),
     }));
+
+  // A mutation is a finding of its own. Every check can pass while the tree is rewritten underneath
+  // them, and a fixer told only "lint passed" would have no idea what to act on.
+  const mutationFindings: ReviewFinding[] = bundle.workspace.changed
+    ? [
+        {
+          featureId,
+          severity: "error" as const,
+          message: [
+            `The working tree changed while the ${bundle.verification} checks were running.`,
+            "A verification command modified the implementation it was verifying, so these results describe code that no longer exists and the stage cannot pass.",
+            `Before: ${bundle.workspace.before}. After: ${bundle.workspace.after}.`,
+            "Make the check read-only, or declare the command in agent-workflow.config.json so it runs the tool directly instead.",
+          ].join(" "),
+        },
+      ]
+    : [];
+
+  return [...mutationFindings, ...checkFindings];
 }
 
 /**

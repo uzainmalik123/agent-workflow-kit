@@ -19,8 +19,10 @@ export type OrchestrationErrorCode =
   | "approval_missing"
   | "approval_invalidated"
   | "approval_evidence_missing"
+  | "verification_not_configured"
   | "verification_provider_failed"
   | "verification_evidence_invalid"
+  | "verification_evidence_mismatch"
   | "unhandled_state"
   | "git_integration_deferred"
   | "persistence_transition_committed"
@@ -55,8 +57,10 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     approval_missing: "workflow",
     approval_invalidated: "workflow",
     approval_evidence_missing: "workflow",
+    verification_not_configured: "verification",
     verification_provider_failed: "verification",
     verification_evidence_invalid: "verification",
+    verification_evidence_mismatch: "verification",
     unhandled_state: "workflow",
     git_integration_deferred: "workflow",
     persistence_transition_committed: "persistence",

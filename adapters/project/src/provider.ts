@@ -8,7 +8,7 @@ import type {
   VerificationRequest,
   VerificationStage,
 } from "@agent-workflow-kit/orchestration";
-import type { PlannedVerificationCommand } from "./commands.js";
+import { capabilitiesForStage, implicitScriptHook, type PlannedVerificationCommand } from "./commands.js";
 import { loadProjectVerificationConfig, type ProjectVerificationConfig } from "./config.js";
 import { isDiscoveryRefusal, ProjectAdapterError } from "./errors.js";
 import {
@@ -70,24 +70,6 @@ export interface ProjectVerificationProviderOptions {
   readonly run?: (request: ChildProcessRequest) => Promise<ChildProcessOutcome>;
 }
 
-/** The capabilities a static stage covers, in the order they run. */
-export const STATIC_CAPABILITIES: readonly VerificationCapability[] = ["lint", "typecheck", "build"];
-
-export const TEST_CAPABILITIES: readonly VerificationCapability[] = ["test"];
-
-export const RUNTIME_CAPABILITIES: readonly VerificationCapability[] = ["runtime"];
-
-function capabilitiesForStage(stage: VerificationStage): readonly VerificationCapability[] {
-  switch (stage) {
-    case "static":
-      return STATIC_CAPABILITIES;
-    case "test":
-      return TEST_CAPABILITIES;
-    case "runtime":
-      return RUNTIME_CAPABILITIES;
-  }
-}
-
 function detectionFor(
   detections: readonly CapabilityDetection[],
   capability: VerificationCapability,
@@ -104,29 +86,55 @@ function detectionFor(
 }
 
 /**
- * The reason a detected command could not be started, or `null` when it can.
+ * Why a command that exists and is well formed still may not run, or `null` when it may.
  *
- * Missing dependencies are reported, never repaired. Installing them would execute repository-defined
- * lifecycle hooks, which is exactly the thing this boundary exists to prevent, and it would do it
- * without a human having approved anything about it.
+ * The order is the order of how much is known. An implicit hook is a property of the selected script
+ * name, so it is decided before anything about the environment: a project with a `prelint` script has
+ * a blocked lint check whether or not its dependencies happen to be installed, and reporting a missing
+ * `node_modules` first would blame the environment for a decision the manifest made.
  *
- * The two preconditions belong to detection rather than to execution. A command the project declared
- * names its own executable and does not go through a package manager, so neither a missing manager nor
- * a missing `node_modules` says anything about whether it can run; blocking it would replace a real
- * result with a guess. A detected command is a script invoked through a manager, so both preconditions
- * are facts about it, and reporting them is more useful than running a command that cannot work.
+ * The two environment preconditions belong to detection rather than to execution. A command the
+ * project declared names its own executable and does not go through a package manager, so neither a
+ * missing manager nor a missing `node_modules` says anything about whether it can run; blocking it
+ * would replace a real result with a guess. A detected command is a script invoked through a manager,
+ * so both preconditions are facts about it, and reporting them is more useful than running a command
+ * that cannot work.
  */
-function startupBlock(profile: ProjectProfile, source: PlannedVerificationCommand["source"]): string | null {
-  if (source === "configured") {
+function startupBlock(
+  profile: ProjectProfile,
+  command: PlannedVerificationCommand,
+): { readonly reason: string; readonly detail: string } | null {
+  if (command.source === "configured") {
+    // A configured command names an executable and its arguments, so no package manager reads it and
+    // no adjacent script name can be implied. This is the way a project opts out of the hook policy.
     return null;
   }
 
-  if (profile.packageManager === null) {
-    return "package_manager_unknown";
+  const manager = profile.packageManager;
+
+  if (manager !== null) {
+    const hook = implicitScriptHook(command.script, profile.scripts);
+
+    if (hook !== null) {
+      return {
+        reason: "implicit_script_hook",
+        detail: `"${command.executable} ${command.args.join(" ")}" would also execute the "${hook}" script, because ${manager} runs the pre and post script of a selected script name. Running it would execute a script the framework never selected, so the check is blocked. Declare the command in agent-workflow.config.json to run the tool directly instead.`,
+      };
+    }
+  }
+
+  if (manager === null) {
+    return {
+      reason: "package_manager_unknown",
+      detail: "The project has no recognised lockfile, so the script that would run this command cannot be determined.",
+    };
   }
 
   if (!profile.dependenciesInstalled) {
-    return "dependency_missing";
+    return {
+      reason: "dependency_missing",
+      detail: "The project's dependencies are not installed, so a script invoked through the package manager cannot run. Nothing is installed to change that.",
+    };
   }
 
   return null;
@@ -140,6 +148,7 @@ function blockedCheck(input: {
   readonly detection: CapabilityDetection;
   readonly command: PlannedVerificationCommand;
   readonly reason: string;
+  readonly detail: string;
   readonly revision: number;
   readonly fingerprint: string;
   readonly collectedAt: string;
@@ -153,7 +162,7 @@ function blockedCheck(input: {
     label: input.command.label,
     status: "blocked",
     reason: input.reason,
-    detail: input.detection.detail,
+    detail: input.detail,
     revision: input.revision,
     fingerprint: input.fingerprint,
     collectedAt: input.collectedAt,
@@ -238,6 +247,10 @@ export class ProjectVerificationProvider implements VerificationProvider {
         verification: request.verification,
         revision: request.revision,
         fingerprint: UNMEASURED_FINGERPRINT,
+        // Nothing ran, so there is no second measurement to take: the one pair that is always
+        // consistent is a tree that was not measured against itself. Reporting an unmeasured tree as
+        // changed would blame the project for a fingerprint the framework never produced.
+        workspaceAfter: UNMEASURED_FINGERPRINT,
         collectedAt,
         projectRoot: this.#root,
         project: {
@@ -278,6 +291,10 @@ export class ProjectVerificationProvider implements VerificationProvider {
     this.#profile = profile;
     this.#config = config;
 
+    // The tree is measured on both sides of the run. A verification command is repository-defined
+    // code and repository-defined code writes files, so a fingerprint taken only beforehand describes
+    // a tree the run may itself have replaced. The second measurement is taken after the last command
+    // has finished, and any difference is a failure the verifier cannot argue with.
     const fingerprint = (await fingerprintImplementation(this.#root)).hash;
     const checks = await this.#runStage(
       request.verification,
@@ -288,11 +305,13 @@ export class ProjectVerificationProvider implements VerificationProvider {
       config,
       request.signal ?? null,
     );
+    const workspaceAfter = (await fingerprintImplementation(this.#root)).hash;
 
     return buildBundle({
       verification: request.verification,
       revision: request.revision,
       fingerprint,
+      workspaceAfter,
       collectedAt,
       projectRoot: this.#root,
       project: profile,
@@ -319,14 +338,15 @@ export class ProjectVerificationProvider implements VerificationProvider {
     for (const command of configured) {
       const detection = detectionFor(detections, command.capability);
       covered.add(command.capability);
-      const block = startupBlock(profile, command.source);
+      const block = startupBlock(profile, command);
 
       if (block !== null) {
         checks.push(
           blockedCheck({
             detection,
             command,
-            reason: block,
+            reason: block.reason,
+            detail: block.detail,
             revision,
             fingerprint,
             collectedAt,
@@ -357,14 +377,15 @@ export class ProjectVerificationProvider implements VerificationProvider {
 
       const detection = detectionFor(detections, command.capability);
       covered.add(command.capability);
-      const block = startupBlock(profile, command.source);
+      const block = startupBlock(profile, command);
 
       if (block !== null) {
         checks.push(
           blockedCheck({
             detection,
             command,
-            reason: block,
+            reason: block.reason,
+            detail: block.detail,
             revision,
             fingerprint,
             collectedAt,

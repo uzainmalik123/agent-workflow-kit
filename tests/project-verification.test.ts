@@ -1,7 +1,13 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { VerificationCommandEvidence } from "@agent-workflow-kit/orchestration";
+import {
+  createWorkflowOrchestrator,
+  DETERMINISTIC_EVIDENCE_KEY,
+  type VerificationCommandEvidence,
+} from "@agent-workflow-kit/orchestration";
+import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
+import { FakeStageExecutor } from "../fixtures/stage-executor.js";
 import {
   describeOutcome,
   PROJECT_CONFIG_FILENAME,
@@ -54,6 +60,12 @@ const exitWith = (code: number, message = "output") => `#!/bin/sh\necho "${messa
 
 const run = (overrides: Partial<ChildProcessRequest> & Pick<ChildProcessRequest, "executable" | "cwd">) =>
   runChildProcess({ args: [], timeoutMs: 10_000, ...overrides });
+
+const declaredRuntimeCommand = (): string =>
+  JSON.stringify({
+    schemaVersion: 1,
+    verification: { runtime: [{ id: "smoke", capability: "runtime", executable: "smoke", args: [] }] },
+  });
 
 const checkFor = (
   bundle: { checks: readonly VerificationCommandEvidence[] },
@@ -589,5 +601,346 @@ describe("verification evidence records", () => {
     expect(check.cwd).toBe(project.root);
     expect(check.durationMs).toBeGreaterThanOrEqual(0);
     expect(check.truncated).toBe(false);
+  });
+});
+
+describe("workspace mutation during verification", () => {
+  const collectStatic = async (project: Project, provider: ProjectVerificationProvider) =>
+    provider.collect({
+      featureId: "F-001",
+      stage: "static_verification",
+      verification: "static",
+      revision: 1,
+      projectRoot: project.root,
+    });
+
+  it("refuses a stage whose command rewrote the source it was checking, however it exited", async () => {
+    const project = await makeNodeProject(
+      `#!/bin/sh\necho 'export const x = 2;' > src/app.ts\nexit 0\n`,
+      { lint: "runner" },
+    );
+
+    await mkdir(project.path("src"), { recursive: true });
+    await writeFile(project.path("src/app.ts"), "export const x = 1;\n", "utf8");
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    // The check itself passed. The stage did not, because the pass describes a file that is gone.
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed", exitCode: 0 });
+    expect(bundle.outcome).toBe("failed");
+    expect(bundle.workspace.changed).toBe(true);
+    expect(bundle.workspace.before).not.toBe(bundle.workspace.after);
+    expect(bundle.implementationFingerprint).toBe(bundle.workspace.before);
+  });
+
+  it("refuses a stage whose command rewrote the verification configuration", async () => {
+    const project = await makeNodeProject(
+      `#!/bin/sh\necho '{"schemaVersion":1}' > ${PROJECT_CONFIG_FILENAME}\nexit 0\n`,
+      { lint: "runner" },
+    );
+
+    // The declared command is a runtime one, so the file is part of the measured tree without
+    // replacing the lint command the fixture is trying to rewrite it from under.
+    await writeFile(project.path(PROJECT_CONFIG_FILENAME), declaredRuntimeCommand(), "utf8");
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.workspace.changed).toBe(true);
+    expect(bundle.outcome).toBe("failed");
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed", exitCode: 0 });
+  });
+
+  it("refuses a stage whose command rewrote the project's own manifest", async () => {
+    const project = await makeNodeProject(
+      `#!/bin/sh\necho '{"name":"fixture"}' > package.json\nexit 0\n`,
+      { lint: "runner" },
+    );
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.workspace.changed).toBe(true);
+    expect(bundle.outcome).toBe("failed");
+  });
+
+  it("refuses a stage whose command deleted a source file", async () => {
+    const project = await makeNodeProject(`#!/bin/sh\nrm src/app.ts\nexit 0\n`, { lint: "runner" });
+
+    await mkdir(project.path("src"), { recursive: true });
+    await writeFile(project.path("src/app.ts"), "export const x = 1;\n", "utf8");
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.workspace.changed).toBe(true);
+  });
+
+  it("does not treat a generated output directory as a change, because a build must write somewhere", async () => {
+    const project = await makeNodeProject(
+      `#!/bin/sh\nmkdir -p dist\nrm -rf dist\nmkdir -p dist\nrm -rf coverage node_modules/.cache\ntouch dist/bundle.js\ntouch coverage/report.txt\nexit 0\n`,
+      { lint: "runner" },
+    );
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.workspace.changed).toBe(false);
+    expect(bundle.outcome).toBe("passed");
+    expect(bundle.workspace.before).toBe(bundle.workspace.after);
+  });
+
+  it("does not treat a dependency directory as a change, because installing is not this framework's job but tools do write there", async () => {
+    const project = await makeNodeProject(`#!/bin/sh\ntouch node_modules/.cache-entry\nexit 0\n`, { lint: "runner" });
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.workspace.changed).toBe(false);
+    expect(bundle.outcome).toBe("passed");
+  });
+
+  it("reports the same fingerprint for a stage that changed nothing, so a clean run is provably clean", async () => {
+    const project = await makeNodeProject(exitWith(0), { lint: "runner" });
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.workspace).toEqual({
+      before: bundle.implementationFingerprint,
+      after: bundle.implementationFingerprint,
+      changed: false,
+    });
+  });
+
+  it("notices a change made between two collections, so the digest cannot be a stale constant", async () => {
+    const project = await makeNodeProject(exitWith(0), { lint: "runner" });
+    const provider = new ProjectVerificationProvider({ projectRoot: project.root });
+
+    const before = await collectStatic(project, provider);
+
+    await writeFile(project.path("README.md"), "changed\n", "utf8");
+
+    const after = await collectStatic(project, provider);
+
+    expect(after.implementationFingerprint).not.toBe(before.implementationFingerprint);
+    expect(after.workspace.changed).toBe(false);
+  });
+});
+
+describe("implicit pre and post script hooks", () => {
+  const collectStatic = async (project: Project) =>
+    new ProjectVerificationProvider({ projectRoot: project.root }).collect({
+      featureId: "F-001",
+      stage: "static_verification",
+      verification: "static",
+      revision: 1,
+      projectRoot: project.root,
+    });
+
+  it("blocks a lint command whose manifest defines prelint, rather than running it too", async () => {
+    const project = await makeNodeProject(exitWith(0), { prelint: "runner", lint: "runner" });
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({
+      status: "blocked",
+      reason: "implicit_script_hook",
+      // The check keeps the command's identity, so the record says what would have run.
+      executable: "pnpm",
+      args: ["run", "lint"],
+    });
+    expect(checkFor(bundle, "lint")?.detail).toContain("prelint");
+    expect(bundle.outcome).toBe("blocked");
+  });
+
+  it("blocks on postlint as readily as on prelint", async () => {
+    const project = await makeNodeProject(exitWith(0), { lint: "runner", postlint: "runner" });
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "blocked", reason: "implicit_script_hook" });
+    expect(checkFor(bundle, "lint")?.detail).toContain("postlint");
+  });
+
+  it("blocks only the script with a hook, and runs the others", async () => {
+    // A TypeScript project, so the typecheck script is one this stage would otherwise have run.
+    const project = await makeNodeProject(exitWith(0), {
+      prelint: "runner",
+      lint: "runner",
+      typecheck: "runner",
+    });
+
+    await writeFile(project.path("tsconfig.json"), "{}\n", "utf8");
+
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "blocked" });
+    expect(checkFor(bundle, "typecheck")).toMatchObject({ status: "passed", exitCode: 0 });
+    expect(bundle.outcome).toBe("blocked");
+  });
+
+  it("names the hook in the finding, so the blocker knows which script to remove or declare around", async () => {
+    const project = await makeNodeProject(exitWith(0), { pretest: "runner", test: "runner" });
+    const provider = new ProjectVerificationProvider({ projectRoot: project.root });
+    const bundle = await provider.collect({
+      featureId: "F-001",
+      stage: "test_verification",
+      verification: "test",
+      revision: 1,
+      projectRoot: project.root,
+    });
+
+    expect(checkFor(bundle, "test")?.detail).toContain("pretest");
+    expect(checkFor(bundle, "test")?.detail).toContain("agent-workflow.config.json");
+  });
+
+  it("blocks a build command with a prebuild hook", async () => {
+    const project = await makeNodeProject(exitWith(0), { prebuild: "runner", build: "runner" });
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "build")).toMatchObject({ status: "blocked", reason: "implicit_script_hook" });
+  });
+
+  it("blocks under every package manager, rather than assuming one of them suppresses hooks", async () => {
+    for (const [lockfile, manager] of [
+      ["pnpm-lock.yaml", "pnpm"],
+      ["package-lock.json", "npm"],
+      ["yarn.lock", "yarn"],
+      ["bun.lockb", "bun"],
+    ] as const) {
+      const project = await makeProject({
+        "package.json": JSON.stringify({
+          name: "fixture",
+          private: true,
+          scripts: { prelint: "runner", lint: "runner" },
+        }),
+        [lockfile]: "lockfile\n",
+      });
+
+      await mkdir(project.path("node_modules/.bin"), { recursive: true });
+      await writeFile(project.path("node_modules/.bin/runner"), exitWith(0), "utf8");
+      await chmod(project.path("node_modules/.bin/runner"), 0o755);
+
+      const bundle = await collectStatic(project);
+
+      expect(bundle.project.packageManager).toBe(manager);
+      expect(checkFor(bundle, "lint")).toMatchObject({ status: "blocked", reason: "implicit_script_hook" });
+    }
+  });
+
+  it("lets a configured command run the same tool directly, since no manager is involved", async () => {
+    const project = await makeNodeProject(exitWith(0, "checked"), {
+      prelint: "runner",
+      lint: "runner",
+    });
+
+    await writeFile(
+      project.path(PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        schemaVersion: 1,
+        verification: {
+          static: [{ id: "lint", capability: "lint", executable: "./node_modules/.bin/runner", args: ["--check"] }],
+        },
+      }),
+      "utf8",
+    );
+
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed", exitCode: 0 });
+    expect(checkFor(bundle, "lint")?.stdoutExcerpt).toContain("checked");
+    expect(bundle.outcome).toBe("passed");
+  });
+
+  it("does not confuse a script that merely starts with pre, such as prettier", async () => {
+    const project = await makeNodeProject(exitWith(0), { prettier: "runner", lint: "runner" });
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed" });
+    expect(bundle.outcome).toBe("passed");
+  });
+
+  it("ignores a hook for a script this stage does not run", async () => {
+    const project = await makeNodeProject(exitWith(0), { pretest: "runner", lint: "runner" });
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed" });
+  });
+
+  it("reports the hook before a missing dependency, because the manifest is the reason", async () => {
+    const project = await makeNodeProject(exitWith(0), { prelint: "runner", lint: "runner" });
+
+    await rm(project.path("node_modules"), { recursive: true, force: true });
+
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ reason: "implicit_script_hook" });
+  });
+});
+
+describe("freshness through the orchestrator, against a real project", () => {
+  const fixedTimestamp = "2026-04-05T06:07:08.000Z";
+
+  it("re-measures after the fixer repairs the source, and refuses to let the old attempt stand in", async () => {
+    // The lint script passes only once the file the fixer is meant to create exists, so the first
+    // attempt really fails and the second really passes, against a tree that changed underneath.
+    const project = await makeNodeProject(
+      '#!/bin/sh\ntest -f src/app.js || { echo "no app" >&2; exit 1; }\necho "checked"\n',
+      { lint: "runner" },
+    );
+
+    const store = createFeatureSessionStore(project.root, { clock: () => fixedTimestamp });
+    const provider = new ProjectVerificationProvider({ projectRoot: project.root });
+    const executor = new FakeStageExecutor().configure("fixing", {
+      after: async () => {
+        await mkdir(project.path("src"), { recursive: true });
+        await writeFile(project.path("src/app.js"), "export const repaired = true;\n", "utf8");
+      },
+    });
+    const orchestrator = createWorkflowOrchestrator({
+      store,
+      executor,
+      verification: provider,
+      projectRoot: project.root,
+    });
+
+    await orchestrator.createFeature({
+      featureId: "F-001",
+      title: "Real project freshness",
+      request: "# Request\n\nRepair the source and verify deterministically.\n",
+    });
+
+    for (let step = 0; step < 6; step += 1) {
+      await orchestrator.runNext("F-001");
+    }
+
+    await orchestrator.approvePlan("F-001");
+    await orchestrator.runNext("F-001");
+    await orchestrator.runNext("F-001");
+    await orchestrator.runNext("F-001");
+
+    const first = await orchestrator.runNext("F-001");
+
+    expect(first.status).toBe("fix_requested");
+    expect(first.verification?.implementationFingerprint).not.toBe("");
+
+    const failedFingerprint = first.verification?.implementationFingerprint;
+
+    // The fixer repairs the source, and the orchestrator sends the feature back to the same stage.
+    await orchestrator.runNext("F-001");
+
+    expect(executor.requestFor("fixing")?.fixReturnState).toBe("static_verification");
+
+    const second = await orchestrator.runNext("F-001");
+
+    expect(second.status).toBe("stage_completed");
+    expect(second.verification?.implementationFingerprint).not.toBe(failedFingerprint);
+
+    // The old attempt is history, not authority: both attempts are kept, and the one the stage
+    // turned on is the one that describes the tree that now exists.
+    const artifact = (await store.readArtifact("F-001", "verification")) as Record<string, unknown>;
+    const persisted = artifact[DETERMINISTIC_EVIDENCE_KEY] as {
+      readonly static_verification: readonly { readonly implementationFingerprint: string }[];
+    };
+
+    expect(persisted.static_verification).toHaveLength(2);
+    expect(persisted.static_verification[0]?.implementationFingerprint).toBe(failedFingerprint);
+    expect(persisted.static_verification[1]?.implementationFingerprint).toBe(
+      second.verification?.implementationFingerprint,
+    );
+    // Neither attempt claims the other's tree, so the second one is the only one that can be current.
+    expect(new Set(persisted.static_verification.map((entry) => entry.implementationFingerprint)).size).toBe(2);
   });
 });

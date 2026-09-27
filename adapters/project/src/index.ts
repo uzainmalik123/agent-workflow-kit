@@ -33,10 +33,15 @@ export type {
 export {
   assertArgs,
   assertExecutable,
+  assertNoCommandShell,
   assertPackageManagerInvocation,
   buildVerificationCommand,
+  CAPABILITIES_BY_STAGE,
+  capabilityBelongsToStage,
+  capabilitiesForStage,
   FORBIDDEN_PACKAGE_MANAGER_COMMANDS,
   FORBIDDEN_PACKAGE_SCRIPTS,
+  implicitScriptHook,
   isNodePackageManager,
   PACKAGE_MANAGERS,
 } from "./commands.js";
@@ -84,6 +89,7 @@ export {
   absentCheck,
   buildBundle,
   commandEvidence,
+  describeCommandOutcome,
   outcomeForChecks,
   profileSummary,
   statusForOutcome,
@@ -92,9 +98,6 @@ export {
 export {
   createProjectVerificationProvider,
   ProjectVerificationProvider,
-  RUNTIME_CAPABILITIES,
-  STATIC_CAPABILITIES,
-  TEST_CAPABILITIES,
 } from "./provider.js";
 export type { ProjectVerificationProviderOptions } from "./provider.js";
 

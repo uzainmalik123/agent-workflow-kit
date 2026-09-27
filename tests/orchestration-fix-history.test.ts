@@ -16,6 +16,7 @@ import {
   type FeatureSessionStore,
 } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor, findingFor } from "../fixtures/stage-executor.js";
+import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
@@ -40,7 +41,7 @@ async function makeRoot(): Promise<string> {
 function createHarness(root: string): Harness {
   const store = createFeatureSessionStore(root, { clock: fixedClock });
   const executor = new FakeStageExecutor();
-  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor }) };
+  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() }) };
 }
 
 function contextNames(request: StageExecutionRequest | undefined): readonly string[] {
@@ -146,7 +147,11 @@ describe("durable fix history", () => {
 
     const silent = new FakeStageExecutor();
     silent.configure("fixing", { artifacts: [] });
-    const withoutReport = createWorkflowOrchestrator({ store: harness.store, executor: silent });
+    const withoutReport = createWorkflowOrchestrator({
+      store: harness.store,
+      executor: silent,
+      verification: createFakeVerificationProvider(),
+    });
     const result = await withoutReport.runNext("F-001");
 
     expect(result).toMatchObject({

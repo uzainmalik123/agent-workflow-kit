@@ -15,6 +15,7 @@ import {
   type FeatureSession,
 } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
+import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 const roots: string[] = [];
@@ -74,7 +75,7 @@ interface Harness {
 function createHarness(root: string): Harness {
   const store = createFeatureSessionStore(root, { clock: fixedClock });
   const executor = new FakeStageExecutor();
-  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor }) };
+  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() }) };
 }
 
 async function planStateHarness(): Promise<{ root: string } & Harness> {
@@ -518,7 +519,7 @@ describe("orchestrator persistence recovery", () => {
   it("keeps the stage retryable when the artifact write fails", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
-    const healthy = createWorkflowOrchestrator({ store, executor });
+    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() });
 
     await healthy.createFeature({
       featureId: "F-001",
@@ -562,7 +563,7 @@ describe("orchestrator persistence recovery", () => {
   it("rolls the artifact back when the session write of a finalize fails", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
-    const healthy = createWorkflowOrchestrator({ store, executor });
+    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() });
 
     await healthy.createFeature({
       featureId: "F-001",
@@ -608,7 +609,7 @@ describe("orchestrator persistence recovery", () => {
   it("reports a finalize whose event log append failed after committing", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
-    const healthy = createWorkflowOrchestrator({ store, executor });
+    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() });
 
     await healthy.createFeature({
       featureId: "F-001",
