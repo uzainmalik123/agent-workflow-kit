@@ -1,4 +1,8 @@
-import { spawn } from "node:child_process";
+import {
+  runChildProcess,
+  type ProcessFailureReason,
+  type ProcessTermination,
+} from "@agent-workflow-kit/project";
 import { OpenCodeAdapterError } from "./errors.js";
 
 export const DEFAULT_MAX_OUTPUT_BYTES = 4_000_000;
@@ -38,26 +42,30 @@ export function excerpt(text: string, limit: number): string {
   return trimmed.length <= limit ? trimmed : `${trimmed.slice(0, limit)}… (truncated)`;
 }
 
-function nonZeroExitError(
-  code: ProcessFailureCode | "non_zero_exit",
-  label: string,
-  exitCode: number,
-  stderr: string,
-  stderrExcerptLimit: number,
-): OpenCodeAdapterError {
-  const detail = excerpt(stderr, stderrExcerptLimit);
+const TERMINATION_CODES: Readonly<Record<ProcessTermination, ProcessFailureCode | "non_zero_exit" | "transport_failed">> = {
+  exited: "non_zero_exit",
+  signalled: "transport_failed",
+  timed_out: "transport_timeout",
+  cancelled: "transport_cancelled",
+  spawn_failed: "transport_failed",
+  output_truncated: "output_truncated",
+};
 
-  return new OpenCodeAdapterError(
-    code,
-    `${label} exited with code ${String(exitCode)}.${detail === "" ? "" : ` stderr: ${detail}`}`,
-  );
+function reasonSuffix(reason: ProcessFailureReason | null): string {
+  return reason === null ? "" : ` (${reason})`;
 }
 
 /**
- * Runs a child process and returns its streams.
+ * Runs an OpenCode CLI process and refuses anything but a clean exit.
  *
- * Safety properties, all of them load-bearing, and shared by the transport, the capability probe,
- * and the configuration smoke test so none of them can grow a weaker path:
+ * This is the transport's own policy on top of the repository's single deterministic runner: a
+ * non-zero exit, a timeout, a cancellation, or a process that produced more output than it was allowed
+ * is an error, because for an agent run there is no evidence to record and nothing to interpret. The
+ * project adapter deliberately treats the same outcomes as results, since a failing lint run is the
+ * evidence it exists to collect. The mechanics are shared; the two policies are not.
+ *
+ * Safety properties inherited from the runner, all of them load-bearing, and shared by the transport,
+ * the capability probe, and the configuration smoke test so none of them can grow a weaker path:
  *
  * - arguments are passed as an array and `shell` is explicitly false, so no feature title, user
  *   request, or artifact content is ever interpreted by a shell;
@@ -70,133 +78,73 @@ function nonZeroExitError(
  *
  * A refusal always throws. The caller decides what a zero exit code means for its own command.
  */
-export function runProcess(
+export async function runProcess(
   command: string,
   args: readonly string[],
   options: RunProcessOptions,
 ): Promise<RunProcessResult> {
-  const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-  const stderrExcerptLimit = options.stderrExcerptLimit ?? DEFAULT_STDERR_EXCERPT_LIMIT;
-
   if (options.signal?.aborted === true) {
-    return Promise.reject(
-      new OpenCodeAdapterError("transport_cancelled", `${options.label} was cancelled before it started.`),
+    throw new OpenCodeAdapterError("transport_cancelled", `${options.label} was cancelled before it started.`);
+  }
+
+  const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+
+  // A verification command's output is evidence, so the project adapter keeps a bounded head and
+  // tail. This one parses its output as a document, so it needs the whole stream: the head window is
+  // widened to the byte ceiling and the tail window closed, which still bounds memory at
+  // `maxOutputBytes` and still stops a run that exceeds it.
+  const outcome = await runChildProcess({
+    executable: command,
+    args,
+    cwd: options.cwd ?? process.cwd(),
+    timeoutMs: options.timeoutMs,
+    maxStreamBytes: maxOutputBytes,
+    captureHeadChars: maxOutputBytes,
+    captureTailChars: 0,
+    killGraceMs: options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+    ...(options.inheritEnv === false ? { inheritEnv: false } : {}),
+    ...(options.env === undefined ? {} : { env: options.env }),
+    signal: options.signal ?? null,
+  });
+
+  if (outcome.termination === "exited" && outcome.exitCode === 0) {
+    return { exitCode: 0, stdout: outcome.stdout.text, stderr: outcome.stderr.text };
+  }
+
+  const code = TERMINATION_CODES[outcome.termination];
+  const detail = excerpt(outcome.stderr.text, options.stderrExcerptLimit ?? DEFAULT_STDERR_EXCERPT_LIMIT);
+
+  if (code === "non_zero_exit") {
+    throw new OpenCodeAdapterError(
+      code,
+      `${options.label} exited with code ${String(outcome.exitCode ?? 1)}.${
+        detail === "" ? "" : ` stderr: ${detail}`
+      }`,
     );
   }
 
-  return new Promise<RunProcessResult>((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
-    let capturedBytes = 0;
-    let stopReason: OpenCodeAdapterError | null = null;
-    let killTimer: NodeJS.Timeout | undefined;
+  if (outcome.termination === "timed_out") {
+    throw new OpenCodeAdapterError(
+      "transport_timeout",
+      `${options.label} exceeded its ${String(options.timeoutMs)}ms budget.`,
+    );
+  }
 
-    const child = spawn(command, [...args], {
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-      ...(options.inheritEnv === false
-        ? { env: { ...options.env } }
-        : { env: { ...process.env, ...options.env } }),
-    });
+  if (outcome.termination === "cancelled") {
+    throw new OpenCodeAdapterError("transport_cancelled", `${options.label} was cancelled.`);
+  }
 
-    const clearTimers = (): void => {
-      if (killTimer !== undefined) {
-        clearTimeout(killTimer);
-        killTimer = undefined;
-      }
-    };
+  if (outcome.termination === "output_truncated") {
+    throw new OpenCodeAdapterError(
+      "output_truncated",
+      `${options.label} produced more than ${String(maxOutputBytes)} bytes and was stopped.`,
+    );
+  }
 
-    const stop = (error: OpenCodeAdapterError): void => {
-      if (stopReason !== null) {
-        return;
-      }
-
-      stopReason = error;
-      clearTimers();
-
-      killTimer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, options.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
-    };
-
-    const timer = setTimeout(() => {
-      stop(
-        new OpenCodeAdapterError(
-          "transport_timeout",
-          `${options.label} exceeded its ${String(options.timeoutMs)}ms budget.`,
-        ),
-      );
-      child.kill("SIGTERM");
-    }, options.timeoutMs);
-
-    const onAbort = (): void => {
-      stop(new OpenCodeAdapterError("transport_cancelled", `${options.label} was cancelled.`));
-      child.kill("SIGTERM");
-    };
-
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-
-    const detach = (): void => {
-      clearTimeout(timer);
-      clearTimers();
-      options.signal?.removeEventListener("abort", onAbort);
-    };
-
-    const capture = (stream: "stdout" | "stderr", chunk: string): void => {
-      capturedBytes += Buffer.byteLength(chunk, "utf8");
-
-      if (stream === "stdout") {
-        stdout += chunk;
-      } else {
-        stderr += chunk;
-      }
-
-      if (capturedBytes > maxOutputBytes) {
-        stop(
-          new OpenCodeAdapterError(
-            "output_truncated",
-            `${options.label} produced more than ${String(maxOutputBytes)} bytes and was stopped.`,
-          ),
-        );
-        child.kill("SIGTERM");
-      }
-    };
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      capture("stdout", chunk);
-    });
-    child.stderr.on("data", (chunk: string) => {
-      capture("stderr", chunk);
-    });
-
-    child.on("error", (error: Error) => {
-      detach();
-
-      reject(
-        stopReason ??
-          new OpenCodeAdapterError("transport_failed", `Unable to start ${options.label}.`, { cause: error }),
-      );
-    });
-
-    child.on("close", (code: number | null) => {
-      detach();
-
-      if (stopReason !== null) {
-        reject(stopReason);
-        return;
-      }
-
-      const exitCode = code ?? 1;
-
-      if (exitCode !== 0) {
-        reject(nonZeroExitError("non_zero_exit", options.label, exitCode, stderr, stderrExcerptLimit));
-        return;
-      }
-
-      resolve({ exitCode, stdout, stderr });
-    });
-  });
+  throw new OpenCodeAdapterError(
+    "transport_failed",
+    `${options.label} did not complete: ${outcome.termination}${reasonSuffix(outcome.reason)}.${
+      detail === "" ? "" : ` stderr: ${detail}`
+    }`,
+  );
 }

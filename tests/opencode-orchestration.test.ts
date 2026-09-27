@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkflowState } from "@agent-workflow-kit/core";
@@ -9,6 +9,7 @@ import {
   type StageExecutionRequest,
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore, type FeatureSessionStore } from "@agent-workflow-kit/persistence";
+import { ProjectVerificationProvider } from "@agent-workflow-kit/project";
 import { createOpenCodeStageExecutor, isOpenCodeAdapterError } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakeOpenCodeTransport, renderFencedJson } from "../fixtures/opencode-transport.js";
@@ -33,12 +34,24 @@ async function makeRoot(): Promise<string> {
   return root;
 }
 
-function createHarness(root: string): Harness {
+function createHarness(
+  root: string,
+  options: {
+    readonly verification?: ProjectVerificationProvider;
+    readonly projectRoot?: string;
+  } = {},
+): Harness {
   const store = createFeatureSessionStore(root, { clock: fixedClock });
   const transport = createFakeOpenCodeTransport();
   const executor = createOpenCodeStageExecutor({ transport, workingDirectory: root });
+  const orchestrator = createWorkflowOrchestrator({
+    store,
+    executor,
+    ...(options.verification === undefined ? {} : { verification: options.verification }),
+    ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+  });
 
-  return { root, store, transport, orchestrator: createWorkflowOrchestrator({ store, executor }) };
+  return { root, store, transport, orchestrator };
 }
 
 async function createFeature(harness: Harness): Promise<OrchestrationResult> {
@@ -484,6 +497,65 @@ describe("prompt context in a real run", () => {
 
     expect(grillPrompt).not.toContain("### plan");
     expect(grillPrompt).not.toContain("### plan_review");
+  });
+});
+
+describe("the verifier receives the recorded evidence", () => {
+  /**
+   * A project whose own lint script really runs and really fails, driven through the real OpenCode
+   * adapter. This is the end-to-end claim of the milestone in one test: the framework ran the command,
+   * the recorded result reached the model, and the model's own success could not make the stage pass.
+   */
+  async function makeFailingNodeProject(): Promise<string> {
+    const root = await makeRoot();
+    const script = join(root, "node_modules", ".bin", "linter");
+
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "fixture", private: true, scripts: { lint: "linter" } }),
+      "utf8",
+    );
+    await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n", "utf8");
+    await mkdir(join(root, "node_modules", ".bin"), { recursive: true });
+    await writeFile(script, "#!/bin/sh\necho 'src/app.ts:1:1 error Unexpected any' >&2\nexit 2\n", "utf8");
+    await chmod(script, 0o755);
+
+    return root;
+  }
+
+  it("sends the evidence to the verifier and refuses to let a success stand", async () => {
+    const root = await makeFailingNodeProject();
+    const harness = createHarness(root, {
+      verification: new ProjectVerificationProvider({ projectRoot: root }),
+      projectRoot: root,
+    });
+
+    await runToPlanGate(harness);
+    await harness.orchestrator.approvePlan("F-001");
+
+    for (let step = 0; step < 6; step += 1) {
+      const result = await harness.orchestrator.runNext("F-001");
+
+      if (result.stage === "static_verification") {
+        const prompt = harness.transport.requestFor("static_verification")?.prompt ?? "";
+
+        expect(prompt).toContain("## Deterministic verification evidence");
+        expect(prompt).toContain("recorded outcome: `failed`");
+        expect(prompt).toContain("`pnpm run lint`");
+        expect(prompt).toContain("error Unexpected any");
+
+        expect(result.status).toBe("fix_requested");
+        expect(result.state).toBe(WorkflowState.Fixing);
+        expect(result.findings.map((finding) => finding.message).join(" ")).toContain("pnpm run lint");
+
+        const artifact = (await harness.store.readArtifact("F-001", "verification")) as Record<string, unknown>;
+
+        expect(artifact["deterministic_evidence"]).toBeDefined();
+        return;
+      }
+    }
+
+    throw new Error("The static verification stage never ran.");
   });
 });
 

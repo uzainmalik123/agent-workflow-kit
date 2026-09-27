@@ -6,7 +6,8 @@
 core            deterministic lifecycle rules
 persistence     durable repository-local state
 orchestration   state -> work -> artifacts -> legal transition
-agent adapter   future implementation of StageExecutor
+agent adapter   implementation of StageExecutor
+project adapter implementation of VerificationProvider
 ```
 
 The dependency direction stays one-way: `orchestration` depends on `core` and `persistence`; `core` never imports an adapter, an orchestrator, or a coding agent. A future agent adapter implements `StageExecutor` and depends on this package, never the other way around.
@@ -130,6 +131,24 @@ Only the persistence layer chooses filenames (`plan.json`, `verification.json`, 
 
 `verification.json` is shared by the three verification stages. To keep the filename unchanged, the orchestrator stores each stage's own result under a section named after the stage, merging into the existing envelope without interpreting its contents. A non-object `verification.json` is reported as `unmergeable_artifact` instead of being overwritten.
 
+### Deterministic verification evidence
+
+A verification stage is only as good as the process results behind it, so the orchestrator asks a `VerificationProvider` for that stage's evidence and treats the answer as hard data rather than as an opinion. The port is deliberately tiny:
+
+```ts
+interface VerificationProvider {
+  collect(request: VerificationRequest): Promise<VerificationEvidenceBundle>;
+}
+```
+
+The orchestrator owns the timing, the validation, and the enforcement; the provider owns discovery, command selection, execution, and the records. A provider that throws, a bundle that fails validation, and a bundle that contradicts itself all stop the stage, write nothing, and are reported with the new `verification` failure class. `runNext` still performs at most one stage.
+
+Collection happens after the plan-approval freeze has been re-verified and before the stage executor is involved, which makes running project code a consequence of a human having approved work in this repository rather than something a workflow walk can trigger. The bundle reaches the verifier in the request, is rendered in full in the prompt, and is appended to `verification.json` under the framework-owned `deterministic_evidence` key, beside the model's own section and never over it, one append-only attempt per stage run.
+
+The enforcement is one-directional and is applied by the orchestrator rather than by the prompt. A bundle whose outcome is `failed` or `blocked` turns a reported `success` into `needs_fix` and adds a finding naming each failing or blocked check, its command, and its exit code, whatever the verifier returned. A reported failure, fix request, or `inconclusive` on evidence that passed is left alone, because a reader who can see more than an exit code is worth hearing. A `deferred` stage is not a failure: runtime verification has no deterministic command yet, and treating a deferral as a failure would make the workflow unsatisfiable.
+
+Each record carries the session revision it was collected for and a fingerprint of the working tree the command saw, so evidence from before a fix can never prove the code that fix produced, and a repair is verified by a fresh run rather than by an inherited result.
+
 ## Fix loop
 
 1. A review or verification stage returns `needs_fix`; its artifacts are persisted and the legal `request_fix` event moves the session to `fixing`, recording the returning state.
@@ -237,6 +256,6 @@ Artifacts are written before the transition, so durable state never claims progr
 
 ## Deferred
 
-No AI model, OpenCode, Freebuff, project command, Git operation, or third-party skill is used or simulated. `runUntilBlocked()` is deliberately not implemented: it belongs on top of `runNext` once the one-stage guarantee is trusted in production use.
+No AI model, OpenCode, Freebuff, Git operation, or third-party skill is used or simulated. A project command is run, but not by this package: it is run by a `VerificationProvider` implementation outside the orchestrator, and the orchestrator only collects, validates, enforces, and records the result. `runUntilBlocked()` is deliberately not implemented: it belongs on top of `runNext` once the one-stage guarantee is trusted in production use.
 
 A lock is a directory created with an exclusive `mkdir` plus an owner record carrying a token, the owner `pid`, and the host, so a lock left behind by a dead process on this machine can be taken over without any age-based guesswork. It is deliberately **not** a distributed lock: it serializes writers on one machine, a lock held by another host is respected rather than reclaimed, and cross-machine coordination is the caller's problem to solve.

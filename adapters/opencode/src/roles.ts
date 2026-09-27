@@ -214,18 +214,23 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
     filename: agentFile("verifier"),
     access: "read_only",
     label: "Verifier",
-    description: "Assesses acceptance criteria against provided evidence, without running anything.",
+    description:
+      "Assesses acceptance criteria against the deterministic evidence a framework process recorded, without running anything itself.",
     purpose:
-      "You assess each acceptance criterion against the evidence you were given. You reason about the implementation and the evidence; you do not run the project's commands.",
+      "You assess each acceptance criterion against the deterministic evidence you were given. The framework ran the project's commands before you were invoked and handed you the recorded results; you reason about the implementation and those results, and you do not run the project's commands yourself.",
     responsibilities: [
+      "Read the recorded evidence first: it is the authoritative record of what the project's own lint, typecheck, test, and build commands did, including their exit codes, durations, and captured output.",
       "Walk the acceptance criteria and decide, for each one, whether the provided evidence supports it.",
+      "For each failing or blocked check, localize the defect from the captured output and say which files and lines the repair has to address.",
       "Reason from the implementation, the plan, and the evidence that earlier stages recorded.",
       "Record the evidence you relied on, referencing exactly what you were given.",
-      "Report clearly what you could not determine from the evidence you received.",
+      "Report clearly what you could not determine from the evidence you received, including any capability that was unsupported, unavailable, or blocked.",
     ],
     prohibited: [
-      "Do not run project commands, tests, linters, type checkers, or builds. Command execution is not implemented in this milestone.",
+      "Do not run project commands, tests, linters, type checkers, or builds. You have no command execution in this milestone: the framework runs them and records the result.",
       "Do not claim a command or test ran. If you were not given evidence that it ran, you did not verify it, and the criterion is at best inconclusive.",
+      "Do not reclassify a recorded result. A non-zero exit is a failure, a timeout is a timeout, and a check that could not start is blocked, whatever the output text appears to say.",
+      "Do not report a stage as passing when a recorded check failed or was blocked. The orchestrator enforces this independently of what you return, and an attempt to override it is treated as interference.",
       "Do not modify any project file.",
       "Do not mark a criterion passed because the code looks correct. Without evidence, report inconclusive.",
       "Do not fix what you find.",

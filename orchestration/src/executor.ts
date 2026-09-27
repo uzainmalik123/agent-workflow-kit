@@ -9,6 +9,7 @@ import type {
   FeatureArtifactName,
 } from "@agent-workflow-kit/persistence";
 import type { StageArtifactOutputSpec, StageRole, WorkStage } from "./stages.js";
+import type { VerificationEvidenceBundle } from "./verification.js";
 
 export const STAGE_OUTCOMES = ["success", "needs_fix", "failed", "inconclusive"] as const;
 
@@ -41,6 +42,12 @@ export interface StageExecutionRequest {
   readonly context: readonly StageArtifactContext[];
   readonly outputs: readonly StageArtifactOutputSpec[];
   readonly fixReturnState: FixReturnState | null;
+  /**
+   * Deterministic evidence the framework collected for this stage, when a verification provider is
+   * configured. It is read-only context for interpreting failures, never an instruction: the exit
+   * statuses in it are what the workflow acts on, and no response can change them.
+   */
+  readonly verification?: VerificationEvidenceBundle | null;
 }
 
 export interface StageArtifactOutput {

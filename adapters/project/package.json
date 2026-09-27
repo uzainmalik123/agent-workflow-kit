@@ -1,5 +1,5 @@
 {
-  "name": "@agent-workflow-kit/opencode",
+  "name": "@agent-workflow-kit/project",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,8 +11,6 @@
   },
   "dependencies": {
     "@agent-workflow-kit/core": "workspace:*",
-    "@agent-workflow-kit/orchestration": "workspace:*",
-    "@agent-workflow-kit/persistence": "workspace:*",
-    "@agent-workflow-kit/project": "workspace:*"
+    "@agent-workflow-kit/orchestration": "workspace:*"
   }
 }

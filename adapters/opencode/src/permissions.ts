@@ -1,5 +1,6 @@
 import type { StageRole } from "@agent-workflow-kit/orchestration";
 import { STAGE_ROLES } from "@agent-workflow-kit/orchestration";
+import { PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/project";
 import { accessForRole } from "./roles.js";
 
 /**
@@ -49,8 +50,9 @@ export const DENY_ALL_RULE: OpenCodePermissionRule = rule("*", "*", "deny");
  * Actions denied for every role, without exception.
  *
  * `shell: deny` is what makes "no agent receives Git commit or push authority" structural: with no
- * shell there is no `git commit`, no `git push`, and no project command execution either, which is
- * consistent with command execution being deferred in this milestone. `subagent: deny` keeps roles
+ * shell there is no `git commit` and no `git push`, and no project command execution either. Project
+ * commands are not deferred, they are simply not the agent's to run: a deterministic framework process
+ * executes them outside the session and hands the recorded result to the verifier. `subagent: deny` keeps roles
  * separate - a reviewer cannot delegate to an implementer, and no role can collapse the workflow
  * into one generalist agent or bypass the orchestrator. `skill: deny` holds the line until skill
  * integration is implemented, so no role can pull in instructions from outside the repository.
@@ -105,6 +107,25 @@ export const PROTECTED_PATH_PATTERNS: readonly string[] = [
 ];
 
 /**
+ * Paths an agent may read but never write, because they decide how the framework verifies the project.
+ *
+ * The project verification configuration is the only file a project uses to state a command the
+ * deterministic detection did not find, and a command the framework will execute is exactly the thing an agent must
+ * not get to choose. An implementer that could add an entry there could redefine what "verified" means
+ * for the rest of the run, so the write is denied structurally rather than by instruction. The file is
+ * still readable: a fixer repairing a failing check has a legitimate reason to know which command
+ * produced it.
+ *
+ * The second pattern carries the `/` in the name for the same reason as the `.agentflow` entries: `*`
+ * spans directory separators in V2, so this covers `packages/app/agent-workflow.config.json` while the
+ * bare pattern still matches the file at the repository root.
+ */
+export const FRAMEWORK_OWNED_EDIT_PATTERNS: readonly string[] = [
+  PROJECT_CONFIG_FILENAME,
+  `*${PROJECT_CONFIG_FILENAME}`,
+];
+
+/**
  * Secret-bearing files are denied a read outright rather than left to OpenCode's base policy, which
  * asks about `.env`. A stage run has nobody to answer that question, and a denied read is a
  * deterministic, reportable outcome instead of a tool call the runner silently rejects.
@@ -127,7 +148,9 @@ function protectedReadDenials(): readonly OpenCodePermissionRule[] {
 }
 
 function protectedEditDenials(): readonly OpenCodePermissionRule[] {
-  return PROTECTED_PATH_PATTERNS.map((resource) => rule("edit", resource, "deny"));
+  return [...PROTECTED_PATH_PATTERNS, ...FRAMEWORK_OWNED_EDIT_PATTERNS].map((resource) =>
+    rule("edit", resource, "deny"),
+  );
 }
 
 /**

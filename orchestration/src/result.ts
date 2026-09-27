@@ -8,6 +8,7 @@ import type {
 import type { FeatureArtifactName } from "@agent-workflow-kit/persistence";
 import type { OrchestrationError, OrchestrationFailureClass } from "./errors.js";
 import type { HumanAction, StageRole, WorkStage } from "./stages.js";
+import type { VerificationEvidenceBundle } from "./verification.js";
 
 export const ORCHESTRATION_STATUSES = [
   "created",
@@ -45,6 +46,11 @@ export interface OrchestrationResult {
   readonly fixReturnState: FixReturnState | null;
   readonly findings: readonly ReviewFinding[];
   readonly evidence: readonly VerificationEvidence[];
+  /**
+   * The deterministic evidence collected for this run, when a verification provider is configured
+   * and the stage was a verification stage. Bounded: excerpts only, never a raw transcript.
+   */
+  readonly verification: VerificationEvidenceBundle | null;
   readonly error: OrchestrationError | null;
 }
 
@@ -63,6 +69,7 @@ export interface OrchestrationResultInput {
   readonly fixReturnState?: FixReturnState | null;
   readonly findings?: readonly ReviewFinding[];
   readonly evidence?: readonly VerificationEvidence[];
+  readonly verification?: VerificationEvidenceBundle | null;
   readonly error?: OrchestrationError | null;
 }
 
@@ -85,6 +92,7 @@ export function buildOrchestrationResult(input: OrchestrationResultInput): Orche
     fixReturnState: input.fixReturnState ?? null,
     findings: input.findings ?? [],
     evidence: input.evidence ?? [],
+    verification: input.verification ?? null,
     error,
   };
 }

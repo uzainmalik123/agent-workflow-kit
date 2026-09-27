@@ -2,6 +2,7 @@ import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   STAGE_DEFINITIONS,
   type StageExecutionRequest,
+  type VerificationEvidenceBundle,
 } from "@agent-workflow-kit/orchestration";
 import { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES, buildStagePrompt } from "@agent-workflow-kit/opencode";
 import { describe, expect, it } from "vitest";
@@ -29,6 +30,7 @@ function requestFor(
     context: [],
     outputs: definition.outputs,
     fixReturnState: null,
+    verification: null,
     ...overrides,
   };
 }
@@ -193,6 +195,174 @@ describe("prompt contents", () => {
 
     expect(prompt).toContain('```json\n{\n  "requirements": []\n}\n```');
     expect(prompt).toContain("```markdown\n# Request\n\nSign in.\n```");
+  });
+});
+
+describe("deterministic verification evidence in the prompt", () => {
+  function evidence(overrides: Partial<VerificationEvidenceBundle> = {}): VerificationEvidenceBundle {
+    return {
+      verification: "static",
+      outcome: "failed",
+      revision: 7,
+      implementationFingerprint: "b".repeat(64),
+      collectedAt: created,
+      projectRoot: "/repo",
+      project: {
+        ecosystem: "node",
+        language: "typescript",
+        packageManager: "pnpm",
+        declaredPackageManager: "npm",
+        dependenciesInstalled: true,
+        frameworks: ["eslint", "vitest"],
+        capabilities: [
+          { capability: "lint", status: "applicable", reason: "detected", script: "lint", detail: "A lint script." },
+          {
+            capability: "typecheck",
+            status: "unavailable",
+            reason: "script_absent",
+            script: null,
+            detail: "No typecheck script.",
+          },
+          { capability: "test", status: "unavailable", reason: "script_absent", script: null, detail: "No test script." },
+          { capability: "build", status: "unavailable", reason: "script_absent", script: null, detail: "No build script." },
+          {
+            capability: "runtime",
+            status: "unsupported",
+            reason: "runtime_deferred",
+            script: null,
+            detail: "Runtime is deferred.",
+          },
+        ],
+      },
+      checks: [
+        {
+          id: "lint",
+          kind: "static",
+          capability: "lint",
+          capabilityStatus: "applicable",
+          label: "Lint",
+          executable: "pnpm",
+          args: ["run", "lint"],
+          cwd: "/repo",
+          script: "lint",
+          startedAt: created,
+          durationMs: 1540,
+          exitCode: 2,
+          signal: null,
+          status: "failed",
+          reason: null,
+          stdoutExcerpt: "",
+          stderrExcerpt: "src/app.ts\n  1:1  error  Unexpected any",
+          truncated: false,
+          revision: 7,
+          implementationFingerprint: "b".repeat(64),
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  const failingCheck = (): VerificationEvidenceBundle["checks"][number] => {
+    const [check] = evidence().checks;
+
+    if (check === undefined) {
+      throw new Error("the fixture must carry one check");
+    }
+
+    return check;
+  };
+
+  it("is absent when the orchestrator collected nothing", () => {
+    const prompt = promptFor("static_verification");
+
+    expect(prompt).not.toContain("## Deterministic verification evidence");
+    expect(prompt).not.toContain("Unexpected any");
+  });
+
+  it("renders every check, its command, and its result", () => {
+    const prompt = promptFor("static_verification", { verification: evidence() });
+
+    expect(prompt).toContain("## Deterministic verification evidence");
+    expect(prompt).toContain("#### Lint — failed, exit code 2");
+    expect(prompt).toContain("`pnpm run lint`");
+    expect(prompt).toContain("working directory: `/repo`");
+    expect(prompt).toContain("duration: 1540ms");
+    expect(prompt).toContain("src/app.ts\n  1:1  error  Unexpected any");
+  });
+
+  it("reports the recorded outcome, the revision, and the fingerprint as framework facts", () => {
+    const prompt = promptFor("static_verification", { verification: evidence() });
+
+    expect(prompt).toContain("recorded outcome: `failed`");
+    expect(prompt).toContain("session revision: 7");
+    expect(prompt).toContain(`implementation fingerprint: \`${"b".repeat(64)}\``);
+    expect(prompt).toContain("The framework recorded this stage as `failed` before you were invoked");
+  });
+
+  it("names the project, the manager it will actually use, and every capability", () => {
+    const prompt = promptFor("static_verification", { verification: evidence() });
+
+    expect(prompt).toContain("package manager: `pnpm` (declared: npm)");
+    expect(prompt).toContain("frameworks: eslint, vitest");
+    expect(prompt).toContain("`typecheck`: unavailable — No typecheck script.");
+    expect(prompt).toContain("`runtime`: unsupported — Runtime is deferred.");
+    expect(prompt).toContain("`lint`: applicable (script `lint`) — A lint script.");
+  });
+
+  it("says a check never ran, instead of implying a pass", () => {
+    const prompt = promptFor(
+      "runtime_verification",
+      {
+        verification: evidence({
+          verification: "runtime",
+          outcome: "deferred",
+          checks: [
+            {
+              ...failingCheck(),
+              id: "runtime",
+              kind: "runtime",
+              capability: "runtime",
+              capabilityStatus: "unsupported",
+              label: "Runtime",
+              executable: null,
+              args: [],
+              script: null,
+              exitCode: null,
+              status: "skipped",
+              reason: "runtime_deferred",
+              stderrExcerpt: "",
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(prompt).toContain("#### Runtime — skipped (runtime_deferred)");
+    expect(prompt).toContain("command: `not run`");
+    expect(prompt).toContain("script: none, the command is declared rather than discovered");
+  });
+
+  it("stays byte-identical for the same evidence", () => {
+    expect(promptFor("static_verification", { verification: evidence() })).toBe(
+      promptFor("static_verification", { verification: evidence() }),
+    );
+  });
+
+  it("differs between stages that share the verifier, so one stage's evidence cannot be read as another's", () => {
+    const staticPrompt = promptFor("static_verification", { verification: evidence() });
+
+    const testPrompt = promptFor(
+      "test_verification",
+      {
+        verification: evidence({
+          verification: "test",
+          checks: [{ ...failingCheck(), kind: "test", capability: "test", label: "Test" }],
+        }),
+      },
+    );
+
+    expect(staticPrompt).not.toBe(testPrompt);
+    expect(testPrompt).toContain("#### Test");
   });
 });
 

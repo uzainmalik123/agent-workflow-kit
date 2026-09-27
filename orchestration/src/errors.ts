@@ -1,4 +1,4 @@
-export type OrchestrationFailureClass = "none" | "workflow" | "executor" | "persistence";
+export type OrchestrationFailureClass = "none" | "workflow" | "executor" | "persistence" | "verification";
 
 export type OrchestrationErrorCode =
   | "stage_reported_failure"
@@ -19,6 +19,8 @@ export type OrchestrationErrorCode =
   | "approval_missing"
   | "approval_invalidated"
   | "approval_evidence_missing"
+  | "verification_provider_failed"
+  | "verification_evidence_invalid"
   | "unhandled_state"
   | "git_integration_deferred"
   | "persistence_transition_committed"
@@ -53,6 +55,8 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     approval_missing: "workflow",
     approval_invalidated: "workflow",
     approval_evidence_missing: "workflow",
+    verification_provider_failed: "verification",
+    verification_evidence_invalid: "verification",
     unhandled_state: "workflow",
     git_integration_deferred: "workflow",
     persistence_transition_committed: "persistence",

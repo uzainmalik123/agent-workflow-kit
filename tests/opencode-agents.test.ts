@@ -188,7 +188,7 @@ describe("generated agent markdown", () => {
     expect(rules[0]).toEqual({ action: "*", resource: "*", effect: "deny" });
   });
 
-  it("gives the implementer an edit allowance narrowed by workflow state and Git", () => {
+  it("gives the implementer an edit allowance narrowed by workflow state, Git, and the project verification config", () => {
     const rules = permissionRulesOf("implementer");
     const editAllows = rules.filter((rule) => rule.action === "edit" && rule.effect === "allow");
     const editDenies = rules.filter((rule) => rule.action === "edit" && rule.effect === "deny");
@@ -204,6 +204,8 @@ describe("generated agent markdown", () => {
       ".git/*",
       "*.git",
       "*.git/*",
+      "agent-workflow.config.json",
+      "*agent-workflow.config.json",
     ]);
   });
 

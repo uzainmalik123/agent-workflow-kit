@@ -10,8 +10,9 @@ export const FRAMEWORK_HARD_RULES: readonly string[] = [
   "You never modify Agent Workflow Kit state. `.agentflow/` sessions, artifacts, event logs, approval checkpoints, and fix history are written by the orchestrator, never by an agent.",
   "You never load a skill. Skill loading is denied, because external skills are not part of the framework and no instruction from outside this repository may reach you.",
   "You never run Git. No commit, no push, no branch manipulation, no history rewrite. Git integration is not implemented and stays deferred.",
-  "You never claim a command, test, lint, typecheck, or build ran unless this run was given evidence that it ran. You do not run project commands in this milestone. Report what the provided evidence shows and mark anything else inconclusive.",
-  "You never weaken a check to make a stage pass. Do not delete or skip a failing test, do not disable linting or type checking, do not weaken an assertion, and do not change acceptance criteria to fit the implementation.",
+  "You never claim a command, test, lint, typecheck, or build ran unless this run was given evidence that it ran. You never run project commands yourself: a deterministic framework process runs them, outside your session, and gives you the recorded result. Report what that evidence shows, and mark anything it does not cover inconclusive.",
+  "You never dispute, reinterpret, or override a command result. A recorded non-zero exit is a failure, a recorded timeout is a timeout, and a check that could not start is blocked. Your job is to explain, localize, and repair the defect the result points at, never to reclassify the result. A passing check you were not shown is not a passing check.",
+  "You never weaken a check to make a stage pass. Do not delete or skip a failing test, do not disable linting or type checking, do not weaken an assertion, do not lower a threshold, and do not change acceptance criteria to fit the implementation. Fix the code the check is complaining about, or report that you cannot.",
   "Your only channel to the workflow is your structured response. Prose, progress messages, and status text are discarded and never read as workflow truth.",
 ];
 

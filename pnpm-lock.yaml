@@ -219,6 +219,9 @@ importers:
       '@agent-workflow-kit/persistence':
         specifier: workspace:*
         version: link:adapters/persistence
+      '@agent-workflow-kit/project':
+        specifier: workspace:*
+        version: link:adapters/project
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.11.0)
@@ -249,12 +252,24 @@ importers:
       '@agent-workflow-kit/persistence':
         specifier: workspace:*
         version: link:../persistence
+      '@agent-workflow-kit/project':
+        specifier: workspace:*
+        version: link:../project
 
   adapters/persistence:
     dependencies:
       '@agent-workflow-kit/core':
         specifier: workspace:*
         version: link:../../core
+
+  adapters/project:
+    dependencies:
+      '@agent-workflow-kit/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@agent-workflow-kit/orchestration':
+        specifier: workspace:*
+        version: link:../../orchestration
 
   apps/cli:
     dependencies:

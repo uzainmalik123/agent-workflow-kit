@@ -27,6 +27,7 @@ export {
   matchesResourcePattern,
   operationEffect,
   permissionRulesForRole,
+  FRAMEWORK_OWNED_EDIT_PATTERNS,
   PROTECTED_PATH_PATTERNS,
   readOnlyRoles,
   READ_ONLY_PERMISSION_RULES,

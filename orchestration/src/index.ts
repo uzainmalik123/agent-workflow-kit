@@ -57,6 +57,42 @@ export type {
 export { validateStageExecutionResult } from "./result-validation.js";
 export type { StageResultValidation } from "./result-validation.js";
 
+export {
+  applyDeterministicEvidence,
+  CAPABILITY_REASONS,
+  CAPABILITY_STATUSES,
+  DETERMINISTIC_EVIDENCE_KEY,
+  evidenceBlocksSuccess,
+  MAX_EVIDENCE_EXCERPT_CHARS,
+  mergeDeterministicEvidence,
+  validateVerificationEvidenceBundle,
+  VERIFICATION_ARTIFACT_NAME,
+  VERIFICATION_CAPABILITIES,
+  VERIFICATION_CHECK_STATUSES,
+  VERIFICATION_OUTCOMES,
+  VERIFICATION_STAGES,
+  VERIFICATION_STAGE_BY_WORK_STAGE,
+  VERIFICATION_WORK_STAGES,
+  verificationEvidenceSummaries,
+  verificationFailureFindings,
+} from "./verification.js";
+export type {
+  CapabilityDetection,
+  CapabilityReason,
+  CapabilityStatus,
+  DeterministicEvidenceApplication,
+  ProjectProfileSummary,
+  VerificationBundleValidation,
+  VerificationCapability,
+  VerificationCheckStatus,
+  VerificationCommandEvidence,
+  VerificationEvidenceBundle,
+  VerificationOutcome,
+  VerificationProvider,
+  VerificationRequest,
+  VerificationStage,
+} from "./verification.js";
+
 export { buildOrchestrationResult, ORCHESTRATION_STATUSES } from "./result.js";
 export type {
   OrchestrationResult,

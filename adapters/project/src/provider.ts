@@ -1,0 +1,439 @@
+import { resolve } from "node:path";
+import type {
+  CapabilityDetection,
+  VerificationCapability,
+  VerificationCommandEvidence,
+  VerificationEvidenceBundle,
+  VerificationProvider,
+  VerificationRequest,
+  VerificationStage,
+} from "@agent-workflow-kit/orchestration";
+import type { PlannedVerificationCommand } from "./commands.js";
+import { loadProjectVerificationConfig, type ProjectVerificationConfig } from "./config.js";
+import { isDiscoveryRefusal, ProjectAdapterError } from "./errors.js";
+import {
+  buildBundle,
+  capabilityDetectionsFor,
+  commandEvidence,
+  absentCheck,
+} from "./evidence.js";
+import { fingerprintImplementation } from "./fingerprint.js";
+import {
+  discoverProject,
+  unmeasurableCapabilities,
+  type ProjectProfile,
+} from "./profile.js";
+import {
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  runChildProcess,
+  type ChildProcessOutcome,
+  type ChildProcessRequest,
+} from "./process.js";
+
+/**
+ * The fingerprint recorded when the project could not be measured at all. A real digest would be a
+ * claim about files that were never read, and an all-zero digest is visibly not one.
+ */
+const UNMEASURED_FINGERPRINT = "0".repeat(64);
+
+/**
+ * The project verification provider.
+ *
+ * It answers one question per call: for this workflow stage, what did the project's own commands
+ * actually do? The order of the path is the trust model:
+ *
+ * ```
+ * discovery (reads files, executes nothing)
+ *   -> configuration (validated, never written)
+ *   -> command plan (framework-selected commands only)
+ *   -> run (shell: false, one executable and an argument array)
+ *   -> evidence (exit status is authoritative)
+ * ```
+ *
+ * A model never appears in it. Nothing here reads a stage response, and a stage response cannot add,
+ * remove, or reorder a command: the plan is a function of the repository and the configuration file.
+ */
+export interface ProjectVerificationProviderOptions {
+  /**
+   * The project the commands may run in. Defaults to `process.cwd()`. Commands are pinned to this
+   * directory or to a subdirectory of it that the configuration declared.
+   */
+  readonly projectRoot?: string;
+  /** Injectable millisecond clock, so evidence timestamps are reproducible. */
+  readonly clock?: () => number;
+  /** Per-command deadline. A command that exceeds it is reported as `timed_out`, never as a pass. */
+  readonly timeoutMs?: number;
+  /**
+   * Substitutable runner. The default is the repository's single process runner; a test may supply
+   * another one to prove that discovery and planning run no process at all.
+   */
+  readonly run?: (request: ChildProcessRequest) => Promise<ChildProcessOutcome>;
+}
+
+/** The capabilities a static stage covers, in the order they run. */
+export const STATIC_CAPABILITIES: readonly VerificationCapability[] = ["lint", "typecheck", "build"];
+
+export const TEST_CAPABILITIES: readonly VerificationCapability[] = ["test"];
+
+export const RUNTIME_CAPABILITIES: readonly VerificationCapability[] = ["runtime"];
+
+function capabilitiesForStage(stage: VerificationStage): readonly VerificationCapability[] {
+  switch (stage) {
+    case "static":
+      return STATIC_CAPABILITIES;
+    case "test":
+      return TEST_CAPABILITIES;
+    case "runtime":
+      return RUNTIME_CAPABILITIES;
+  }
+}
+
+function detectionFor(
+  detections: readonly CapabilityDetection[],
+  capability: VerificationCapability,
+): CapabilityDetection {
+  return (
+    detections.find((detection) => detection.capability === capability) ?? {
+      capability,
+      status: "unavailable",
+      reason: "script_absent",
+      script: null,
+      detail: "The project profile does not classify this capability.",
+    }
+  );
+}
+
+/**
+ * The reason a detected command could not be started, or `null` when it can.
+ *
+ * Missing dependencies are reported, never repaired. Installing them would execute repository-defined
+ * lifecycle hooks, which is exactly the thing this boundary exists to prevent, and it would do it
+ * without a human having approved anything about it.
+ *
+ * The two preconditions belong to detection rather than to execution. A command the project declared
+ * names its own executable and does not go through a package manager, so neither a missing manager nor
+ * a missing `node_modules` says anything about whether it can run; blocking it would replace a real
+ * result with a guess. A detected command is a script invoked through a manager, so both preconditions
+ * are facts about it, and reporting them is more useful than running a command that cannot work.
+ */
+function startupBlock(profile: ProjectProfile, source: PlannedVerificationCommand["source"]): string | null {
+  if (source === "configured") {
+    return null;
+  }
+
+  if (profile.packageManager === null) {
+    return "package_manager_unknown";
+  }
+
+  if (!profile.dependenciesInstalled) {
+    return "dependency_missing";
+  }
+
+  return null;
+}
+
+/**
+ * A check whose command exists and is well formed but could not be started. It keeps the command's
+ * identity, so the report says which check was blocked and why, and never pretends it ran.
+ */
+function blockedCheck(input: {
+  readonly detection: CapabilityDetection;
+  readonly command: PlannedVerificationCommand;
+  readonly reason: string;
+  readonly revision: number;
+  readonly fingerprint: string;
+  readonly collectedAt: string;
+  readonly projectRoot: string;
+  readonly kind: VerificationStage;
+}): VerificationCommandEvidence {
+  const base = absentCheck({
+    id: input.command.id,
+    capability: input.command.capability,
+    kind: input.kind,
+    label: input.command.label,
+    status: "blocked",
+    reason: input.reason,
+    detail: input.detection.detail,
+    revision: input.revision,
+    fingerprint: input.fingerprint,
+    collectedAt: input.collectedAt,
+    projectRoot: input.projectRoot,
+  });
+
+  return {
+    ...base,
+    // The capability's own status is the profile's classification, which is unchanged by the block;
+    // the check's status is what the block is.
+    capabilityStatus: input.detection.status,
+    status: "blocked",
+    executable: input.command.executable,
+    args: input.command.args,
+    cwd: input.command.cwd,
+    script: input.command.script,
+  };
+}
+
+export class ProjectVerificationProvider implements VerificationProvider {
+  readonly #root: string;
+  readonly #clock: () => number;
+  readonly #timeoutMs: number;
+  readonly #run: (request: ChildProcessRequest) => Promise<ChildProcessOutcome>;
+  #profile: ProjectProfile | null = null;
+  #config: ProjectVerificationConfig | null = null;
+
+  constructor(options: ProjectVerificationProviderOptions = {}) {
+    this.#root = resolve(options.projectRoot ?? process.cwd());
+    this.#clock = options.clock ?? Date.now;
+    this.#timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    this.#run =
+      options.run ??
+      // The provider's clock reaches the runner so one collection has one timeline: a check's
+      // `startedAt` and the bundle's `collectedAt` are read from the same source, and a test that
+      // injects a clock gets a fully reproducible record.
+      ((request) => runChildProcess(request, { clock: this.#clock }));
+  }
+
+  get projectRoot(): string {
+    return this.#root;
+  }
+
+  /** The profile from the last collection, for a caller that wants to report it. */
+  get profile(): ProjectProfile | null {
+    return this.#profile;
+  }
+
+  /** The configuration the last collection loaded, which is null when the project declared none. */
+  get config(): ProjectVerificationConfig | null {
+    return this.#config;
+  }
+
+  async collect(request: VerificationRequest): Promise<VerificationEvidenceBundle> {
+    // The request's root is data the orchestrator supplies; this provider verifies it agrees with
+    // its own configured root and otherwise refuses, so a request cannot redirect a command.
+    if (resolve(request.projectRoot) !== this.#root) {
+      throw new ProjectAdapterError(
+        "command_invalid",
+        `The verification request asked for project root "${request.projectRoot}" but this provider is bound to "${this.#root}".`,
+      );
+    }
+
+    const collectedAt = new Date(this.#clock()).toISOString();
+
+    let profile: ProjectProfile;
+    let config: ProjectVerificationConfig;
+
+    try {
+      profile = await discoverProject(this.#root);
+      config = await loadProjectVerificationConfig(this.#root);
+    } catch (error) {
+      if (!isDiscoveryRefusal(error)) {
+        throw error;
+      }
+
+      // A project that cannot be inspected is a blocked verification with an explicit reason, not a
+      // crash and not a pass. Nothing was executed to get here.
+      const detail = `The project could not be inspected (${error.code}): ${error.message}`;
+
+      return buildBundle({
+        verification: request.verification,
+        revision: request.revision,
+        fingerprint: UNMEASURED_FINGERPRINT,
+        collectedAt,
+        projectRoot: this.#root,
+        project: {
+          root: this.#root,
+          commands: [],
+          notes: [detail],
+          ecosystem: "unknown",
+          language: "unknown",
+          packageManager: null,
+          declaredPackageManager: null,
+          lockfiles: [],
+          manifests: [],
+          configs: [],
+          scripts: [],
+          frameworks: [],
+          workspaces: false,
+          dependenciesInstalled: false,
+          capabilities: unmeasurableCapabilities(detail),
+        },
+        checks: [
+          absentCheck({
+            id: "discovery",
+            capability: capabilitiesForStage(request.verification)[0] ?? "runtime",
+            kind: request.verification,
+            label: "Project discovery",
+            status: "blocked",
+            reason: error.code,
+            detail,
+            revision: request.revision,
+            fingerprint: UNMEASURED_FINGERPRINT,
+            collectedAt,
+            projectRoot: this.#root,
+          }),
+        ],
+      });
+    }
+
+    this.#profile = profile;
+    this.#config = config;
+
+    const fingerprint = (await fingerprintImplementation(this.#root)).hash;
+    const checks = await this.#runStage(
+      request.verification,
+      request.revision,
+      fingerprint,
+      collectedAt,
+      profile,
+      config,
+      request.signal ?? null,
+    );
+
+    return buildBundle({
+      verification: request.verification,
+      revision: request.revision,
+      fingerprint,
+      collectedAt,
+      projectRoot: this.#root,
+      project: profile,
+      checks,
+    });
+  }
+
+  async #runStage(
+    stage: VerificationStage,
+    revision: number,
+    fingerprint: string,
+    collectedAt: string,
+    profile: ProjectProfile,
+    config: ProjectVerificationConfig,
+    signal: AbortSignal | null,
+  ): Promise<readonly VerificationCommandEvidence[]> {
+    const capabilities = capabilitiesForStage(stage);
+    const detections = capabilityDetectionsFor(profile, capabilities);
+    const configured = config[stage];
+    const detected = profile.commands.filter((command) => command.stage === stage);
+    const checks: VerificationCommandEvidence[] = [];
+    const covered = new Set<VerificationCapability>();
+
+    for (const command of configured) {
+      const detection = detectionFor(detections, command.capability);
+      covered.add(command.capability);
+      const block = startupBlock(profile, command.source);
+
+      if (block !== null) {
+        checks.push(
+          blockedCheck({
+            detection,
+            command,
+            reason: block,
+            revision,
+            fingerprint,
+            collectedAt,
+            projectRoot: this.#root,
+            kind: stage,
+          }),
+        );
+        continue;
+      }
+
+      checks.push(
+        commandEvidence({
+          command,
+          outcome: await this.#execute(command.executable, command.args, command.cwd, signal),
+          capabilityStatus: detection.status,
+          revision,
+          fingerprint,
+        }),
+      );
+    }
+
+    for (const command of detected) {
+      if (configured.length > 0 && covered.has(command.capability)) {
+        // A configured command replaces detection for the capability it covers, so the same check is
+        // never run twice from two sources.
+        continue;
+      }
+
+      const detection = detectionFor(detections, command.capability);
+      covered.add(command.capability);
+      const block = startupBlock(profile, command.source);
+
+      if (block !== null) {
+        checks.push(
+          blockedCheck({
+            detection,
+            command,
+            reason: block,
+            revision,
+            fingerprint,
+            collectedAt,
+            projectRoot: this.#root,
+            kind: stage,
+          }),
+        );
+        continue;
+      }
+
+      checks.push(
+        commandEvidence({
+          command,
+          outcome: await this.#execute(command.executable, command.args, command.cwd, signal),
+          capabilityStatus: detection.status,
+          revision,
+          fingerprint,
+        }),
+      );
+    }
+
+    for (const capability of capabilities) {
+      if (covered.has(capability)) {
+        continue;
+      }
+
+      const detection = detectionFor(detections, capability);
+
+      checks.push(
+        absentCheck({
+          id: capability,
+          capability,
+          kind: stage,
+          label: detection.capability,
+          status: detection.status,
+          // The capability's own reason, verbatim: "unsupported" and "blocked" have to stay
+          // distinguishable here, because one is a fact about the project and the other is a
+          // statement that something could not be run.
+          reason: detection.reason,
+          detail: detection.detail,
+          revision,
+          fingerprint,
+          collectedAt,
+          projectRoot: this.#root,
+        }),
+      );
+    }
+
+    return checks;
+  }
+
+  #execute(
+    executable: string,
+    args: readonly string[],
+    cwd: string,
+    signal: AbortSignal | null,
+  ): Promise<ChildProcessOutcome> {
+    return this.#run({
+      executable,
+      args,
+      cwd,
+      timeoutMs: this.#timeoutMs,
+      signal,
+    });
+  }
+}
+
+export function createProjectVerificationProvider(
+  options: ProjectVerificationProviderOptions = {},
+): ProjectVerificationProvider {
+  return new ProjectVerificationProvider(options);
+}

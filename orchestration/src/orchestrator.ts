@@ -1,5 +1,6 @@
 import {
   WorkflowStateMachine,
+  type ReviewFinding,
   type WorkflowEvent,
   type WorkflowMachineSnapshot,
   type WorkflowState,
@@ -42,6 +43,17 @@ import {
   type StageContextPlan,
   type WorkStage,
 } from "./stages.js";
+import {
+  applyDeterministicEvidence,
+  mergeDeterministicEvidence,
+  validateVerificationEvidenceBundle,
+  verificationEvidenceSummaries,
+  VERIFICATION_ARTIFACT_NAME,
+  VERIFICATION_STAGE_BY_WORK_STAGE,
+  type VerificationEvidenceBundle,
+  type VerificationProvider,
+  type VerificationStage,
+} from "./verification.js";
 
 export interface CreateFeatureInput {
   readonly featureId: string;
@@ -53,6 +65,20 @@ export interface CreateFeatureInput {
 export interface WorkflowOrchestratorOptions {
   readonly store: FeatureSessionStore;
   readonly executor: StageExecutor;
+  /**
+   * Where deterministic verification evidence comes from. Optional: without it the three
+   * verification stages run exactly as they always have, on the executor's word alone. With it, the
+   * orchestrator collects evidence before the executor is called and the exit statuses in that
+   * evidence decide whether the stage may pass. The provider is constructed by whoever wires the kit
+   * up; it is never an agent, and it never receives a command from one.
+   */
+  readonly verification?: VerificationProvider | null;
+  /**
+   * The project the verification provider may run commands in. Defaults to `process.cwd()`. It is
+   * handed to the provider as data; no stage, agent, or artifact can change it, and the provider
+   * refuses a command whose working directory is anywhere else.
+   */
+  readonly projectRoot?: string | null;
 }
 
 type ResultExtras = Omit<OrchestrationResultInput, "status" | "state">;
@@ -122,10 +148,14 @@ function previewMachine(
 export class WorkflowOrchestrator {
   readonly #store: FeatureSessionStore;
   readonly #executor: StageExecutor;
+  readonly #verification: VerificationProvider | null;
+  readonly #projectRoot: string;
 
   constructor(options: WorkflowOrchestratorOptions) {
     this.#store = options.store;
     this.#executor = options.executor;
+    this.#verification = options.verification ?? null;
+    this.#projectRoot = options.projectRoot ?? process.cwd();
   }
 
   get store(): FeatureSessionStore {
@@ -284,6 +314,15 @@ export class WorkflowOrchestrator {
       return this.#result({ ...base, status: "rejected", state: fromState, error: approval.error });
     }
 
+    // Deterministic evidence is collected here, after the plan-approval freeze has been re-verified
+    // and before the agent is involved at all. This is the only point at which project code runs,
+    // and running it is a consequence of the human having approved work in this repository.
+    const evidence = await this.#collectVerification(session, stage);
+
+    if (!evidence.ok) {
+      return this.#result({ ...base, status: "rejected", state: fromState, error: evidence.error });
+    }
+
     const context = await this.#gatherContext(featureId, contextPlan);
 
     if (!context.ok) {
@@ -305,6 +344,7 @@ export class WorkflowOrchestrator {
       context: context.context,
       outputs: definition.outputs,
       fixReturnState: stage === "fixing" ? (session.machine.fixReturnState ?? null) : null,
+      verification: evidence.bundle,
     };
 
     let raw: unknown;
@@ -316,6 +356,7 @@ export class WorkflowOrchestrator {
         ...base,
         status: "executor_error",
         state: fromState,
+        verification: evidence.bundle,
         error: orchestrationError(
           "executor_threw",
           `Stage executor threw: ${describeError(error)}`,
@@ -330,21 +371,40 @@ export class WorkflowOrchestrator {
         ...base,
         status: "rejected",
         state: fromState,
+        verification: evidence.bundle,
         error: orchestrationError(validation.code, validation.message),
       });
     }
 
     const outcome = validation.result;
-    const reported: ResultExtras = { ...base, findings: outcome.findings, evidence: outcome.evidence };
+    // Hard evidence is applied here, and only in one direction: a stage whose deterministic checks
+    // did not pass cannot be reported as a success. A verifier that says "success" about a failing
+    // lint run is overruled by the exit code, and the stage enters the fix loop instead.
+    const applied =
+      evidence.bundle === null
+        ? ({ outcome: outcome.outcome, override: "none", findings: [] } as const)
+        : applyDeterministicEvidence(evidence.bundle, outcome.outcome, featureId);
+    const effective =
+      applied.override === "none" ? outcome : { ...outcome, outcome: applied.outcome };
+    const extraFindings: readonly ReviewFinding[] = applied.findings;
+    const reported: ResultExtras = {
+      ...base,
+      findings: [...outcome.findings, ...extraFindings],
+      evidence:
+        evidence.bundle === null
+          ? outcome.evidence
+          : [...outcome.evidence, ...verificationEvidenceSummaries(evidence.bundle)],
+      verification: evidence.bundle,
+    };
 
-    if (outcome.outcome === "failed") {
+    if (effective.outcome === "failed") {
       return this.#result({
         ...reported,
         status: "stage_failed",
         state: fromState,
         error: orchestrationError(
           "stage_reported_failure",
-          `Stage "${stage}" reported failure: ${outcome.summary ?? "no summary was provided"}.`,
+          `Stage "${stage}" reported failure: ${effective.summary ?? "no summary was provided"}.`,
         ),
       });
     }
@@ -355,13 +415,13 @@ export class WorkflowOrchestrator {
     return this.#commit({
       featureId,
       session,
-      ...(outcome.outcome === "inconclusive"
+      ...(effective.outcome === "inconclusive"
         ? {}
-        : { event: outcome.outcome === "needs_fix" ? "request_fix" : definition.successEvent }),
+        : { event: effective.outcome === "needs_fix" ? "request_fix" : definition.successEvent }),
       successStatus:
-        outcome.outcome === "needs_fix"
+        effective.outcome === "needs_fix"
           ? "fix_requested"
-          : outcome.outcome === "inconclusive"
+          : effective.outcome === "inconclusive"
             ? "inconclusive"
             : "stage_completed",
       extras: reported,
@@ -374,7 +434,7 @@ export class WorkflowOrchestrator {
 
         const artifacts: FeatureArtifactWrite[] = [];
 
-        for (const artifact of outcome.artifacts) {
+        for (const artifact of effective.artifacts) {
           const composed = await this.#composeArtifactContent(
             reader,
             stage,
@@ -386,12 +446,80 @@ export class WorkflowOrchestrator {
             throw new StageFinalizeError(composed.error);
           }
 
-          artifacts.push({ name: artifact.name, content: composed.content });
+          artifacts.push({
+            name: artifact.name,
+            content:
+              // Only the verification artifact carries evidence. Merging it into whatever else the
+              // stage produced would put one attempt's exit codes into an unrelated document, and the
+              // next attempt would append to the wrong place.
+              artifact.name === VERIFICATION_ARTIFACT_NAME
+                ? mergeDeterministicEvidence(composed.content, stage, evidence.bundle)
+                : composed.content,
+          });
         }
 
         return { artifacts };
       },
     });
+  }
+
+  /**
+   * Asks the deterministic provider for this stage's evidence and refuses a bundle it cannot verify.
+   *
+   * A provider failure, a malformed bundle, or a bundle that contradicts itself is reported as an
+   * orchestration error and nothing is written: an unverifiable verification is not a passing
+   * verification, and it is not silently downgraded to a model-only opinion either.
+   */
+  async #collectVerification(
+    session: FeatureSession,
+    stage: WorkStage,
+  ): Promise<
+    | { readonly ok: true; readonly bundle: VerificationEvidenceBundle | null }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    const verification: VerificationStage | undefined = VERIFICATION_STAGE_BY_WORK_STAGE[stage];
+
+    if (verification === undefined || this.#verification === null) {
+      return { ok: true, bundle: null };
+    }
+
+    let raw: unknown;
+
+    try {
+      raw = await this.#verification.collect({
+        featureId: session.featureId,
+        stage,
+        verification,
+        revision: session.revision,
+        projectRoot: this.#projectRoot,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "verification_provider_failed",
+          `The verification provider failed for stage "${stage}": ${describeError(error)}`,
+        ),
+      };
+    }
+
+    const validated = validateVerificationEvidenceBundle(raw);
+
+    if (!validated.ok) {
+      return { ok: false, error: orchestrationError(validated.code, validated.message) };
+    }
+
+    if (validated.bundle.verification !== verification) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "verification_evidence_invalid",
+          `The verification provider returned ${validated.bundle.verification} evidence for the ${verification} stage.`,
+        ),
+      };
+    }
+
+    return { ok: true, bundle: validated.bundle };
   }
 
   async #verifyApproval(

@@ -5,6 +5,8 @@ import {
   type StageArtifactContext,
   type StageArtifactOutputSpec,
   type StageExecutionRequest,
+  type VerificationCommandEvidence,
+  type VerificationEvidenceBundle,
 } from "@agent-workflow-kit/orchestration";
 import { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES } from "./hard-rules.js";
 import type { ProjectInstructions } from "./project-instructions.js";
@@ -228,13 +230,131 @@ function renderStage(request: StageExecutionRequest, agent: string): string {
 }
 
 /**
+ * Renders the deterministic evidence for a verification stage.
+ *
+ * The verifier's authority comes entirely from this block, so it is rendered rather than summarized:
+ * every check, its exact command, its exit code, and its captured output are present, because a
+ * verdict that is not traceable to one of these records is not a verdict this framework can act on.
+ *
+ * Two things are deliberately stated as facts about the framework rather than as requests. The
+ * evidence was collected before this stage was invoked, so the agent is reasoning about the current
+ * tree and not about a command it expects to run later; and the outcome is already recorded, so a
+ * `success` return cannot improve it and a `needs_fix` return cannot escape it.
+ */
+function renderCheck(check: VerificationCommandEvidence): string {
+  const command = check.executable === null ? "not run" : [check.executable, ...check.args].join(" ");
+  const outcome =
+    check.status === "passed"
+      ? "passed"
+      : check.status === "skipped"
+        ? `skipped${check.reason === null ? "" : ` (${check.reason})`}`
+        : `${check.status}${check.exitCode === null ? "" : `, exit code ${String(check.exitCode)}`}${
+            check.signal === null ? "" : `, signal ${check.signal}`
+          }`;
+
+  const lines = [
+    `#### ${check.label} \u2014 ${outcome}`,
+    "",
+    bulletList([
+      `capability: \`${check.capability}\` (${check.capabilityStatus})`,
+      `command: \`${command}\``,
+      `working directory: \`${check.cwd}\``,
+      check.script === null ? "script: none, the command is declared rather than discovered" : `script: \`${check.script}\``,
+      `duration: ${String(check.durationMs)}ms`,
+      `reason: ${check.reason ?? "the command was not run and recorded no reason"}`,
+    ]),
+  ];
+
+  for (const [name, excerpt] of [
+    ["stdout", check.stdoutExcerpt],
+    ["stderr", check.stderrExcerpt],
+  ] as const) {
+    if (excerpt.trim() === "") {
+      continue;
+    }
+
+    lines.push("", `**${name}**`, "", fence("text", excerpt));
+  }
+
+  return lines.join("\n");
+}
+
+function renderProjectProfile(bundle: VerificationEvidenceBundle): string {
+  const project = bundle.project;
+  const manager = project.packageManager ?? "unknown";
+  const declared = project.declaredPackageManager === null ? "none" : project.declaredPackageManager;
+
+  return [
+    bulletList([
+      `ecosystem: \`${project.ecosystem}\``,
+      `language: \`${project.language}\``,
+      `package manager: \`${manager}\` (declared: ${declared})`,
+      `dependencies installed: ${project.dependenciesInstalled ? "yes" : "no"}`,
+      `frameworks: ${project.frameworks.length === 0 ? "none detected" : project.frameworks.join(", ")}`,
+    ]),
+  ].join("\n");
+}
+
+function renderCapabilities(bundle: VerificationEvidenceBundle): string {
+  return bundle.project.capabilities
+    .map(
+      (capability) =>
+        `- \`${capability.capability}\`: ${capability.status}${
+          capability.script === null ? "" : ` (script \`${capability.script}\`)`
+        } \u2014 ${capability.detail}`,
+    )
+    .join("\n");
+}
+
+function renderEvidence(bundle: VerificationEvidenceBundle): string {
+  return [
+    "## Deterministic verification evidence",
+    "",
+    "A deterministic framework process ran this project's own commands before you were invoked. You",
+    "have no command execution in this session. These records are the result; they were collected",
+    "from the working tree as it is now, and nothing below is a summary you are free to reinterpret.",
+    "",
+    bulletList([
+      `recorded outcome: \`${bundle.outcome}\``,
+      `collected at: ${bundle.collectedAt}`,
+      `session revision: ${String(bundle.revision)}`,
+      `implementation fingerprint: \`${bundle.implementationFingerprint}\``,
+    ]),
+    "",
+    "### Detected project",
+    "",
+    renderProjectProfile(bundle),
+    "",
+    "### Classified capabilities",
+    "",
+    renderCapabilities(bundle),
+    "",
+    "### Command results",
+    "",
+    bundle.checks.length === 0
+      ? "No command was selected for this stage."
+      : bundle.checks.map(renderCheck).join("\n\n"),
+    "",
+    "### What this means for your response",
+    "",
+    bulletList([
+      `The framework recorded this stage as \`${bundle.outcome}\` before you were invoked. A recorded failure or a blocked check cannot be turned into a pass by any response you give; the orchestrator enforces that independently.`,
+      "Judge the implementation against the code and against these records. Do not repeat them as your own findings and do not contradict them.",
+      "For every failing or blocked check, localize the defect precisely enough that a repair targets it, and state plainly what you could not determine.",
+      "If the recorded outcome and your reading of the code disagree, report the disagreement as a finding. Do not resolve it by reclassifying the result.",
+    ]),
+  ].join("\n");
+}
+
+/**
  * Builds the prompt for exactly one stage execution.
  *
  * The prompt is a pure function of the request the orchestrator built, so it inherits that
  * boundary: role instructions, feature identity, the current stage, the routed artifacts, the
  * allowed outputs, and the repository's own guidance. It never contains the rest of the feature
  * history, artifacts the orchestrator did not route, the session document, unrelated repository
- * files, policies, or skills. The framework rules are last, which is what gives them precedence
+ * files, policies, or skills. The one thing it adds beyond the request is the deterministic evidence
+ * for a verification stage, and it adds it only when the orchestrator collected it. The framework rules are last, which is what gives them precedence
  * over the repository guidance above them.
  */
 export function buildStagePrompt(input: BuildStagePromptInput): string {
@@ -264,6 +384,9 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
     renderStage(request, agent),
     ["## Routed context", "", renderContext(request)].join("\n"),
     ["## Output slots you may fill", "", renderOutputs(request)].join("\n"),
+    ...(request.verification === null || request.verification === undefined
+      ? []
+      : [renderEvidence(request.verification)]),
     ["## Response protocol", "", renderResponseProtocol(request)].join("\n"),
   ];
 
