@@ -2,127 +2,226 @@ import type { StageRole } from "@agent-workflow-kit/orchestration";
 import { STAGE_ROLES } from "@agent-workflow-kit/orchestration";
 import { accessForRole } from "./roles.js";
 
-export type OpenCodePermissionEffect = "allow" | "ask" | "deny";
-
-/** OpenCode accepts either a single effect or a resource-pattern to effect map per permission. */
-export type OpenCodePermissionRule = string | Readonly<Record<string, OpenCodePermissionEffect>>;
-
-export type OpenCodePermissionMap = Readonly<Record<string, OpenCodePermissionRule>>;
-
 /**
- * Paths an agent may never reach, in either direction. `.agentflow/` holds the authoritative
- * session, artifacts, event log, approval checkpoint, and fix history; `.git/` holds version
- * control. Neither belongs to an agent.
+ * OpenCode V2 permissions.
  *
- * OpenCode matches permission patterns with `*` for any run of characters, `/` included, and it
- * resolves the last matching rule. `*.agentflow/*` therefore also covers `packages/app/.agentflow/x`,
- * and it is listed after the `*` allow rule on purpose. `*.agentflow.*` covers an exported
- * workflow document such as `docs/plan.agentflow.md`, which is workflow state even though it is
- * not inside a `.agentflow/` directory.
+ * V2 configuration uses `permissions`: an ordered array of `{ action, resource, effect }` rules.
+ * The V1 object syntax is not used anywhere in this adapter. In particular `permission:`, the
+ * `bash` and `task` action names, and the `tools:` boolean block are all V1-only and are gone.
  *
- * A project's own `.gitignore` is deliberately not protected: `*.git/*` needs a directory segment,
- * so `packages/app.gitignore` stays editable and only real version-control state is denied.
+ * Two V2 evaluation rules make the ordering below load-bearing:
+ *
+ * - the last matching rule wins, so a broad rule must come before the exception it is excepted by;
+ * - an action that matches no rule at all resolves to `ask`, and a non-interactive `opencode run`
+ *   auto-rejects a `permission.asked` request, which would break the stage run.
+ *
+ * Every rule set below therefore opens with a deny-everything rule and then re-allows only the exact
+ * actions a role needs. That makes an `ask` outcome unreachable, and it also denies any action a
+ * plugin might introduce, because nothing is allowed that was not asked for by name.
  */
-export const PROTECTED_PATH_RULES: Readonly<Record<string, OpenCodePermissionEffect>> = {
-  ".agentflow/*": "deny",
-  "*.agentflow/*": "deny",
-  "*.agentflow.*": "deny",
-  ".git/*": "deny",
-  "*.git/*": "deny",
-};
+export type OpenCodePermissionEffect = "allow" | "deny" | "ask";
 
-function readRules(): Readonly<Record<string, OpenCodePermissionEffect>> {
-  return { "*": "allow", ...PROTECTED_PATH_RULES };
+export interface OpenCodePermissionRule {
+  readonly action: string;
+  readonly resource: string;
+  readonly effect: OpenCodePermissionEffect;
+}
+
+/** An ordered V2 ruleset. Order is the policy. */
+export type OpenCodePermissionRuleset = readonly OpenCodePermissionRule[];
+
+function rule(action: string, resource: string, effect: OpenCodePermissionEffect): OpenCodePermissionRule {
+  return { action, resource, effect };
 }
 
 /**
- * Denied for every role, without exception.
+ * The first rule of every generated agent.
  *
- * `bash: deny` is what makes "no agent receives Git commit or push authority" structural: with no
+ * V2 gives every agent a base policy of `{"*", "*", "allow"}` and then appends global and agent
+ * rules, so this rule does not have to win against the base allow - it only has to come before this
+ * agent's own allows. Its real job is the tail of the ruleset: anything not named below stays
+ * denied, including MCP tools, Code Mode's `execute` dispatcher, and any action a future plugin
+ * adds.
+ */
+export const DENY_ALL_RULE: OpenCodePermissionRule = rule("*", "*", "deny");
+
+/**
+ * Actions denied for every role, without exception.
+ *
+ * `shell: deny` is what makes "no agent receives Git commit or push authority" structural: with no
  * shell there is no `git commit`, no `git push`, and no project command execution either, which is
- * consistent with command execution being deferred in this milestone. `task: deny` is what keeps
- * roles separate: a reviewer cannot delegate to an implementer, and no role can collapse the
- * workflow into one generalist agent.
+ * consistent with command execution being deferred in this milestone. `subagent: deny` keeps roles
+ * separate - a reviewer cannot delegate to an implementer, and no role can collapse the workflow
+ * into one generalist agent or bypass the orchestrator. `skill: deny` holds the line until skill
+ * integration is implemented, so no role can pull in instructions from outside the repository.
+ *
+ * `question`, `plan_enter`, `plan_exit`, and `execute` are denied for a mechanical reason: a stage
+ * run has no human attached and no plan mode, so allowing them would only produce a request that
+ * the non-interactive runner has to reject. The CLI denies the first three itself for non-interactive
+ * runs; repeating them here keeps the agent file honest on its own.
  */
-export const UNIVERSAL_DENIALS: Readonly<Record<string, OpenCodePermissionEffect>> = {
-  bash: "deny",
-  webfetch: "deny",
-  websearch: "deny",
-  task: "deny",
-  external_directory: "deny",
-};
+export const UNIVERSAL_DENIAL_ACTIONS: readonly string[] = [
+  "shell",
+  "subagent",
+  "skill",
+  "webfetch",
+  "websearch",
+  "external_directory",
+  "question",
+  "plan_enter",
+  "plan_exit",
+  "execute",
+];
 
-export const READ_ONLY_PERMISSION: OpenCodePermissionMap = {
-  ...UNIVERSAL_DENIALS,
-  edit: { "*": "deny" },
-  read: readRules(),
-};
+/** Actions every role may use, and the only ones. */
+export const UNIVERSAL_ALLOWED_ACTIONS: readonly string[] = ["read", "glob", "grep"];
 
-export const WRITE_CAPABLE_PERMISSION: OpenCodePermissionMap = {
-  ...UNIVERSAL_DENIALS,
-  edit: { "*": "allow", ...PROTECTED_PATH_RULES },
-  read: readRules(),
-};
+/**
+ * Paths an agent may never reach, in either direction.
+ *
+ * `.agentflow/` holds the authoritative session, artifacts, event log, approval checkpoint, and fix
+ * history; `.git/` holds version control. Neither belongs to an agent.
+ *
+ * V2 matches a resource with whole-value wildcards where `*` stands for any run of characters, `/`
+ * included, so `*.agentflow/*` also covers `packages/app/.agentflow/x`. The bare `*.agentflow` and
+ * `.agentflow` entries deny the directory path itself, and `*.agentflow.*` covers an exported
+ * workflow document such as `docs/plan.agentflow.md`, which is workflow state even though it is not
+ * inside a `.agentflow/` directory.
+ *
+ * A project's own `.gitignore` is deliberately not protected: `*.git/*` needs a directory segment
+ * and `*.git` needs the name to end in `.git`, so `packages/app.gitignore` stays editable and only
+ * real version-control state is denied.
+ */
+export const PROTECTED_PATH_PATTERNS: readonly string[] = [
+  ".agentflow",
+  ".agentflow/*",
+  "*.agentflow",
+  "*.agentflow/*",
+  "*.agentflow.*",
+  ".git",
+  ".git/*",
+  "*.git",
+  "*.git/*",
+];
 
-export const TOOLS_DENIED_FOR_READ_ONLY_ROLES: Readonly<Record<string, boolean>> = {
-  write: false,
-  edit: false,
-  patch: false,
-  bash: false,
-  webfetch: false,
-  task: false,
-};
+/**
+ * Secret-bearing files are denied a read outright rather than left to OpenCode's base policy, which
+ * asks about `.env`. A stage run has nobody to answer that question, and a denied read is a
+ * deterministic, reportable outcome instead of a tool call the runner silently rejects.
+ */
+export const SECRET_PATH_PATTERNS: readonly string[] = ["*.env", "*.env.*"];
 
-export function permissionForRole(role: StageRole): OpenCodePermissionMap {
-  return accessForRole(role) === "read_only" ? READ_ONLY_PERMISSION : WRITE_CAPABLE_PERMISSION;
+function denialRules(): readonly OpenCodePermissionRule[] {
+  return UNIVERSAL_DENIAL_ACTIONS.map((action) => rule(action, "*", "deny"));
 }
 
-export function toolDenyListForRole(role: StageRole): Readonly<Record<string, boolean>> {
-  return accessForRole(role) === "read_only" ? TOOLS_DENIED_FOR_READ_ONLY_ROLES : {};
+function allowedRules(): readonly OpenCodePermissionRule[] {
+  return UNIVERSAL_ALLOWED_ACTIONS.map((action) => rule(action, "*", "allow"));
+}
+
+function protectedReadDenials(): readonly OpenCodePermissionRule[] {
+  return [
+    ...PROTECTED_PATH_PATTERNS.map((resource) => rule("read", resource, "deny")),
+    ...SECRET_PATH_PATTERNS.map((resource) => rule("read", resource, "deny")),
+  ];
+}
+
+function protectedEditDenials(): readonly OpenCodePermissionRule[] {
+  return PROTECTED_PATH_PATTERNS.map((resource) => rule("edit", resource, "deny"));
 }
 
 /**
- * A structural read of a permission map, used by the tests and by anyone auditing a generated
- * agent file. It answers "what happens to this resource for this role" using OpenCode's own
- * last-match-wins evaluation, so it never has to guess which of two rules applies.
+ * Read-only roles: deny everything, then allow the three discovery actions and nothing else.
+ *
+ * `edit` is named explicitly even though the leading deny already covers it. The explicit rule is
+ * what an auditor reads first, and it is what OpenCode's own `debug` output shows as the deciding
+ * rule for the edit, write, and patch tools.
+ */
+export const READ_ONLY_PERMISSION_RULES: OpenCodePermissionRuleset = [
+  DENY_ALL_RULE,
+  rule("edit", "*", "deny"),
+  ...denialRules(),
+  ...allowedRules(),
+  ...protectedReadDenials(),
+];
+
+/**
+ * Write-capable roles: the same surface, plus an `edit` allowance that is immediately narrowed to
+ * deny the workflow and Git paths. The `edit *` allow comes after the universal denials and before
+ * the protected-path denials, which is the order the last-match-wins rule requires.
+ */
+export const WRITE_CAPABLE_PERMISSION_RULES: OpenCodePermissionRuleset = [
+  DENY_ALL_RULE,
+  ...denialRules(),
+  ...allowedRules(),
+  rule("edit", "*", "allow"),
+  ...protectedEditDenials(),
+  ...protectedReadDenials(),
+];
+
+export function permissionRulesForRole(role: StageRole): OpenCodePermissionRuleset {
+  return accessForRole(role) === "read_only" ? READ_ONLY_PERMISSION_RULES : WRITE_CAPABLE_PERMISSION_RULES;
+}
+
+/**
+ * A faithful port of OpenCode's `Wildcard.match`, so a decision made here is the decision the CLI
+ * makes there.
+ *
+ * The input is normalized to forward slashes, `*` becomes any run of characters and `?` becomes
+ * exactly one character, and a pattern that ends in a space and a star also matches the bare value
+ * without the arguments - which is how `git status *` covers both `git status` and
+ * `git status --short`. Matching is anchored to the whole value and case-insensitive only on
+ * Windows, as in the CLI.
+ */
+export function matchesResourcePattern(pattern: string, resource: string): boolean {
+  const normalized = resource.replaceAll("\\", "/");
+  let escaped = pattern
+    .replaceAll("\\", "/")
+    .replace(/[.+^${}()|[\]\\]/gu, "\\$&")
+    .replace(/\*/gu, ".*")
+    .replace(/\?/gu, ".");
+
+  if (escaped.endsWith(" .*")) {
+    escaped = `${escaped.slice(0, -3)}( .*)?`;
+  }
+
+  return new RegExp(`^${escaped}$`, process.platform === "win32" ? "si" : "s").test(normalized);
+}
+
+/**
+ * The structural read of a ruleset: "what happens to this resource for this action" under V2
+ * last-match-wins evaluation. It never guesses which of two rules applies, and it returns `ask` only
+ * when genuinely nothing matched, exactly as OpenCode does.
  */
 export function effectFor(
-  permission: OpenCodePermissionMap,
+  rules: OpenCodePermissionRuleset,
   action: string,
   resource: string,
 ): OpenCodePermissionEffect {
-  const rule = permission[action];
+  let effect: OpenCodePermissionEffect | undefined;
 
-  if (rule === undefined) {
-    return "allow";
-  }
-
-  if (typeof rule === "string") {
-    return rule as OpenCodePermissionEffect;
-  }
-
-  let effect: OpenCodePermissionEffect = "allow";
-
-  for (const [pattern, candidate] of Object.entries(rule)) {
-    if (matchesResourcePattern(pattern, resource)) {
-      effect = candidate;
+  for (const candidate of rules) {
+    if (matchesResourcePattern(candidate.action, action) && matchesResourcePattern(candidate.resource, resource)) {
+      effect = candidate.effect;
     }
   }
 
-  return effect;
+  return effect ?? "ask";
 }
 
-function matchesResourcePattern(pattern: string, resource: string): boolean {
-  const expression = pattern
-    .split("*")
-    .map((segment) => segment.split("?").map(escapeRegExp).join("[^/]"))
-    .join(".*");
+/** True when a multi-resource operation such as a patch spanning two paths is blocked. */
+export function operationEffect(
+  rules: OpenCodePermissionRuleset,
+  action: string,
+  resources: readonly string[],
+): OpenCodePermissionEffect {
+  const effects = resources.map((resource) => effectFor(rules, action, resource));
 
-  return new RegExp(`^${expression}$`, "u").test(resource);
-}
+  if (effects.includes("deny")) {
+    return "deny";
+  }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return effects.includes("ask") ? "ask" : "allow";
 }
 
 export function isReadOnlyRole(role: StageRole): boolean {

@@ -1,5 +1,11 @@
-import { spawn } from "node:child_process";
 import { OpenCodeAdapterError } from "./errors.js";
+import {
+  DEFAULT_KILL_GRACE_MS,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  DEFAULT_STDERR_EXCERPT_LIMIT,
+  runProcess,
+  type RunProcessResult,
+} from "./process.js";
 import {
   type OpenCodeRawResult,
   type OpenCodeTransport,
@@ -7,11 +13,22 @@ import {
 } from "./transport.js";
 
 export const DEFAULT_OPENCODE_COMMAND = "opencode";
-export const DEFAULT_MAX_OUTPUT_BYTES = 4_000_000;
-export const DEFAULT_STDERR_EXCERPT_LIMIT = 2_000;
-export const DEFAULT_KILL_GRACE_MS = 2_000;
 
+/**
+ * The response formats this adapter asks the CLI for.
+ *
+ * `text` is our name for the CLI's `default` format, which writes the assistant's completed text
+ * parts to stdout and sends headers, tool output, and permission warnings to stderr. `json` is the
+ * CLI's raw NDJSON event stream. The CLI accepts `default` and `json`; it has never accepted `text`.
+ */
 export type OpenCodeResponseFormat = "text" | "json";
+
+export type OpenCodeCliFormat = "default" | "json";
+
+/** Maps this adapter's response format onto the value the current CLI accepts. */
+export function toCliFormat(format: OpenCodeResponseFormat): OpenCodeCliFormat {
+  return format === "json" ? "json" : "default";
+}
 
 export interface OpenCodeCliTransportOptions {
   /** The OpenCode executable. Defaults to `opencode` on `PATH`. */
@@ -43,6 +60,16 @@ export interface OpenCodeInvocation {
   readonly cwd: string;
 }
 
+/**
+ * The invocation surface, kept as small as the contract allows:
+ *
+ * ```text
+ * opencode run --agent <agent> --format <default|json> --dir <repository> [--pure] [--model …] [prompt]
+ * ```
+ *
+ * No session continuation, no `--attach`, no shared server, and no `--auto`. One stage run is one
+ * fresh session, and nothing about the previous stage's session is reused.
+ */
 export function buildOpenCodeInvocation(
   request: OpenCodeTransportRequest,
   options?: OpenCodeCliTransportOptions,
@@ -64,7 +91,7 @@ export function buildOpenCodeInvocation(
   }
 
   args.push("--agent", request.agent);
-  args.push("--format", options?.responseFormat ?? "text");
+  args.push("--format", toCliFormat(options?.responseFormat ?? "text"));
 
   const model = options?.model === undefined ? request.model : options.model;
 
@@ -87,27 +114,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function pushText(value: unknown, parts: string[]): void {
-  if (typeof value === "string" && value.length > 0) {
-    parts.push(value);
-  }
+export interface ParsedEventStream {
+  /** Completed assistant text parts, in the order the CLI emitted them. Empty if there were none. */
+  readonly text: string;
+  /** How many completed text parts were found. Zero means the stream carried no answer at all. */
+  readonly textParts: number;
+  /** A session or prompt error the CLI reported in the stream. */
+  readonly error: string | null;
+  /** Event type names seen, for diagnostics. */
+  readonly eventTypes: readonly string[];
+  /** Lines that looked like events but could not be parsed. */
+  readonly malformedLines: number;
 }
 
 /**
- * Best-effort text extraction from `opencode run --format json`.
+ * Reads the `opencode run --format json` NDJSON stream.
  *
- * OpenCode's raw event stream is a transport detail, so this is the single place that knows its
- * shape. An event this reader does not recognize contributes nothing; if nothing is recognized at
- * all the raw output is returned unchanged and the response protocol refuses it, which fails
- * closed rather than guessing.
+ * The current runner writes one JSON object per line, each carrying `type`, `timestamp`,
+ * `sessionID`, and a payload: `part` for `step_start`, `step_finish`, `text`, `reasoning`, and
+ * `tool_use`, and `error` for `error`. A `text` event is only emitted once the part is complete,
+ * and an assistant answer can span several text parts, so the parts are concatenated in order
+ * instead of taking the last one.
+ *
+ * The stream is a transport detail, and this is the only place that knows its shape. An event type
+ * this reader does not recognize is counted and contributes nothing: it is never read as workflow
+ * output, and the raw line is never handed on as a fallback. A stream with no text part therefore
+ * produces no text at all, and the transport turns that into a failure rather than guessing, which
+ * is what keeps a malformed or unexpected stream from being read as a stage result.
  */
-export function extractEventStreamText(stdout: string): string {
+export function parseEventStream(stdout: string): ParsedEventStream {
   const parts: string[] = [];
+  const eventTypes: string[] = [];
+  let error: string | null = null;
+  let malformedLines = 0;
 
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
 
+    if (trimmed.length === 0) {
+      continue;
+    }
+
     if (!trimmed.startsWith("{")) {
+      malformedLines += 1;
       continue;
     }
 
@@ -116,69 +165,103 @@ export function extractEventStreamText(stdout: string): string {
     try {
       event = JSON.parse(trimmed) as unknown;
     } catch {
+      malformedLines += 1;
       continue;
     }
 
     if (!isRecord(event)) {
+      malformedLines += 1;
+      continue;
+    }
+
+    const type = event["type"];
+
+    if (typeof type === "string") {
+      eventTypes.push(type);
+    }
+
+    if (type === "error") {
+      error = describeStreamError(event["error"]) ?? "OpenCode reported a session error.";
+      continue;
+    }
+
+    if (type !== "text") {
       continue;
     }
 
     const part = event["part"];
-    const message = event["message"];
 
-    if (isRecord(part)) {
-      if (part["type"] === "text") {
-        pushText(part["text"], parts);
-        continue;
-      }
-    }
-
-    if (event["type"] === "text") {
-      pushText(event["text"], parts);
+    if (!isRecord(part) || part["type"] !== "text") {
       continue;
     }
 
-    if (isRecord(message) && message["role"] === "assistant" && Array.isArray(message["content"])) {
-      for (const block of message["content"]) {
-        if (isRecord(block) && block["type"] === "text") {
-          pushText(block["text"], parts);
-        }
-      }
+    const text = part["text"];
+
+    if (typeof text === "string" && text.length > 0) {
+      parts.push(text);
     }
   }
 
-  return parts.length === 0 ? stdout : parts.join("");
+  return {
+    text: parts.join("\n"),
+    textParts: parts.length,
+    error,
+    eventTypes,
+    malformedLines,
+  };
 }
 
-export function extractResponseText(stdout: string, format: OpenCodeResponseFormat): string {
-  return (format === "json" ? extractEventStreamText(stdout) : stdout).trim();
+/**
+ * A short, safe description of an unusable stream: which event types appeared and how many lines
+ * were unreadable. It carries no model output, so it is safe to log.
+ */
+function describeStreamShape(stream: ParsedEventStream): string {
+  const distinct = [...new Set(stream.eventTypes)];
+  const seen = distinct.length === 0 ? "none" : distinct.join(", ");
+
+  return `Event types seen: ${seen}. Unreadable lines: ${String(stream.malformedLines)}.`;
 }
 
-function excerpt(text: string, limit: number): string {
-  const trimmed = text.trim();
-
-  if (trimmed.length === 0) {
-    return "";
+function describeStreamError(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
   }
 
-  return trimmed.length <= limit
-    ? trimmed
-    : `${trimmed.slice(0, limit)}… (truncated)`;
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const name = typeof value["name"] === "string" ? value["name"] : null;
+  const data = value["data"];
+
+  if (isRecord(data) && typeof data["message"] === "string") {
+    return data["message"];
+  }
+
+  return name;
+}
+
+/**
+ * Extracts the response text from a completed run.
+ *
+ * A stream that reported an error yields no text at all, so a failed run can never be mistaken for
+ * a successful one that happened to say nothing useful.
+ */
+export function extractResponseText(stdout: string, format: OpenCodeResponseFormat): string {
+  if (format === "json") {
+    return parseEventStream(stdout).text.trim();
+  }
+
+  return stdout.trim();
 }
 
 /**
  * Runs the real OpenCode CLI.
  *
- * Safety properties, all of them load-bearing:
- *
- * - arguments are passed as an array and `shell` is explicitly false, so no feature title, user
- *   request, or artifact content is ever interpreted by a shell;
- * - the environment is inherited only because a provider credential is required, it is never
- *   echoed into a result, a log line, or an error message;
- * - stdout and stderr are captured separately, each with a byte cap that stops a runaway run;
- * - a timeout or an abort terminates the child and becomes a refusal, not an empty success;
- * - a non-zero exit is a refusal, and the command line, which contains the stage prompt, is never
- *   included in the error.
+ * The process itself is spawned by `runProcess`, which owns the no-shell, timeout, cancellation, and
+ * output-cap guarantees. On top of that this transport treats a reported stream error as a failure
+ * even when the CLI exited zero, so a session that died mid-answer cannot be reported as a stage
+ * result.
  */
 export class OpenCodeCliTransport implements OpenCodeTransport {
   readonly #options: OpenCodeCliTransportOptions;
@@ -189,159 +272,59 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
 
   async run(request: OpenCodeTransportRequest): Promise<OpenCodeRawResult> {
     const invocation = buildOpenCodeInvocation(request, this.#options);
-    const timeoutMs = request.timeoutMs;
     const maxOutputBytes = this.#options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    const stderrExcerptLimit = this.#options.stderrExcerptLimit ?? DEFAULT_STDERR_EXCERPT_LIMIT;
     const format = this.#options.responseFormat ?? "text";
+    const label = `The OpenCode run for agent "${request.agent}"`;
 
-    if (request.signal?.aborted === true) {
-      throw new OpenCodeAdapterError(
-        "transport_cancelled",
-        `The OpenCode run for agent "${request.agent}" was cancelled before it started.`,
-      );
+    let result: RunProcessResult;
+
+    try {
+      result = await runProcess(invocation.command, invocation.args, {
+        cwd: invocation.cwd,
+        timeoutMs: request.timeoutMs,
+        maxOutputBytes,
+        stderrExcerptLimit,
+        ...(this.#options.killGraceMs === undefined ? {} : { killGraceMs: this.#options.killGraceMs }),
+        ...(this.#options.inheritEnv === undefined ? {} : { inheritEnv: this.#options.inheritEnv }),
+        ...(this.#options.env === undefined ? {} : { env: this.#options.env }),
+        ...(request.signal == null ? {} : { signal: request.signal }),
+        label,
+      });
+    } catch (error) {
+      if (error instanceof OpenCodeAdapterError) {
+        throw error;
+      }
+
+      throw new OpenCodeAdapterError("transport_failed", `${label} failed.`, { cause: error });
     }
 
-    return new Promise<OpenCodeRawResult>((resolve, reject) => {
-      let stdout = "";
-      let stderr = "";
-      let capturedBytes = 0;
-      let stopReason: OpenCodeAdapterError | null = null;
-      let killTimer: NodeJS.Timeout | undefined;
+    if (format === "json") {
+      const stream = parseEventStream(result.stdout);
 
-      const child = spawn(invocation.command, [...invocation.args], {
-        cwd: invocation.cwd,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(this.#options.inheritEnv === false
-          ? { env: { ...this.#options.env } }
-          : { env: { ...process.env, ...this.#options.env } }),
-      });
-
-      const clearTimers = (): void => {
-        if (killTimer !== undefined) {
-          clearTimeout(killTimer);
-          killTimer = undefined;
-        }
-      };
-
-      const stop = (error: OpenCodeAdapterError): void => {
-        if (stopReason !== null) {
-          return;
-        }
-
-        stopReason = error;
-        clearTimers();
-
-        const grace = this.#options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
-
-        killTimer = setTimeout(() => {
-          child.kill("SIGKILL");
-        }, grace);
-      };
-
-      const timer = setTimeout(() => {
-        stop(
-          new OpenCodeAdapterError(
-            "transport_timeout",
-            `The OpenCode run for agent "${request.agent}" exceeded its ${String(timeoutMs)}ms budget.`,
-          ),
+      if (stream.error !== null) {
+        throw new OpenCodeAdapterError(
+          "transport_failed",
+          `${label} reported an error in its event stream: ${stream.error}`,
         );
-        child.kill("SIGTERM");
-      }, timeoutMs);
+      }
 
-      const onAbort = (): void => {
-        stop(
-          new OpenCodeAdapterError(
-            "transport_cancelled",
-            `The OpenCode run for agent "${request.agent}" was cancelled.`,
-          ),
+      if (stream.textParts === 0) {
+        throw new OpenCodeAdapterError(
+          "transport_failed",
+          `${label} produced no assistant text in its event stream, so there is no answer to parse.`,
+          { cause: describeStreamShape(stream) },
         );
-        child.kill("SIGTERM");
-      };
+      }
+    }
 
-      request.signal?.addEventListener("abort", onAbort, { once: true });
-
-      const detach = (): void => {
-        clearTimeout(timer);
-        clearTimers();
-        request.signal?.removeEventListener("abort", onAbort);
-      };
-
-      const capture = (stream: "stdout" | "stderr", chunk: string): void => {
-        capturedBytes += Buffer.byteLength(chunk, "utf8");
-
-        if (stream === "stdout") {
-          stdout += chunk;
-        } else {
-          stderr += chunk;
-        }
-
-        if (capturedBytes > maxOutputBytes) {
-          stop(
-            new OpenCodeAdapterError(
-              "output_truncated",
-              `The OpenCode run for agent "${request.agent}" produced more than ${String(maxOutputBytes)} bytes and was stopped.`,
-            ),
-          );
-          child.kill("SIGTERM");
-        }
-      };
-
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        capture("stdout", chunk);
-      });
-      child.stderr.on("data", (chunk: string) => {
-        capture("stderr", chunk);
-      });
-
-      child.on("error", (error: Error) => {
-        detach();
-
-        reject(
-          stopReason ??
-            new OpenCodeAdapterError(
-              "transport_failed",
-              `Unable to start the OpenCode executable for agent "${request.agent}".`,
-              { cause: error },
-            ),
-        );
-      });
-
-      child.on("close", (code: number | null) => {
-        detach();
-
-        if (stopReason !== null) {
-          reject(stopReason);
-          return;
-        }
-
-        const exitCode = code ?? 1;
-
-        if (exitCode !== 0) {
-          const detail = excerpt(
-            stderr,
-            this.#options.stderrExcerptLimit ?? DEFAULT_STDERR_EXCERPT_LIMIT,
-          );
-
-          reject(
-            new OpenCodeAdapterError(
-              "non_zero_exit",
-              `The OpenCode run for agent "${request.agent}" exited with code ${String(exitCode)}.${detail === "" ? "" : ` stderr: ${detail}`}`,
-            ),
-          );
-          return;
-        }
-
-        resolve({
-          agent: request.agent,
-          exitCode,
-          stdout,
-          stderr,
-          text: extractResponseText(stdout, format),
-        });
-      });
-    });
+    return {
+      agent: request.agent,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      text: extractResponseText(result.stdout, format),
+    };
   }
 }
 
@@ -350,3 +333,5 @@ export function createOpenCodeCliTransport(
 ): OpenCodeCliTransport {
   return new OpenCodeCliTransport(options);
 }
+
+export { DEFAULT_KILL_GRACE_MS, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_STDERR_EXCERPT_LIMIT };

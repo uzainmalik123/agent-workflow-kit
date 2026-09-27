@@ -5,7 +5,7 @@ This boundary contains project adapters and agent adapters. The `persistence/` p
 | Adapter | Kind | Depends on | Owns |
 | --- | --- | --- | --- |
 | `persistence/` | project adapter | core | sessions, controlled artifacts, event logs, locks, path safety |
-| `opencode/` | agent adapter | core, persistence, orchestration | roles, permissions, prompt boundary, response protocol, transport |
+| `opencode/` | agent adapter | core, persistence, orchestration | roles, V2 permissions, prompt boundary, response protocol, transport, capability probe |
 
 ## persistence
 

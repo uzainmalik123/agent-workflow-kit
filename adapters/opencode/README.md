@@ -2,6 +2,8 @@
 
 `@agent-workflow-kit/opencode` is the first real agent adapter in the kit. It implements the orchestration `StageExecutor` port on top of [OpenCode](https://opencode.ai), so the workflow drives a coding agent without the core or the orchestrator ever importing an agent-specific API.
 
+This adapter targets **OpenCode V2** natively. The V1 configuration syntax is not emitted, not parsed, and not relied on: there is no `permission:` object, no `tools:` boolean block, and no `bash` or `task` action name anywhere in the generated configuration. The official npm package for the CLI is `@opencode/cli`, and the kit never installs it.
+
 The adapter translates and refuses. It decides nothing: the orchestrator still owns stage selection, context routing, the legal transition, the human approval gates, and the artifact writes. A stage the agent did not finish is a failure, not a partial success.
 
 ```text
@@ -19,14 +21,17 @@ Dependencies point one way: `core -> persistence -> orchestration -> opencode`. 
 | Module | Responsibility |
 | --- | --- |
 | `roles.ts` | The eleven role definitions, their access level, and the stage-to-agent map. |
-| `permissions.ts` | Least-privilege OpenCode permission maps, including the protected path rules. |
+| `permissions.ts` | The V2 `permissions` rulesets: ordered `{ action, resource, effect }` rules and the wildcard evaluator. |
+| `process.ts` | The one `spawn` call: no shell, a timeout, cancellation, output caps, and a bounded stderr excerpt. |
 | `hard-rules.ts` | Framework rules that are re-sent to every run, and the `AGENTS.md` precedence statement. |
 | `agents.ts` | Deterministic `.opencode/agents/*.md` and `opencode.json` generation, plus a guarded writer. |
 | `project-instructions.ts` | Reads `AGENTS.md` from the project, truncated and marked when it is too long. |
 | `prompts.ts` | Builds the per-stage prompt from the request and nothing else. |
 | `response-protocol.ts` | Extracts and validates the structured payload. |
 | `transport.ts` | The `OpenCodeTransport` port every executor depends on. |
-| `cli-transport.ts` | The real transport: `opencode run` as a child process, with no shell. |
+| `cli-transport.ts` | The real transport: `opencode run` as a child process, with no shell, and the V2 event-stream reader. |
+| `capabilities.ts` | A safe local probe of the installed binary. No model, no network. |
+| `smoke-test.ts` | Optional generated-configuration validation against a real binary. Skips when there is none. |
 | `executor.ts` | The `StageExecutor` implementation that wires the two together. |
 | `install-policy.ts` | The recorded installer decision. No installer exists. |
 
@@ -54,21 +59,31 @@ Each role has its own purpose, responsibilities, prohibitions, and deliverables.
 
 ## Permissions
 
-Permissions are generated, not requested in prose. A generated agent file carries an OpenCode `permission` map and, for read-only roles, an explicit tool deny list.
+Permissions are generated, not requested in prose. A generated agent file carries a V2 `permissions` list: an ordered array of `{ action, resource, effect }` rules. Two properties of V2 evaluation make the order part of the policy:
 
-| Capability | Read-only roles | `implementer`, `fixer` |
+- the **last matching rule wins**, so a broad rule must come before the exception that narrows it;
+- an action that matches **no** rule resolves to `ask`, and a non-interactive `opencode run` auto-rejects a `permission.asked` request, which would break the stage run.
+
+Every ruleset therefore opens with `{"*", "*", "deny"}` and re-allows only the actions a role needs. That makes an `ask` outcome unreachable, and it denies any action a plugin might introduce, because nothing is allowed that was not asked for by name.
+
+| Action | Read-only roles | `implementer`, `fixer` |
 | --- | --- | --- |
+| `read`, `glob`, `grep` on a project file | `allow` | `allow` |
 | `edit` on a project file | `deny` | `allow` |
-| `edit` on `.agentflow/**` or `*.agentflow/**` | `deny` | `deny` |
-| `edit` on `.git/**` or `*.git/**` | `deny` | `deny` |
-| `read` on a project file | `allow` | `allow` |
-| `read` on workflow state or Git state | `deny` | `deny` |
-| `bash` | `deny` | `deny` |
+| `edit` on `.agentflow`, `*.agentflow`, `*.agentflow.*`, `.git`, `*.git` | `deny` | `deny` |
+| `read` on workflow state, Git state, or `*.env` | `deny` | `deny` |
+| `shell` | `deny` | `deny` |
+| `subagent` | `deny` | `deny` |
+| `skill` | `deny` | `deny` |
 | `webfetch`, `websearch` | `deny` | `deny` |
-| `task` | `deny` | `deny` |
 | `external_directory` | `deny` | `deny` |
+| `question`, `plan_enter`, `plan_exit`, `execute` | `deny` | `deny` |
 
-`bash: deny` is what makes "no agent receives commit or push authority" structural rather than a promise: with no shell there is no `git commit`, no `git push`, and no project command execution either, which is consistent with command execution being deferred in this milestone. `task: deny` keeps the roles separate, because a reviewer cannot delegate to an implementer and no role can collapse the workflow into one generalist agent. A project's own `.gitignore` is deliberately editable: only version-control state is protected.
+V2 renamed several actions, and the generated files use the current names: `bash` is `shell`, `task` is `subagent`, and the `edit` action covers the edit, write, and patch tools. A secret file is denied outright rather than left to an `ask` that nobody could answer.
+
+`shell: deny` is what makes "no agent receives commit or push authority" structural rather than a promise: with no shell there is no `git commit`, no `git push`, and no project command execution either, which is consistent with command execution being deferred in this milestone. `subagent: deny` keeps the roles separate, because a reviewer cannot delegate to an implementer and no role can collapse the workflow into one generalist agent. `skill: deny` holds the line until skill integration exists, so no role can pull instructions in from outside the repository. A project's own `.gitignore` is deliberately editable: only version-control state is protected.
+
+`matchesResourcePattern` is a faithful port of OpenCode's own wildcard matcher, so a decision made in a test is the decision the CLI makes at run time. Backslashes normalize to `/`, `*` stands for any run of characters including `/`, `?` stands for exactly one, a pattern ending in a space and a star also matches the bare value, and matching is anchored and case-insensitive only on Windows.
 
 `mode: primary` is set for every agent, and `--pure` is passed to the CLI by default so a project plugin cannot alter a role's behaviour at runtime.
 
@@ -106,12 +121,21 @@ The executor depends on the `OpenCodeTransport` port, not on a process, so tests
 
 - arguments are passed as an array with `shell: false`, so no feature title, user request, or artifact content is ever interpreted by a shell;
 - the environment is inherited only because a provider credential is required, and it is never echoed into a result, a log line, or an error message;
+- `--auto` is never passed unless a caller explicitly asks for it, because it approves anything that is not explicitly denied;
 - a prompt that starts with `-` is refused rather than parsed as an option;
 - stdout and stderr are captured separately with a byte cap that stops a runaway run;
 - a timeout, an abort, a non-zero exit, an unstartable binary, or an oversized stream becomes a refusal, never an empty success;
 - a failing run reports the exit code and a bounded stderr excerpt, and never echoes the command line, which contains the stage prompt.
 
-`opencode run --format json` is supported as well: `extractEventStreamText` is the only place that knows the raw event stream's shape, and an unrecognized stream is returned unchanged so parsing fails closed.
+The invocation is exactly this, and nothing else:
+
+```text
+opencode run --pure --agent <agent> --format <default|json> [--model <id>] --dir <repository> [prompt]
+```
+
+No session continuation, no `--attach`, no shared server. One stage run is one fresh session, and nothing about the previous stage's session is reused. The adapter's own name for the formatted output, `text`, maps to the CLI's `default`; the CLI has never accepted `text` as a format value.
+
+`--format json` returns an NDJSON event stream: one JSON object per line, each carrying `type`, `timestamp`, `sessionID`, and a payload. `parseEventStream` is the only place that knows this shape. It reads completed `text` parts — the current runner emits one only once the part is complete, and an answer can span several, so the parts are joined rather than the last one taken — and it reports an `error` event. An event type it does not recognize contributes nothing and is never read as output, and a stream that yields no text part is a failure rather than a raw-output fallback. Nothing in the pipeline reads an unfamiliar stream as a stage result.
 
 ## Generated project files
 
@@ -155,6 +179,26 @@ await orchestrator.runNext("F-001");
 
 In tests, `createFakeOpenCodeTransport` from the repository's `fixtures/opencode-transport.ts` replaces the CLI transport and never spawns a process or calls a model.
 
+### Checking the installed binary
+
+```ts
+import {
+  describeCapabilities,
+  describeSmokeTest,
+  probeOpenCodeCapabilities,
+  runOpenCodeConfigSmokeTest,
+} from "@agent-workflow-kit/opencode";
+
+console.log(describeCapabilities(await probeOpenCodeCapabilities()));
+console.log(describeSmokeTest(await runOpenCodeConfigSmokeTest()));
+```
+
+`probeOpenCodeCapabilities` runs only `opencode --version`, `opencode --help`, `opencode run --help`, and `opencode debug agent --help`. No model, no network, no writes. Every flag field is deliberately three-valued: `true` when the flag appears in the help, `false` when the help was read and the flag is absent, and `null` when the probe could not read the help at all. `missingRunCapabilities` reports only the `false` values, because "we could not check" is a reason to look again rather than a decision to change the invocation.
+
+Flags alone cannot tell V1 from V2. A real OpenCode 1.18.18 binary advertises `--agent`, `--format`, `--dir`, `--model`, `--auto`, `--pure`, and `debug agent` — every flag this adapter uses — so a missing flag never reveals the version. What a V1 binary does instead is silently ignore a `permissions:` list and leave every role with the default capability set, which is exactly the failure this milestone exists to prevent. The probe therefore reads the version separately and reports `versionSupportsV2`; the smoke test skips on a binary that predates V2 instead of reporting the ignored rules as a failure.
+
+`runOpenCodeConfigSmokeTest` writes the generated files to a temporary directory, asks the binary for `agent list` and `debug agent <name>`, and compares the binary's own resolved permissions against the policy. It runs no `run` command, forces `OPENCODE_DISABLE_MODELS_FETCH` and `OPENCODE_DISABLE_AUTOUPDATE` on every child, and reports `skipped` with a reason when the binary is missing, of an unknown version, older than V2, or has a different debug shape — so an environment without a V2 OpenCode never fails a build. It is a diagnostic, not a gate.
+
 `OpenCodeStageExecutorOptions`:
 
 | Option | Meaning |
@@ -182,7 +226,11 @@ No installer, scaffolding command, or framework copy exists in this milestone. `
 
 No test in this repository calls a real model, a real agent runtime, or the network. The transport tests spawn `process.execPath` as a stand-in binary, so the process boundary is exercised for real — arguments, environment, exit codes, streams, timeouts, and cancellation are all genuine — while nothing is sent anywhere. The integration tests drive a complete feature from request to the plan approval gate, and on to the final summarizer with a real fix history, through `FakeOpenCodeTransport`.
 
-The adapter has not been exercised against a live OpenCode installation; the binary on the development machine is not resolvable. Treat the CLI's flags and event-stream shape as the part most likely to need adjustment when it is first run for real, and keep that surface confined to `cli-transport.ts`.
+The capability and smoke tests run the same code against a stand-in binary, so the probe logic, the tri-state reporting, the version gate, and the generated-file checks are all exercised for real.
+
+The adapter has **not** been exercised against a live OpenCode V2 installation, and the probe says so rather than guessing. On the development machine `opencode` on `PATH` is a V1-era shim that exits 127 with `Could not resolve npm bin for opencode-ai / opencode`, which the probe reports as `executableFound: false`. A second binary, `/usr/bin/opencode`, is a working OpenCode 1.18.18: the probe identifies it, reports `versionSupportsV2: false` with every flag present, and the smoke test skips with a reason instead of pretending to validate a configuration that binary would ignore.
+
+Treat the CLI's flags and event-stream shape as the part most likely to need adjustment when a real V2 binary is first run, and keep that surface confined to `cli-transport.ts`.
 
 ## What this milestone does not do
 

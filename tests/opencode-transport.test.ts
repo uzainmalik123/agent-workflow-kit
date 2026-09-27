@@ -7,9 +7,10 @@ import {
   OpenCodeAdapterError,
   buildOpenCodeInvocation,
   createOpenCodeCliTransport,
-  extractEventStreamText,
   extractResponseText,
   isOpenCodeAdapterError,
+  parseEventStream,
+  toCliFormat,
   type OpenCodeTransportRequest,
 } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
@@ -30,6 +31,21 @@ async function makeRoot(): Promise<string> {
 function fakeOpenCode(script: string): { command: string; extraArgs: string[] } {
   return { command: process.execPath, extraArgs: ["-e", script] };
 }
+
+/**
+ * A child script that writes the given lines to stdout.
+ *
+ * The child's source is built with `JSON.stringify` rather than nested quoting, so a test can state
+ * the stream as data. The newline separator is written as its own literal for the same reason.
+ */
+function emitStream(lines: readonly string[]): string {
+  return lines
+    .map((line) => `process.stdout.write(${JSON.stringify(line)} + ${JSON.stringify("\n")});`)
+    .join(" ");
+}
+
+/** The answer a stage is expected to return, in the shape the response protocol requires. */
+const ANSWER = ['```json', '{"ok":true}', '```'].join("\n");
 
 function requestFor(overrides: Partial<OpenCodeTransportRequest> = {}): OpenCodeTransportRequest {
   return {
@@ -115,27 +131,116 @@ describe("response text extraction", () => {
     expect(extractResponseText("  the answer  ", "text")).toBe("the answer");
   });
 
-  it("reads text parts from the raw event stream", () => {
+  it("maps its own format names onto the ones the current CLI accepts", () => {
+    expect(toCliFormat("text")).toBe("default");
+    expect(toCliFormat("json")).toBe("json");
+  });
+
+  it("asks the CLI for the default format, never a format named text", () => {
+    const { args } = buildOpenCodeInvocation(requestFor());
+
+    expect(args[args.indexOf("--format") + 1]).toBe("default");
+    expect(args).not.toContain("text");
+  });
+});
+
+describe("the current V2 event stream", () => {
+  const event = (type: string, part?: unknown, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ type, timestamp: 1, sessionID: "ses_1", ...(part === undefined ? {} : { part }), ...extra });
+
+  const COMPLETED_TEXT = { type: "text", text: "done", time: { start: 1, end: 2 } };
+
+  it("reads a completed text event", () => {
+    const stream = parseEventStream(event("text", COMPLETED_TEXT));
+
+    expect(stream.text).toBe("done");
+    expect(stream.textParts).toBe(1);
+    expect(stream.error).toBeNull();
+    expect(stream.malformedLines).toBe(0);
+  });
+
+  it("joins every text part, so an answer split across parts is not truncated", () => {
     const stdout = [
-      JSON.stringify({ type: "part", part: { type: "text", text: "first " } }),
-      JSON.stringify({ type: "part", part: { type: "reasoning", text: "ignored" } }),
-      JSON.stringify({ type: "part", part: { type: "text", text: "second" } }),
+      event("step_start", { id: "step_1" }),
+      event("text", { type: "text", text: "first " }),
+      event("reasoning", { type: "reasoning", text: "ignored" }),
+      event("tool_use", { type: "tool", tool: "read", state: { status: "completed" } }),
+      event("text", { type: "text", text: "second" }),
+      event("step_finish", { cost: 0 }),
     ].join("\n");
 
-    expect(extractResponseText(stdout, "json")).toBe("first second");
+    const stream = parseEventStream(stdout);
+
+    expect(stream.text).toBe("first \nsecond");
+    expect(stream.textParts).toBe(2);
+    expect(stream.eventTypes).toEqual([
+      "step_start",
+      "text",
+      "reasoning",
+      "tool_use",
+      "text",
+      "step_finish",
+    ]);
   });
 
-  it("reads an assistant message event", () => {
-    const stdout = JSON.stringify({
-      type: "message",
-      message: { role: "assistant", content: [{ type: "text", text: "hello" }] },
+  it("extracts the answer from a full run", () => {
+    const stdout = [event("text", COMPLETED_TEXT), event("step_finish", {})].join("\n");
+
+    expect(extractResponseText(stdout, "json")).toBe("done");
+  });
+
+  it("reports a session error instead of returning an answer", () => {
+    const stdout = [
+      event("text", { type: "text", text: "partial" }),
+      event("error", undefined, { error: { name: "MessageAbortedError" } }),
+    ].join("\n");
+
+    const stream = parseEventStream(stdout);
+
+    expect(stream.error).toBe("MessageAbortedError");
+  });
+
+  it("reads an error message from a provider error object", () => {
+    const stdout = event("error", undefined, {
+      error: { name: "ProviderAuthError", data: { message: "no credentials" } },
     });
 
-    expect(extractEventStreamText(stdout)).toBe("hello");
+    expect(parseEventStream(stdout).error).toBe("no credentials");
   });
 
-  it("returns the raw output when no event is recognized, so parsing fails closed", () => {
-    expect(extractEventStreamText("nothing structured here")).toBe("nothing structured here");
+  it("never reads an event it does not recognize as output", () => {
+    const stdout = [
+      event("session.updated", { info: { id: "ses_1" } }),
+      event("some_future_event", { type: "text", text: "not our answer" }),
+    ].join("\n");
+
+    const stream = parseEventStream(stdout);
+
+    expect(stream.text).toBe("");
+    expect(stream.textParts).toBe(0);
+    expect(stream.eventTypes).toEqual(["session.updated", "some_future_event"]);
+  });
+
+  it("counts unreadable lines without inventing an answer from them", () => {
+    const stdout = [
+      "not json at all",
+      '{"type": "text", "part"',
+      JSON.stringify([1, 2, 3]),
+      event("text", COMPLETED_TEXT),
+    ].join("\n");
+
+    const stream = parseEventStream(stdout);
+
+    expect(stream.malformedLines).toBe(3);
+    expect(stream.text).toBe("done");
+  });
+
+  it("finds nothing in output that is not a stream at all", () => {
+    const stream = parseEventStream(ANSWER);
+
+    expect(stream.text).toBe("");
+    expect(stream.textParts).toBe(0);
+    expect(stream.malformedLines).toBe(2);
   });
 });
 
@@ -176,6 +281,83 @@ describe("running a child process", () => {
     expect(seen.argv.at(-1)).toBe(prompt);
     expect(seen.argv.filter((argument) => argument === prompt)).toHaveLength(1);
     expect(seen.cwd).toBe(root);
+  });
+
+  it("fails a run whose event stream has no answer, rather than reading the raw output", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport({
+      ...fakeOpenCode('process.stdout.write(JSON.stringify({ type: "text", part: { type: "text" } }));'),
+      responseFormat: "json",
+    });
+
+    const failure = await transport.run(requestFor({ workingDirectory: root })).catch((error: unknown) => error);
+
+    expect(isOpenCodeAdapterError(failure)).toBe(true);
+    expect((failure as OpenCodeAdapterError).code).toBe("transport_failed");
+    expect((failure as Error).message).toContain("no assistant text");
+  });
+
+  it("fails a run whose stream holds only events it does not recognize", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport({
+      ...fakeOpenCode(
+        'process.stdout.write(JSON.stringify({ type: "session.updated", part: { text: "sneaky" } }));',
+      ),
+      responseFormat: "json",
+    });
+
+    const failure = await transport.run(requestFor({ workingDirectory: root })).catch((error: unknown) => error);
+
+    expect((failure as OpenCodeAdapterError).code).toBe("transport_failed");
+    expect((failure as Error).message).toContain("session.updated");
+  });
+
+  it("fails a run whose stream is not a stream at all", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport({ ...fakeOpenCode(emitStream([ANSWER])), responseFormat: "json" });
+
+    const failure = await transport.run(requestFor({ workingDirectory: root })).catch((error: unknown) => error);
+
+    expect((failure as OpenCodeAdapterError).code).toBe("transport_failed");
+  });
+
+  it("fails a run that reported an error in the stream even though it exited zero", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport({
+      ...fakeOpenCode(
+        emitStream([
+          JSON.stringify({ type: "text", part: { type: "text", text: "x" } }),
+          JSON.stringify({ type: "error", error: "provider exploded" }),
+        ]),
+      ),
+      responseFormat: "json",
+    });
+
+    const failure = await transport.run(requestFor({ workingDirectory: root })).catch((error: unknown) => error);
+
+    expect((failure as OpenCodeAdapterError).code).toBe("transport_failed");
+    expect((failure as Error).message).toContain("provider exploded");
+  });
+
+  it("returns the text parts of a well-formed json run", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport({
+      ...fakeOpenCode(
+        emitStream([
+          JSON.stringify({
+            type: "text",
+            timestamp: 1,
+            sessionID: "ses_1",
+            part: { type: "text", text: ANSWER, time: { start: 1, end: 2 } },
+          }),
+        ]),
+      ),
+      responseFormat: "json",
+    });
+
+    const result = await transport.run(requestFor({ workingDirectory: root }));
+
+    expect(result.text).toBe(ANSWER);
   });
 
   it("refuses a non-zero exit and reports the code", async () => {

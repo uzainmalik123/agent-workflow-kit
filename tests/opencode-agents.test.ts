@@ -15,14 +15,14 @@ import {
   VENDORED_FRAMEWORK_PATHS,
   VERSION_CONTROLLED_ENTRIES,
   WRITE_CAPABLE_ROLES,
-  WRITE_CAPABLE_PERMISSION,
-  READ_ONLY_PERMISSION,
   agentFileName,
+  permissionRulesForRole,
   renderAgentMarkdown,
   renderOpenCodeProjectConfig,
   renderOpenCodeProjectFiles,
   roleDefinition,
   writeOpenCodeProjectFiles,
+  type OpenCodePermissionRule,
 } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -94,49 +94,89 @@ describe("generated agent markdown", () => {
       expect(frontmatter).toBeDefined();
       expect(frontmatter).toContain("description:");
       expect(frontmatter).toContain('mode: "primary"');
-      expect(frontmatter).toContain("permission:");
+      expect(frontmatter).toContain("permissions:");
     }
   });
 
-  it("gives a read-only role an edit denial and a tool deny list", () => {
-    const frontmatter = frontmatterOf("code_reviewer");
+  it("emits no V1 permission syntax at all", () => {
+    for (const role of OPENCODE_ROLES) {
+      const frontmatter = frontmatterOf(role);
 
-    expect(frontmatter).toContain('"edit":');
-    expect(frontmatter).toContain('"*": "deny"');
-    expect(frontmatter).toContain('"write": false');
-    expect(frontmatter).toContain('"edit": false');
-    expect(frontmatter).toContain('"bash": "deny"');
+      expect(frontmatter).not.toContain("permission:");
+      expect(frontmatter).not.toContain("tools:");
+      expect(frontmatter).not.toMatch(/^\s*(write|edit|patch|bash|webfetch|task):\s/mu);
+    }
   });
 
-  it("gives the implementer write access, minus workflow state and Git", () => {
-    const frontmatter = frontmatterOf("implementer");
-
-    expect(frontmatter).toContain('"*": "allow"');
-    expect(frontmatter).toContain('".agentflow/*": "deny"');
-    expect(frontmatter).toContain('"*.agentflow/*": "deny"');
-    expect(frontmatter).toContain('".git/*": "deny"');
-    expect(frontmatter).toContain('"*.git/*": "deny"');
-    expect(frontmatter).not.toContain('"write": false');
+  it("round-trips the ruleset it was given, in order, with no drift", () => {
+    for (const role of OPENCODE_ROLES) {
+      expect(permissionRulesOf(role)).toEqual(permissionRulesForRole(role));
+    }
   });
 
-  it("turns the edit permission off for exactly the nine read-only roles", () => {
-    const editable = OPENCODE_ROLES.filter((role) =>
-      editBlock(renderAgentMarkdown(role)).includes('"*": "allow"'),
+  it("quotes every pattern, so a bare star is never read as a YAML alias", () => {
+    for (const role of OPENCODE_ROLES) {
+      const frontmatter = frontmatterOf(role);
+
+      expect(frontmatter).toContain('action: "*"');
+      expect(frontmatter).toContain('resource: "*.agentflow/*"');
+      expect(frontmatter).toContain('resource: ".agentflow"');
+    }
+  });
+
+  it("gives a read-only role no edit allowance at all", () => {
+    const rules = permissionRulesOf("code_reviewer");
+
+    expect(rules.some((rule) => rule.action === "edit" && rule.effect === "allow")).toBe(false);
+    expect(rules.filter((rule) => rule.action === "edit")).toEqual([
+      { action: "edit", resource: "*", effect: "deny" },
+    ]);
+    expect(rules[0]).toEqual({ action: "*", resource: "*", effect: "deny" });
+  });
+
+  it("gives the implementer an edit allowance narrowed by workflow state and Git", () => {
+    const rules = permissionRulesOf("implementer");
+    const editAllows = rules.filter((rule) => rule.action === "edit" && rule.effect === "allow");
+    const editDenies = rules.filter((rule) => rule.action === "edit" && rule.effect === "deny");
+
+    expect(editAllows).toEqual([{ action: "edit", resource: "*", effect: "allow" }]);
+    expect(editDenies.map((rule) => rule.resource)).toEqual([
+      ".agentflow",
+      ".agentflow/*",
+      "*.agentflow",
+      "*.agentflow/*",
+      "*.agentflow.*",
+      ".git",
+      ".git/*",
+      "*.git",
+      "*.git/*",
+    ]);
+  });
+
+  it("turns the edit allowance on for exactly the two write-capable roles", () => {
+    const editable = OPENCODE_ROLES.filter(
+      (role) => permissionRulesOf(role).some((rule) => rule.action === "edit" && rule.effect === "allow"),
     );
 
     expect(editable).toEqual([...WRITE_CAPABLE_ROLES]);
   });
 
-  it("renders the permission map it was given, with no drift", () => {
+  it("denies the dangerous capabilities by their V2 action names", () => {
     for (const role of OPENCODE_ROLES) {
-      const frontmatter = frontmatterOf(role);
-      const expected = WRITE_CAPABLE_ROLES.includes(role)
-        ? WRITE_CAPABLE_PERMISSION
-        : READ_ONLY_PERMISSION;
+      const rules = permissionRulesOf(role);
+      const denials = rules
+        .filter((rule) => rule.effect === "deny" && rule.resource === "*")
+        .map((rule) => rule.action);
 
-      for (const capability of ["bash", "webfetch", "websearch", "task", "external_directory"] as const) {
-        expect(expected[capability]).toBe("deny");
-        expect(frontmatter).toContain(`"${capability}": "deny"`);
+      for (const action of [
+        "shell",
+        "subagent",
+        "skill",
+        "webfetch",
+        "websearch",
+        "external_directory",
+      ]) {
+        expect(denials).toContain(action);
       }
     }
   });
@@ -184,26 +224,64 @@ function frontmatterOf(role: (typeof OPENCODE_ROLES)[number]): string {
   return frontmatter;
 }
 
-/** The `permission.edit` block of a generated agent file, without the rest of the frontmatter. */
-function editBlock(markdown: string): string {
-  const lines = markdown.split("\n");
-  const start = lines.findIndex((line) => line.startsWith('  "edit":'));
+/**
+ * Reads the generated `permissions:` list back out of the frontmatter.
+ *
+ * The adapter emits YAML by hand, so the only way to know the file says what the policy says is to
+ * parse what was actually written. This deliberately reads the emitted text rather than calling the
+ * renderer, and it fails loudly on any rule that is not in the emitted three-key shape.
+ */
+function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermissionRule[] {
+  const lines = frontmatterOf(role).split("\n");
+  const start = lines.findIndex((line) => line === "permissions:");
 
   if (start === -1) {
-    return "";
+    throw new Error(`Agent ${role} has no permissions list.`);
   }
 
-  const block: string[] = [];
+  const rules: OpenCodePermissionRule[] = [];
+  let pending: Partial<OpenCodePermissionRule> | undefined;
+
+  const flush = (): void => {
+    if (pending === undefined) {
+      return;
+    }
+
+    if (pending.action === undefined || pending.resource === undefined || pending.effect === undefined) {
+      throw new Error(`Agent ${role} has an incomplete permission rule: ${JSON.stringify(pending)}`);
+    }
+
+    rules.push({
+      action: pending.action,
+      resource: pending.resource,
+      effect: pending.effect,
+    });
+    pending = undefined;
+  };
 
   for (const line of lines.slice(start + 1)) {
-    if (!line.startsWith("    ")) {
+    if (line === "") {
       break;
     }
 
-    block.push(line);
+    const match = /^\s+(?:-\s*)?(action|resource|effect):\s(".*")$/u.exec(line);
+    const key = match?.[1];
+    const quoted = match?.[2];
+
+    if (key === undefined || quoted === undefined) {
+      throw new Error(`Agent ${role} has an unparseable permission line: ${line}`);
+    }
+
+    if (key === "action") {
+      flush();
+    }
+
+    pending = { ...pending, [key]: JSON.parse(quoted) as string };
   }
 
-  return block.join("\n");
+  flush();
+
+  return rules;
 }
 
 describe("generated project configuration", () => {

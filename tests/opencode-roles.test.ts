@@ -4,7 +4,7 @@ import {
   HARD_RULES_HEADING,
   OPENCODE_ROLES,
   READ_ONLY_ROLES,
-  UNIVERSAL_DENIALS,
+  UNIVERSAL_DENIAL_ACTIONS,
   WRITE_CAPABLE_ROLES,
   accessForRole,
   agentFileName,
@@ -167,14 +167,24 @@ describe("OpenCode role definitions", () => {
 });
 
 describe("workflow authority limits", () => {
-  it("denies Git, approval, and workflow state authority in one place", () => {
-    expect(UNIVERSAL_DENIALS).toEqual({
-      bash: "deny",
-      webfetch: "deny",
-      websearch: "deny",
-      task: "deny",
-      external_directory: "deny",
-    });
+  it("denies Git, delegation, skills, and network authority in one place", () => {
+    expect(UNIVERSAL_DENIAL_ACTIONS).toEqual([
+      "shell",
+      "subagent",
+      "skill",
+      "webfetch",
+      "websearch",
+      "external_directory",
+      "question",
+      "plan_enter",
+      "plan_exit",
+      "execute",
+    ]);
+  });
+
+  it("denies Git by denying the shell itself, which is the only way to run it", () => {
+    expect(UNIVERSAL_DENIAL_ACTIONS).toContain("shell");
+    expect(UNIVERSAL_DENIAL_ACTIONS).not.toContain("bash");
   });
 
   it("states the no-commit, no-push, and no-approval rules verbatim", () => {

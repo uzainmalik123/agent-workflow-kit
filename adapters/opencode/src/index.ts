@@ -21,22 +21,25 @@ export {
 export type { OpenCodeAccessLevel, OpenCodeRoleDefinition } from "./roles.js";
 
 export {
+  DENY_ALL_RULE,
   effectFor,
   isReadOnlyRole,
-  permissionForRole,
-  PROTECTED_PATH_RULES,
+  matchesResourcePattern,
+  operationEffect,
+  permissionRulesForRole,
+  PROTECTED_PATH_PATTERNS,
   readOnlyRoles,
-  READ_ONLY_PERMISSION,
-  toolDenyListForRole,
-  TOOLS_DENIED_FOR_READ_ONLY_ROLES,
-  UNIVERSAL_DENIALS,
-  WRITE_CAPABLE_PERMISSION,
+  READ_ONLY_PERMISSION_RULES,
+  SECRET_PATH_PATTERNS,
+  UNIVERSAL_ALLOWED_ACTIONS,
+  UNIVERSAL_DENIAL_ACTIONS,
+  WRITE_CAPABLE_PERMISSION_RULES,
   writeCapableRoles,
 } from "./permissions.js";
 export type {
   OpenCodePermissionEffect,
-  OpenCodePermissionMap,
   OpenCodePermissionRule,
+  OpenCodePermissionRuleset,
 } from "./permissions.js";
 
 export {
@@ -92,15 +95,47 @@ export type {
 export {
   buildOpenCodeInvocation,
   createOpenCodeCliTransport,
-  extractEventStreamText,
   extractResponseText,
   OpenCodeCliTransport,
+  parseEventStream,
+  toCliFormat,
   DEFAULT_KILL_GRACE_MS,
   DEFAULT_MAX_OUTPUT_BYTES,
   DEFAULT_OPENCODE_COMMAND,
   DEFAULT_STDERR_EXCERPT_LIMIT,
 } from "./cli-transport.js";
-export type { OpenCodeCliTransportOptions, OpenCodeInvocation, OpenCodeResponseFormat } from "./cli-transport.js";
+export type {
+  OpenCodeCliFormat,
+  OpenCodeCliTransportOptions,
+  OpenCodeInvocation,
+  OpenCodeResponseFormat,
+  ParsedEventStream,
+} from "./cli-transport.js";
+
+export {
+  advertisesFlag,
+  DEFAULT_CAPABILITY_PROBE_TIMEOUT_MS,
+  describeCapabilities,
+  missingRunCapabilities,
+  parseMajorVersion,
+  probeOpenCodeCapabilities,
+  REQUIRED_RUN_FLAGS,
+  TARGET_OPENCODE_MAJOR,
+} from "./capabilities.js";
+export type { OpenCodeCapabilities, ProbeOpenCodeCapabilitiesOptions } from "./capabilities.js";
+
+export {
+  DEFAULT_SMOKE_TEST_TIMEOUT_MS,
+  describeSmokeTest,
+  runOpenCodeConfigSmokeTest,
+  verifyRuleset,
+} from "./smoke-test.js";
+export type {
+  OpenCodeSmokeTestAgentReport,
+  OpenCodeSmokeTestCheck,
+  OpenCodeSmokeTestReport,
+  RunOpenCodeConfigSmokeTestOptions,
+} from "./smoke-test.js";
 
 export { createOpenCodeStageExecutor, OpenCodeStageExecutor } from "./executor.js";
 export type { OpenCodeStageExecutorOptions } from "./executor.js";

@@ -4,12 +4,7 @@ import type { StageRole } from "@agent-workflow-kit/orchestration";
 import { STAGE_ROLES } from "@agent-workflow-kit/orchestration";
 import { OpenCodeAdapterError } from "./errors.js";
 import { FRAMEWORK_HARD_RULES } from "./hard-rules.js";
-import {
-  permissionForRole,
-  toolDenyListForRole,
-  type OpenCodePermissionMap,
-  type OpenCodePermissionRule,
-} from "./permissions.js";
+import { permissionRulesForRole, type OpenCodePermissionRuleset } from "./permissions.js";
 import { roleDefinition, type OpenCodeAccessLevel, type OpenCodeRoleDefinition } from "./roles.js";
 
 export const OPENCODE_AGENT_DIRECTORY = ".opencode/agents";
@@ -26,54 +21,43 @@ function yamlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function renderPermissionRule(key: string, rule: OpenCodePermissionRule): readonly string[] {
-  if (typeof rule === "string") {
-    return [`  ${yamlString(key)}: ${yamlString(rule)}`];
-  }
+/**
+ * A deliberately small YAML emitter for the V2 `permissions` list.
+ *
+ * It quotes every key and value, because a bare `*` is a YAML alias and a pattern such as
+ * `*.agentflow/*` is a plain scalar that must not be re-interpreted. It renders rules in the order
+ * the module produced them, because in V2 the order is the policy.
+ */
+function renderPermissionRules(rules: OpenCodePermissionRuleset): readonly string[] {
+  const lines: string[] = [];
 
-  const lines: string[] = [`  ${yamlString(key)}:`];
-
-  for (const [pattern, effect] of Object.entries(rule)) {
-    lines.push(`    ${yamlString(pattern)}: ${yamlString(effect)}`);
+  for (const [index, entry] of rules.entries()) {
+    lines.push(
+      `${index === 0 ? "  - " : "    "}action: ${yamlString(entry.action)}`,
+      `    resource: ${yamlString(entry.resource)}`,
+      `    effect: ${yamlString(entry.effect)}`,
+    );
   }
 
   return lines;
 }
 
 /**
- * A deliberately small YAML emitter. It only renders the two shapes the permission model uses -
- * a scalar effect, or a flat pattern map - and it quotes every key and value, because a key such
- * as `*` is an alias in unquoted YAML and a pattern such as `*.agentflow/*` is a plain scalar.
+ * OpenCode V2 agent frontmatter.
+ *
+ * Only V2 fields are emitted: `permissions` as an ordered rule list. The V1 `permission:` object
+ * and the V1 `tools:` boolean block are deliberately absent, because the adapter targets the native
+ * V2 contract and must not depend on the compatibility layer that used to translate them.
  */
-function renderFrontmatter(
-  definition: OpenCodeRoleDefinition,
-  permission: OpenCodePermissionMap,
-  tools: Readonly<Record<string, boolean>>,
-): string {
-  const lines: string[] = [
+function renderFrontmatter(definition: OpenCodeRoleDefinition, rules: OpenCodePermissionRuleset): string {
+  return [
     "---",
     `description: ${yamlString(definition.description)}`,
     `mode: ${yamlString(AGENT_MODE)}`,
-    "permission:",
-  ];
-
-  for (const key of Object.keys(permission).sort()) {
-    lines.push(...renderPermissionRule(key, permission[key] as OpenCodePermissionRule));
-  }
-
-  const toolNames = Object.keys(tools).sort();
-
-  if (toolNames.length > 0) {
-    lines.push("tools:");
-
-    for (const name of toolNames) {
-      lines.push(`  ${yamlString(name)}: ${tools[name] === true ? "true" : "false"}`);
-    }
-  }
-
-  lines.push("---");
-
-  return lines.join("\n");
+    "permissions:",
+    ...renderPermissionRules(rules),
+    "---",
+  ].join("\n");
 }
 
 /**
@@ -135,11 +119,7 @@ export function renderRoleInstructionsForRole(role: StageRole): string {
  */
 export function renderAgentMarkdown(role: StageRole): string {
   const definition = roleDefinition(role);
-  const frontmatter = renderFrontmatter(
-    definition,
-    permissionForRole(role),
-    toolDenyListForRole(role),
-  );
+  const frontmatter = renderFrontmatter(definition, permissionRulesForRole(role));
 
   const body = [
     renderRoleInstructions(definition),
