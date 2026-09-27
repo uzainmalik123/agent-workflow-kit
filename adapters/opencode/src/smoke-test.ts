@@ -18,13 +18,21 @@ import { agentForRole, isWriteCapableRole } from "./roles.js";
  * configuration.
  *
  * It writes the generated files into a temporary directory, asks the installed binary to report the
- * agents it discovers there, and checks that a read-only agent is denied editing and shell access
- * while a write-capable agent is not. It runs only `agent list` and `debug agent`, never `run`, so it
+ * agents it discovered there with `opencode debug agents`, and checks that a read-only agent is denied
+ * editing and shell access while a write-capable agent is not. It never runs `opencode run`, so it
  * calls no model and needs no network.
  *
+ * The listing is polled until it accounts for every generated agent, because the first answer from a
+ * freshly started background service does not. See {@link readAgentListing} for why that matters and
+ * why waiting for it cannot turn a wrong configuration into a passing report.
+ *
+ * The evidence is the binary's own answer and nothing else. Every decision is replayed against the
+ * ruleset the binary reported, so a passing report means OpenCode resolved the generated policy the
+ * way the adapter intended, not that the adapter agrees with itself.
+ *
  * It is a diagnostic, not a gate. A missing binary, a binary that cannot answer without a configured
- * provider, or a version whose debug output has a different shape all produce `skipped` with a
- * reason, so an environment without OpenCode never fails a build.
+ * provider, or a version whose listing has a different shape all produce `skipped` with a reason, so
+ * an environment without OpenCode never fails a build.
  */
 export interface OpenCodeSmokeTestAgentReport {
   readonly role: StageRole;
@@ -54,18 +62,51 @@ export interface RunOpenCodeConfigSmokeTestOptions {
   readonly signal?: AbortSignal;
   /** Keep the temporary directory so a failure can be inspected. */
   readonly keepDirectory?: boolean;
+  /**
+   * How long to keep asking for a listing that accounts for every generated agent.
+   *
+   * Defaults to `DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS`. A caller that wants a fast answer about a
+   * machine it already knows is broken can shorten it; shortening it only ever makes the report
+   * closer to the binary's first answer, and the first answer is the one the wait exists to distrust.
+   */
+  readonly readyTimeoutMs?: number;
 }
 
 export const DEFAULT_SMOKE_TEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The timeout for the single `opencode debug agents` call.
+ *
+ * It is larger than every other child timeout because it is the one command that does real work
+ * rather than printing help. V2 answers it from a background service, so on a machine where no
+ * service is running yet the CLI has to start one and wait for it to report healthy before it can
+ * ask for the agent list. Cutting that off would report a permission problem that does not exist, so
+ * the call is given room to start a service and still fails if it genuinely cannot answer.
+ */
+export const DEFAULT_AGENT_LISTING_TIMEOUT_MS = 120_000;
+
+/**
+ * How long the smoke test waits for a listing that accounts for every generated agent.
+ *
+ * It is a separate budget from the per-call timeout because the two answer different questions: the
+ * per-call timeout allows one cold `debug agents` to start a background service, and this one allows
+ * the service time to finish loading the directory before its answer is believed. A configuration
+ * that is wrong never satisfies the condition being waited on, so a generous budget costs a slow
+ * failure rather than a false one.
+ */
+export const DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS = 30_000;
+
+/** The gap between listing attempts while waiting for the service to finish loading. */
+const DEFAULT_AGENT_LISTING_POLL_INTERVAL_MS = 500;
 
 /**
  * Environment entries the smoke test forces on every child process.
  *
  * `OPENCODE_DISABLE_MODELS_FETCH` stops OpenCode fetching the model catalog from models.dev, and
  * `OPENCODE_DISABLE_AUTOUPDATE` stops it checking for a new release. Without them, a configuration
- * check that is supposed to be local and offline would quietly reach the network. They are applied
- * after the caller's own entries and cannot be switched off through this API, because "this check
- * never calls out" is a property of the check, not a preference.
+ * check that is supposed to be local and offline would quietly reach the network. They are spread
+ * last so a caller cannot switch them off through this API, because "this check never calls out" is
+ * a property of the check, not a preference.
  */
 const FORCED_OFFLINE_ENV: Readonly<Record<string, string>> = {
   OPENCODE_DISABLE_MODELS_FETCH: "1",
@@ -77,7 +118,7 @@ function childOptions(
 ): { inheritEnv?: boolean; env: Readonly<Record<string, string>>; signal?: AbortSignal } {
   return {
     ...(options.inheritEnv === undefined ? {} : { inheritEnv: options.inheritEnv }),
-    env: { ...FORCED_OFFLINE_ENV, ...options.env },
+    env: { ...options.env, ...FORCED_OFFLINE_ENV },
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
 }
@@ -158,125 +199,199 @@ function readRuleset(value: unknown): OpenCodePermissionRuleset | null {
   return rules;
 }
 
-/** The tool names the binary reports as unavailable, when it reports them at all. */
-function readDeniedTools(value: unknown): ReadonlySet<string> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-
-  const denied = new Set<string>();
-
-  for (const [name, available] of Object.entries(value as Record<string, unknown>)) {
-    if (available === false) {
-      denied.add(name);
-    }
-  }
-
-  return denied;
+/** One agent entry as `opencode debug agents` reports it. */
+export interface OpenCodeListedAgent {
+  readonly id: string;
+  /** The resolved ruleset, or `null` when the entry did not carry a readable one. */
+  readonly rules: OpenCodePermissionRuleset | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function readAgentList(
-  command: string,
-  directory: string,
-  options: RunOpenCodeConfigSmokeTestOptions,
-): Promise<readonly string[] | null> {
+/**
+ * Parses one `opencode debug agents` payload.
+ *
+ * The command prints a JSON array of agent objects sorted by id, each carrying the id, the display
+ * name, the mode, and the permissions OpenCode actually resolved for it. An entry is kept only when
+ * it is an object with a non-empty string id, because the id is what discovery is matched on and an
+ * entry without one says nothing about discovery. Everything else about the entry, including any
+ * field this version of the adapter does not know yet, is ignored rather than rejected, so an
+ * OpenCode release that adds a field does not turn into a parsing failure.
+ *
+ * `null` is returned for anything that is not an array, including valid JSON of the wrong shape. A
+ * payload this function cannot recognise is never treated as an empty or partial listing, because
+ * the two differ: an empty listing says every agent is missing, and an unreadable one says nothing.
+ */
+export function parseAgentListing(stdout: string): readonly OpenCodeListedAgent[] | null {
+  let parsed: unknown;
+
   try {
-    const result = await runProcess(command, ["agent", "list"], {
-      cwd: directory,
-      timeoutMs: options.timeoutMs ?? DEFAULT_SMOKE_TEST_TIMEOUT_MS,
-      maxOutputBytes: 2_000_000,
-      ...childOptions(options),
-      label: "The OpenCode agent list probe",
-    });
-
-    const names = new Set<string>();
-
-    for (const line of result.stdout.split("\n")) {
-      const match = /^([A-Za-z0-9_.\-/]+)\s+\((?:primary|subagent|all)\)\s*$/u.exec(line);
-
-      if (match?.[1] !== undefined) {
-        names.add(match[1]);
-      }
-    }
-
-    return names.size === 0 ? null : [...names];
+    parsed = JSON.parse(stdout) as unknown;
   } catch {
     return null;
   }
-}
 
-async function readAgentDetail(
-  command: string,
-  directory: string,
-  agent: string,
-  options: RunOpenCodeConfigSmokeTestOptions,
-): Promise<unknown> {
-  const result = await runProcess(command, ["debug", "agent", agent], {
-    cwd: directory,
-    timeoutMs: options.timeoutMs ?? DEFAULT_SMOKE_TEST_TIMEOUT_MS,
-    maxOutputBytes: 2_000_000,
-    ...childOptions(options),
-    label: `The OpenCode debug agent probe for "${agent}"`,
-  });
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
 
-  return JSON.parse(result.stdout) as unknown;
+  const agents: OpenCodeListedAgent[] = [];
+
+  for (const entry of parsed) {
+    if (!isRecord(entry) || typeof entry["id"] !== "string" || entry["id"] === "") {
+      return null;
+    }
+
+    agents.push({ id: entry["id"], rules: readRuleset(entry["permissions"]) });
+  }
+
+  return agents;
 }
 
 /**
- * The checks the smoke test makes against whatever the binary reported for one agent. A V2 binary
- * reports the resolved `permissions` array; the returned map of denied tools is used as a
- * cross-check when present, because it is the runtime's own answer rather than a re-read of config.
+ * Runs `opencode debug agents` once and parses it.
+ *
+ * A failure is reported as a rejection rather than an empty list, so a binary that cannot answer is
+ * never mistaken for a binary that discovered nothing.
+ */
+async function readAgentListingOnce(
+  command: string,
+  directory: string,
+  options: RunOpenCodeConfigSmokeTestOptions,
+): Promise<readonly OpenCodeListedAgent[]> {
+  let stdout: string;
+
+  try {
+    const result = await runProcess(command, ["debug", "agents"], {
+      cwd: directory,
+      timeoutMs: options.timeoutMs ?? DEFAULT_AGENT_LISTING_TIMEOUT_MS,
+      maxOutputBytes: 8_000_000,
+      ...childOptions(options),
+      label: "The OpenCode debug agents probe",
+    });
+
+    stdout = result.stdout;
+  } catch (error) {
+    throw new Error(
+      `the binary could not list the agents it discovered: ${error instanceof Error ? error.message : "unknown error"}`,
+      { cause: error },
+    );
+  }
+
+  const listed = parseAgentListing(stdout);
+
+  if (listed === null) {
+    throw new Error("the agent listing was not the JSON array of agents the smoke test reads");
+  }
+
+  return listed;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+
+    if (signal !== undefined) {
+      if (signal.aborted) {
+        clearTimeout(timer);
+        resolve();
+        return;
+      }
+
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    }
+  });
+}
+
+/**
+ * Asks for the listing until it accounts for every generated agent, or the wait runs out.
+ *
+ * The first answer is not authoritative. V2 serves this command from a background service, and when
+ * no service is running yet the CLI reports the service healthy and asks it for the agent list before
+ * that service has loaded the directory's configuration. On a real 2.0.18 binary the first call
+ * returns an empty array, and an immediate second call returns only the built-in agents; the
+ * generated ones appear a moment later. Reading the first answer would report all eleven roles as
+ * missing, which is a statement about the service's start-up rather than about the generated
+ * configuration.
+ *
+ * So the listing is polled until every generated agent is present, which is a condition a correctly
+ * generated project satisfies. A configuration that is genuinely wrong never satisfies it, so the
+ * wait cannot hide a defect: the loop simply runs out of time and the last real answer is reported
+ * as the failure it is. Nothing here treats a listing as a pass on its own; the checks decide that.
+ */
+async function readAgentListing(
+  command: string,
+  directory: string,
+  expected: readonly string[],
+  options: RunOpenCodeConfigSmokeTestOptions,
+): Promise<readonly OpenCodeListedAgent[]> {
+  const deadline = Date.now() + (options.readyTimeoutMs ?? DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS);
+  const seen = new Set(expected);
+  let last: readonly OpenCodeListedAgent[] | null = null;
+  let lastFailure: string | null = null;
+
+  for (;;) {
+    try {
+      const listed = await readAgentListingOnce(command, directory, options);
+
+      last = listed;
+
+      if (listed.some((agent) => seen.has(agent.id))) {
+        return listed;
+      }
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : "the agent listing could not be read";
+    }
+
+    if (Date.now() >= deadline) {
+      break;
+    }
+
+    await sleep(DEFAULT_AGENT_LISTING_POLL_INTERVAL_MS, options.signal);
+  }
+
+  if (last !== null) {
+    return last;
+  }
+
+  throw new Error(
+    lastFailure ??
+      "the binary never produced an agent listing this adapter could read",
+  );
+}
+
+/**
+ * The checks the smoke test makes against whatever the binary reported for one agent.
+ *
+ * A V2 listing carries the resolved `permissions` array and nothing else, so the ruleset is the whole
+ * of the evidence. An entry with no readable ruleset is unverified rather than wrong: the binary said
+ * something about the agent but not something this adapter can check.
  */
 function verifyAgent(
-  detail: unknown,
+  listed: OpenCodeListedAgent | undefined,
   checks: readonly OpenCodeSmokeTestCheck[],
 ): { verified: boolean | null; failures: readonly string[] } {
-  if (!isRecord(detail)) {
-    return { verified: null, failures: ["the debug output was not a JSON object"] };
+  if (listed === undefined) {
+    return { verified: null, failures: ["the agent was not in the listing"] };
   }
 
-  const rules = readRuleset(detail["permissions"]);
-  const deniedTools = readDeniedTools(detail["tools"]);
-  const failures: string[] = [];
-
-  if (rules === null) {
-    if (deniedTools === null) {
-      return {
-        verified: null,
-        failures: ["the debug output carried neither a V2 permissions array nor a tool availability map"],
-      };
-    }
-  } else {
-    failures.push(...verifyRuleset(rules, checks));
+  if (listed.rules === null) {
+    return {
+      verified: null,
+      failures: ["the listing carried no readable permissions array for this agent"],
+    };
   }
 
-  if (deniedTools !== null) {
-    // Only the two capabilities OpenCode gates whole tools on can be cross-checked this way, and each
-    // tool is checked once against the decision the checks already agree on.
-    const expected = new Map<string, "allow" | "deny">();
-
-    for (const check of checks) {
-      if (check.action === "edit" || check.action === "shell") {
-        expected.set(check.action === "edit" ? "edit" : "bash", check.expected);
-      }
-    }
-
-    for (const [tool, decision] of expected) {
-      const unavailable = deniedTools.has(tool);
-
-      if (decision === "deny" && !unavailable) {
-        failures.push(`the binary still reports the ${tool} tool as available`);
-      }
-
-      if (decision === "allow" && unavailable) {
-        failures.push(`the binary reports the ${tool} tool as unavailable, which this role needs`);
-      }
-    }
-  }
+  const failures = verifyRuleset(listed.rules, checks);
 
   return { verified: failures.length === 0 ? true : false, failures };
 }
@@ -339,15 +454,15 @@ export async function runOpenCodeConfigSmokeTest(
       };
     }
 
-    if (capabilities.debugAgentAvailable !== true) {
+    if (capabilities.debugAgentsAvailable !== true) {
       const kept = await cleanup();
 
       return {
         status: "skipped",
         reason:
-          capabilities.debugAgentAvailable === false
-            ? "The installed OpenCode does not advertise `debug agent`, so generated permissions cannot be inspected without calling a model."
-            : "The `debug agent` help for the installed OpenCode could not be read, so generated permissions were left unverified.",
+          capabilities.debugAgentsAvailable === false
+            ? "The installed OpenCode does not advertise `debug agents`, so generated permissions cannot be inspected without calling a model."
+            : "The `debug agents` help for the installed OpenCode could not be read, so generated permissions were left unverified.",
         capabilities,
         agents: [],
         failures: [],
@@ -355,44 +470,41 @@ export async function runOpenCodeConfigSmokeTest(
       };
     }
 
-    const listed = await readAgentList(command, directory, options ?? {});
     const agents: OpenCodeSmokeTestAgentReport[] = [];
     const failures: string[] = [];
+    let listed: readonly OpenCodeListedAgent[] | null = null;
 
-    if (listed === null) {
-      failures.push("the binary could not list the agents it discovered, so discovery was not checked");
+    try {
+      listed = await readAgentListing(
+        command,
+        directory,
+        STAGE_ROLES.map((role) => agentForRole(role)),
+        options ?? {},
+      );
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : "the agent listing could not be read");
     }
 
     for (const role of STAGE_ROLES) {
       const agent = agentForRole(role);
       const checks = checksForRole(role);
       const agentFailures: string[] = [];
-      const discovered = listed !== null && listed.includes(agent);
+      const entry = listed?.find((candidate) => candidate.id === agent);
+      const discovered = entry !== undefined;
 
       if (listed !== null && !discovered) {
         agentFailures.push(`the binary did not list the agent "${agent}"`);
       }
 
-      let verified: boolean | null = null;
+      const outcome = verifyAgent(entry, checks);
+      const { verified } = outcome;
 
-      {
-        try {
-          const detail = await readAgentDetail(command, directory, agent, options ?? {});
-          const outcome = verifyAgent(detail, checks);
+      agentFailures.push(...outcome.failures);
 
-          verified = outcome.verified;
-          agentFailures.push(...outcome.failures);
-
-          if (outcome.verified === null) {
-            agentFailures.push(
-              "the debug output could not be interpreted, so this agent's permissions were not verified",
-            );
-          }
-        } catch (error) {
-          agentFailures.push(
-            `the binary could not report on "${agent}": ${error instanceof Error ? error.message : "unknown error"}`,
-          );
-        }
+      if (outcome.verified === null) {
+        agentFailures.push(
+          "the listing could not be interpreted, so this agent's permissions were not verified",
+        );
       }
 
       failures.push(...agentFailures.map((failure) => `${agent}: ${failure}`));
@@ -422,7 +534,7 @@ export async function runOpenCodeConfigSmokeTest(
     return {
       status: "skipped",
       reason: `The configuration smoke test could not run: ${error instanceof Error ? error.message : "unknown error"}`,
-      capabilities: await probeOpenCodeCapabilities({ command }),
+      capabilities: await probeOpenCodeCapabilities({ command, ...childOptions(options ?? {}) }),
       agents: [],
       failures: [],
       directory: kept,

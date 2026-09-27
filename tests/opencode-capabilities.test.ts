@@ -2,12 +2,12 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  REQUIRED_RUN_FLAGS,
   TARGET_OPENCODE_MAJOR,
   advertisesFlag,
   describeCapabilities,
   describeSmokeTest,
   missingRunCapabilities,
+  parseAgentListing,
   parseMajorVersion,
   probeOpenCodeCapabilities,
   runOpenCodeConfigSmokeTest,
@@ -66,50 +66,360 @@ async function fakeBinary(replies: Readonly<Record<string, string>>): Promise<st
   return path;
 }
 
+/*
+ * The help strings below are copied from real binaries, not written to fit the adapter.
+ *
+ * `V2_*` is the help that OpenCode 2.0.18 actually prints, including the two facts that make this
+ * milestone's probe necessary: the version is tagged (`opencode v2.0.18`), and the agent listing is
+ * the plural `debug agents`. `V1_*` is what OpenCode 1.18.18 actually prints, including the singular
+ * `debug agent <name>` and the `agent list` command that V2 removed. Keeping both real is what makes
+ * a fixture unable to pass by accident: a V1 binary advertising the V2 command, or a V2 binary
+ * advertising the V1 one, would have to be written by hand and would show up in review.
+ */
+
 const V2_ROOT_HELP = [
-  "Usage: opencode [options] [command]",
+  "DESCRIPTION",
+  "  OpenCode command line interface",
   "",
-  "Options:",
-  "  --pure            Run in pure mode",
-  "  -h, --help        Display this help",
+  "USAGE",
+  "  opencode <subcommand> [flags] [<directory>]",
   "",
-  "Commands:",
-  "  run [message..]   Run opencode in non-interactive mode",
-  "  debug             Debug commands",
+  "ARGUMENTS",
+  "  directory string    Directory to start OpenCode in (optional)",
+  "",
+  "FLAGS",
+  "  --standalone            Run with a private server instead of the background service",
+  "  --server string         Connect to a server URL instead of the background service",
+  "  --auto                  Auto-approve permissions that are not explicitly denied",
+  "  --continue, -c          Continue the last session",
+  "  --session, -s string    Session ID to continue",
+  "  --prompt string         Prompt to use",
+  "",
+  "GLOBAL FLAGS",
+  "  --help, -h                                                          Show help information",
+  "  --version, -v                                                       Show version information",
+  "  --wizard                                                            Start wizard mode for a command",
+  '  --completions <bash|zsh|fish|sh>                                    Print shell completion script (choices: bash, zsh, fish, sh)',
+  "  --log-level <all|trace|debug|info|warn|warning|error|fatal|none>    Sets the minimum log level (choices: all, trace, debug, info, warn, warning, error, fatal, none)",
+  "  --print-logs                                                        Print logs to stderr (server logs require --standalone)",
+  "",
+  "SUBCOMMANDS",
+  "  upgrade, update    Upgrade OpenCode to the latest or a specific version",
+  "  uninstall          Uninstall OpenCode and remove related files",
+  "  api                Make a request to the running server",
+  "  debug              Debugging and troubleshooting tools",
+  "  models             List all available models",
+  "  run                Run OpenCode with a message",
+  "  serve              Start the v2 API and web server",
 ].join("\n");
 
 const V2_RUN_HELP = [
-  "Usage: opencode run [options] [message..]",
+  "DESCRIPTION",
+  "  Run OpenCode with a message",
   "",
-  "Options:",
-  "  --agent <agent>          Agent to use",
-  "  --model <model>          Model to use in the format of provider/model",
-  "  --format <format>        Output format (default: \"default\", options: \"text\", \"json\")",
-  "  --dir <directory>        Directory to run in",
-  "  --auto                   Automatically approve permissions",
+  "USAGE",
+  "  opencode run [flags] [<message...>]",
+  "",
+  "ARGUMENTS",
+  "  message... string    Message to send (optional)",
+  "",
+  "FLAGS",
+  "  --standalone            Run with a private server instead of the background service",
+  "  --server string         Connect to a server URL instead of the background service",
+  "  --continue, -c          Continue the last session",
+  "  --session, -s string    Session ID to continue",
+  "  --fork                  Fork the session before continuing",
+  "  --model, -m string      Model to use in the format provider/model#variant",
+  "  --agent string          Agent to use",
+  "  --format choice         Output format (choices: default, json)",
+  "  --file, -f string       File to attach to the message",
+  "  --title string          Session title",
+  "  --thinking              Show thinking blocks",
+  "  --auto                  Auto-approve permissions that are not explicitly denied",
+  "",
+  "GLOBAL FLAGS",
+  "  --help, -h                                                          Show help information",
+  "  --version, -v                                                       Show version information",
 ].join("\n");
 
-const V2_DEBUG_AGENT_HELP = [
-  "Usage: opencode debug agent [options] [command]",
+const V2_DEBUG_HELP = [
+  "DESCRIPTION",
+  "  Debugging and troubleshooting tools",
+  "",
+  "USAGE",
+  "  opencode debug <subcommand> [flags]",
+  "",
+  "GLOBAL FLAGS",
+  "  --help, -h                                                          Show help information",
+  "  --version, -v                                                       Show version information",
+  "",
+  "SUBCOMMANDS",
+  "  agents    List all agents",
+  "  config    List configuration sources",
+  "  paths     Show global paths (data, config, cache, state)",
+].join("\n");
+
+const V2_DEBUG_AGENTS_HELP = [
+  "DESCRIPTION",
+  "  List all agents",
+  "",
+  "USAGE",
+  "  opencode debug agents [flags]",
+  "",
+  "GLOBAL FLAGS",
+  "  --help, -h                                                          Show help information",
+  "  --version, -v                                                       Show version information",
+].join("\n");
+
+const V1_ROOT_HELP = [
+  "Usage: opencode [options] [command]",
+  "",
+  "Options:",
+  "  -h, --help        Display this help",
+  "  -v, --version     Display version number",
+  "  --pure            Run in pure mode",
   "",
   "Commands:",
-  "  list   List all configured agents",
+  "  run [message..]   Run opencode in non-interactive mode",
+  "  agent             Manage agents",
+  "  debug             Debug commands",
 ].join("\n");
 
 const V1_RUN_HELP = [
   "Usage: opencode run [options] [message..]",
   "",
   "Options:",
-  "  --model <model>   Model to use",
+  "  --agent <agent>   Agent to use",
+  "  --format <format> Output format (default: \"default\")",
   "  --dir <dir>       Directory to run in",
 ].join("\n");
 
+const V1_DEBUG_HELP = [
+  "Usage: opencode debug [options] [command]",
+  "",
+  "Commands:",
+  "  opencode debug agent <name>  show agent configuration details",
+  "  opencode debug config        List configuration sources",
+].join("\n");
+
+const V1_DEBUG_AGENT_HELP = [
+  "Usage: opencode debug agent <name> [options]",
+  "",
+  "Options:",
+  "  --tool <tool>   Tool id to execute",
+].join("\n");
+
 const V2_REPLIES: Readonly<Record<string, string>> = {
-  "--version": "2.0.6\n",
+  "--version": "opencode v2.0.18\n",
   "--help": V2_ROOT_HELP,
   "run --help": V2_RUN_HELP,
-  "debug agent --help": V2_DEBUG_AGENT_HELP,
+  "debug --help": V2_DEBUG_HELP,
+  "debug agents --help": V2_DEBUG_AGENTS_HELP,
 };
+
+const V1_REPLIES: Readonly<Record<string, string>> = {
+  "--version": "1.18.18\n",
+  "--help": V1_ROOT_HELP,
+  "run --help": V1_RUN_HELP,
+  "debug --help": V1_DEBUG_HELP,
+  "debug agent --help": V1_DEBUG_AGENT_HELP,
+};
+
+/**
+ * A reply table with one command removed.
+ *
+ * The stand-in binary answers anything it has a reply for and exits non-zero for anything it does
+ * not, which is how a test says "this command does not exist here" rather than "this command printed
+ * something unhelpful". Both are worth testing, and conflating them would make an unreadable help
+ * look like an absent command.
+ */
+function without(
+  replies: Readonly<Record<string, string>>,
+  key: string,
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(Object.entries(replies).filter(([name]) => name !== key));
+}
+
+/**
+ * The ruleset OpenCode 2.0.18 gives every agent before the agent's own rules are appended.
+ *
+ * This is the real base, copied out of a `debug agents` payload. It is here because it is the reason
+ * the generated rules are load-bearing: the base allows everything, so an agent whose own rules were
+ * not read is left with full access, and only the appended rules take that away.
+ */
+const V2_BASE_RULES = [
+  { action: "*", resource: "*", effect: "allow" },
+  { action: "external_directory", resource: "*", effect: "ask" },
+  { action: "read", resource: "*.env", effect: "ask" },
+  { action: "read", resource: "*.env.*", effect: "ask" },
+  { action: "read", resource: "*.env.example", effect: "allow" },
+  { action: "external_directory", resource: "/home/u/.local/share/opencode/shell/*/*", effect: "allow" },
+  { action: "external_directory", resource: "/home/u/.local/share/opencode/tool-output/*", effect: "allow" },
+  { action: "external_directory", resource: "/tmp/opencode/*", effect: "allow" },
+  { action: "external_directory", resource: "/home/u/.config/opencode/*", effect: "allow" },
+  { action: "question", resource: "*", effect: "allow" },
+] as const;
+
+const UNIVERSAL_DENIALS = [
+  "shell",
+  "subagent",
+  "skill",
+  "webfetch",
+  "websearch",
+  "external_directory",
+  "question",
+  "plan_enter",
+  "plan_exit",
+  "execute",
+] as const;
+
+const PROTECTED_PATHS = [
+  ".agentflow",
+  ".agentflow/*",
+  "*.agentflow",
+  "*.agentflow/*",
+  "*.agentflow.*",
+  ".git",
+  ".git/*",
+  "*.git",
+  "*.git/*",
+] as const;
+
+interface Rule {
+  readonly action: string;
+  readonly resource: string;
+  readonly effect: string;
+}
+
+function rules(): Rule[] {
+  return V2_BASE_RULES.map((rule) => ({ ...rule }));
+}
+
+/** The ruleset a generated read-only role resolves to. */
+function resolvedReadOnlyRules(): Rule[] {
+  const out = rules();
+
+  out.push({ action: "*", resource: "*", effect: "deny" });
+  out.push({ action: "edit", resource: "*", effect: "deny" });
+
+  for (const action of UNIVERSAL_DENIALS) {
+    out.push({ action, resource: "*", effect: "deny" });
+  }
+
+  for (const action of ["read", "glob", "grep"]) {
+    out.push({ action, resource: "*", effect: "allow" });
+  }
+
+  for (const resource of [...PROTECTED_PATHS, "*.env", "*.env.*"]) {
+    out.push({ action: "read", resource, effect: "deny" });
+  }
+
+  return out;
+}
+
+/** The ruleset a generated write-capable role resolves to. */
+function resolvedWriteCapableRules(): Rule[] {
+  const out = rules();
+
+  out.push({ action: "*", resource: "*", effect: "deny" });
+
+  for (const action of UNIVERSAL_DENIALS) {
+    out.push({ action, resource: "*", effect: "deny" });
+  }
+
+  for (const action of ["read", "glob", "grep"]) {
+    out.push({ action, resource: "*", effect: "allow" });
+  }
+
+  out.push({ action: "edit", resource: "*", effect: "allow" });
+
+  for (const resource of PROTECTED_PATHS) {
+    out.push({ action: "edit", resource, effect: "deny" });
+  }
+
+  for (const resource of [...PROTECTED_PATHS, "*.env", "*.env.*"]) {
+    out.push({ action: "read", resource, effect: "deny" });
+  }
+
+  return out;
+}
+
+const WRITE_CAPABLE_AGENTS = new Set(["implementer", "fixer"]);
+
+const ALL_AGENTS = [
+  "griller",
+  "planner",
+  "plan-reviewer",
+  "implementer",
+  "code-reviewer",
+  "scope-reviewer",
+  "verifier",
+  "fixer",
+  "security-reviewer",
+  "final-gate-reviewer",
+  "summarizer",
+] as const;
+
+/** A `debug agents` payload in the shape OpenCode 2.0.18 really prints. */
+function listing(options?: { readonly resolved: boolean }): string {
+  const resolved = options?.resolved ?? true;
+
+  const agents = ALL_AGENTS.map((id) => ({
+    id,
+    name: id,
+    request: { settings: {}, headers: {}, body: {} },
+    mode: "primary",
+    hidden: false,
+    permissions: resolved
+      ? WRITE_CAPABLE_AGENTS.has(id)
+        ? resolvedWriteCapableRules()
+        : resolvedReadOnlyRules()
+      : rules(),
+  }));
+
+  return `${JSON.stringify(agents, null, 2)}\n`;
+}
+
+/**
+ * A stand-in that reproduces the V2 background service's start-up behaviour.
+ *
+ * The real 2.0.18 binary answers `debug agents` with an empty array on the first call after it has to
+ * start its service, and answers properly from the second call on. This counts its own invocations in
+ * a file so a test can prove the smoke test kept asking instead of believing the first answer.
+ */
+async function fakeBinaryThatWarmsUp(
+  replies: Readonly<Record<string, string>>,
+  warmListing: string,
+  counterPath: string,
+  options?: { readonly alwaysWarm?: boolean },
+): Promise<string> {
+  const root = await makeRoot();
+  const path = join(root, "warming-opencode.mjs");
+  const script = [
+    "#!/usr/bin/env node",
+    'import { appendFileSync, existsSync, readFileSync } from "node:fs";',
+    `const replies = ${JSON.stringify(replies)};`,
+    `const warmListing = ${JSON.stringify(warmListing)};`,
+    `const counter = ${JSON.stringify(counterPath)};`,
+    'const key = process.argv.slice(2).join(" ");',
+    "if (key === 'debug agents') {",
+    "  appendFileSync(counter, 'call\\n');",
+    "  const calls = existsSync(counter) ? readFileSync(counter, 'utf8').split('\\n').length - 1 : 0;",
+    `  if (${options?.alwaysWarm === true ? "false" : "calls < 2"}) {`,
+    "    process.stdout.write('[]');",
+    "    process.exit(0);",
+    "  }",
+    "  process.stdout.write(warmListing);",
+    "  process.exit(0);",
+    "}",
+    "process.stdout.write(replies[key] ?? replies['*']);",
+  ].join("\n");
+
+  await writeFile(path, `${script}\n`, { encoding: "utf8", mode: 0o755 });
+  await chmod(path, 0o755);
+
+  return path;
+}
 
 interface TracedCall {
   readonly args: readonly string[];
@@ -139,7 +449,7 @@ function unknownCapabilities(command: string): OpenCodeCapabilities {
     modelFlagAvailable: null,
     autoFlagAvailable: null,
     pureFlagAvailable: null,
-    debugAgentAvailable: null,
+    debugAgentsAvailable: null,
     failures: [],
   };
 }
@@ -153,8 +463,33 @@ describe("reading flags out of help text", () => {
   });
 
   it("does not match a flag that is not there", () => {
-    expect(advertisesFlag(V1_RUN_HELP, "--agent")).toBe(false);
-    expect(advertisesFlag(V1_RUN_HELP, "--format")).toBe(false);
+    expect(advertisesFlag(V1_RUN_HELP, "--agent")).toBe(true);
+    expect(advertisesFlag("Options:\n  --model <model>\n", "--agent")).toBe(false);
+  });
+
+  it("reads the V2 choice-style format line as --format json", () => {
+    // V2 prints `--format choice  Output format (choices: default, json)` rather than naming the
+    // value in the flag itself, so the value has to be found in the choices list.
+    expect(advertisesFlag(V2_RUN_HELP, "--format")).toBe(true);
+    expect(V2_RUN_HELP).toContain("json");
+  });
+});
+
+describe("reading the version", () => {
+  it("reads the major version out of the version string", () => {
+    expect(parseMajorVersion("2.0.6")).toBe(2);
+    expect(parseMajorVersion("1.18.18\n")).toBe(1);
+    expect(parseMajorVersion("")).toBeNull();
+    expect(parseMajorVersion(null)).toBeNull();
+    expect(TARGET_OPENCODE_MAJOR).toBe(2);
+  });
+
+  it("reads the tagged version string the V2 CLI really prints", () => {
+    // This is OpenCode 2.0.18's actual output. A leading-digit-only reader returns null here, which
+    // would report every real V2 binary as having an unknown dialect and skip the check entirely.
+    expect(parseMajorVersion("opencode v2.0.18")).toBe(2);
+    expect(parseMajorVersion("opencode v2.0.18\n")).toBe(2);
+    expect(parseMajorVersion("opencode-ai 1.18.18")).toBe(1);
   });
 });
 
@@ -172,23 +507,34 @@ describe("probing a local binary", () => {
     expect(missingRunCapabilities(capabilities)).toEqual([]);
   });
 
-  it("reports every V2 run flag as present when the binary advertises them", async () => {
+  it("reads a real V2 binary as V2 and finds the plural agent listing", async () => {
     const command = await fakeBinary(V2_REPLIES);
     const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
 
     expect(capabilities.executableFound).toBe(true);
-    expect(capabilities.version).toBe("2.0.6");
+    expect(capabilities.version).toBe("opencode v2.0.18");
+    expect(capabilities.majorVersion).toBe(2);
+    expect(capabilities.versionSupportsV2).toBe(true);
     expect(capabilities.runCommandAvailable).toBe(true);
-    expect(capabilities.pureFlagAvailable).toBe(true);
-    expect(capabilities.debugAgentAvailable).toBe(true);
-    expect(capabilities.failures).toEqual([]);
-
-    for (const flag of REQUIRED_RUN_FLAGS) {
-      expect(missingRunCapabilities(capabilities)).not.toContain(flag);
-    }
-
+    expect(capabilities.agentFlagAvailable).toBe(true);
+    expect(capabilities.formatFlagAvailable).toBe(true);
     expect(capabilities.formatJsonAvailable).toBe(true);
-    expect(missingRunCapabilities(capabilities)).toEqual([]);
+    expect(capabilities.modelFlagAvailable).toBe(true);
+    expect(capabilities.autoFlagAvailable).toBe(true);
+    expect(capabilities.debugAgentsAvailable).toBe(true);
+    expect(capabilities.failures).toEqual([]);
+  });
+
+  it("reports the flags this V2 binary genuinely does not have", async () => {
+    // V2.0.18 takes the working directory as a positional argument and has no `--pure` flag. The
+    // probe must say so rather than assume a V2 binary has whatever the invocation happens to pass,
+    // because `missingRunCapabilities` is what stands between a wrong flag and a stage run.
+    const command = await fakeBinary(V2_REPLIES);
+    const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
+
+    expect(capabilities.dirFlagAvailable).toBe(false);
+    expect(capabilities.pureFlagAvailable).toBe(false);
+    expect(missingRunCapabilities(capabilities)).toEqual(["--dir"]);
   });
 
   it("asks only version and help commands, and never runs a model", async () => {
@@ -200,16 +546,13 @@ describe("probing a local binary", () => {
 
     const seen = (await readTrace(trace)).map((call) => call.args.join(" "));
 
-    expect(seen).toEqual(["--version", "--help", "run --help", "debug agent --help"]);
+    expect(seen).toEqual(["--version", "--help", "run --help", "debug --help", "debug agents --help"]);
   });
 
   it("does not claim --format json when the binary only offers a plain format", async () => {
     const command = await fakeBinary({
       ...V2_REPLIES,
-      "run --help": V2_RUN_HELP.replace(
-        'Output format (default: "default", options: "text", "json")',
-        'Output format (default: "default")',
-      ),
+      "run --help": V2_RUN_HELP.replace("Output format (choices: default, json)", "Output format"),
     });
     const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
 
@@ -217,44 +560,70 @@ describe("probing a local binary", () => {
     expect(capabilities.formatJsonAvailable).toBe(false);
   });
 
-  it("reads the major version out of the version string", () => {
-    expect(parseMajorVersion("2.0.6")).toBe(2);
-    expect(parseMajorVersion("1.18.18\n")).toBe(1);
-    expect(parseMajorVersion("v2.1.0")).toBeNull();
-    expect(parseMajorVersion("")).toBeNull();
-    expect(parseMajorVersion(null)).toBeNull();
-    expect(TARGET_OPENCODE_MAJOR).toBe(2);
-  });
-
   it("cannot tell V1 from V2 by flags alone, and says so through the version", async () => {
-    // A real V1.18.18 binary advertises every flag the adapter uses. The only thing that reveals it
-    // is the version, which is why the version is probed separately.
-    const command = await fakeBinary({
-      "--version": "1.18.18\n",
-      "--help": V2_ROOT_HELP,
-      "run --help": V2_RUN_HELP,
-      "debug agent --help": V2_DEBUG_AGENT_HELP,
-    });
+    // A real V1.18.18 binary advertises `--agent`, `--format`, `--dir`, `--model`, and `--auto` just
+    // as V2 does. The only thing that reveals it is the version.
+    const command = await fakeBinary({ ...V1_REPLIES, "run --help": V2_RUN_HELP });
     const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
 
     expect(capabilities.executableFound).toBe(true);
     expect(capabilities.version).toBe("1.18.18");
     expect(capabilities.majorVersion).toBe(1);
     expect(capabilities.versionSupportsV2).toBe(false);
-    expect(missingRunCapabilities(capabilities)).toEqual([]);
     expect(capabilities.failures.join(" ")).toContain("predates the V2 configuration");
   });
 
+  it("does not accept the singular V1 debug command as the V2 agent listing", async () => {
+    // V1.18.18 has `debug agent <name>` and no `debug agents`. Matching the substring `agent` would
+    // pass this binary and then send it an argument list it rejects.
+    const command = await fakeBinary(V1_REPLIES);
+    const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
+
+    expect(capabilities.debugAgentsAvailable).toBe(false);
+  });
+
+  it("does not accept a V2 binary that lists the command but cannot print its help", async () => {
+    const command = await fakeBinary(without(V2_REPLIES, "debug agents --help"));
+    const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
+
+    expect(capabilities.debugAgentsAvailable).toBe(false);
+    expect(capabilities.failures).toContain(
+      `${command} debug agents --help did not succeed, so debug agents support is unknown.`,
+    );
+  });
+
+  it("still finds the listing when only the debug help is unreadable", async () => {
+    // The command's own help is the evidence that counts, so a debug help that could not be read
+    // does not hide a command that demonstrably works.
+    const command = await fakeBinary(without(V2_REPLIES, "debug --help"));
+    const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
+
+    expect(capabilities.debugAgentsAvailable).toBe(true);
+    expect(capabilities.failures).toContain(
+      `${command} debug --help did not succeed, so debug subcommands are unknown.`,
+    );
+  });
+
+  it("leaves the agent listing unknown rather than absent when neither help is readable", async () => {
+    const command = await fakeBinary(without(without(V2_REPLIES, "debug --help"), "debug agents --help"));
+    const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
+
+    expect(capabilities.debugAgentsAvailable).toBeNull();
+    expect(capabilities.failures).toContain(
+      `${command} debug --help did not succeed, so debug subcommands are unknown.`,
+    );
+  });
+
   it("accepts a newer major version as unread but unverified rather than compatible", async () => {
-    const command = await fakeBinary({ ...V2_REPLIES, "--version": "3.0.0\n" });
+    const command = await fakeBinary({ ...V2_REPLIES, "--version": "opencode v3.0.0\n" });
     const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
 
     expect(capabilities.majorVersion).toBe(3);
     expect(capabilities.versionSupportsV2).toBe(true);
   });
 
-  it("leaves version support unknown when the version string has no leading number", async () => {
-    const command = await fakeBinary({ ...V2_REPLIES, "--version": "build 20260901\n" });
+  it("leaves version support unknown when the version string has no version in it", async () => {
+    const command = await fakeBinary({ ...V2_REPLIES, "--version": "build unknown\n" });
     const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
 
     expect(capabilities.majorVersion).toBeNull();
@@ -263,9 +632,8 @@ describe("probing a local binary", () => {
 
   it("reports the V1 run help as missing only the flags V1 really lacks", async () => {
     const command = await fakeBinary({
-      ...V2_REPLIES,
-      "--version": "1.18.18\n",
-      "run --help": V1_RUN_HELP,
+      ...V1_REPLIES,
+      "run --help": ["Usage: opencode run [options] [message..]", "", "Options:", "  --dir <dir>       Directory to run in"].join("\n"),
     });
     const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
 
@@ -273,18 +641,6 @@ describe("probing a local binary", () => {
     expect(capabilities.formatFlagAvailable).toBe(false);
     expect(capabilities.dirFlagAvailable).toBe(true);
     expect(missingRunCapabilities(capabilities)).toEqual(["--agent", "--format"]);
-  });
-
-  it("leaves a flag unknown when the help could not be read", async () => {
-    const command = await fakeBinary({ "--version": "2.0.6\n", "--help": "no commands here" });
-    const capabilities = await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 });
-
-    expect(capabilities.formatFlagAvailable).toBeNull();
-    expect(capabilities.formatJsonAvailable).toBeNull();
-    expect(capabilities.failures).toContain(
-      `${command} run --help did not succeed, so run flags are unknown.`,
-    );
-    expect(missingRunCapabilities(capabilities)).toEqual([]);
   });
 
   it("never turns an unreadable help into a missing flag", async () => {
@@ -301,8 +657,9 @@ describe("probing a local binary", () => {
       await probeOpenCodeCapabilities({ command, timeoutMs: 20_000 }),
     );
 
-    expect(description).toContain("OpenCode 2.0.6");
+    expect(description).toContain("OpenCode opencode v2.0.18");
     expect(description).toContain("--agent: yes");
+    expect(description).toContain("debug agents: yes");
     expect(description.split("\n")).toHaveLength(1);
   });
 
@@ -314,6 +671,47 @@ describe("probing a local binary", () => {
 
     expect(description).toContain("@opencode/cli");
     expect(description).toContain("was not found");
+  });
+});
+
+describe("parsing the agent listing", () => {
+  it("reads the array shape `opencode debug agents` prints", () => {
+    const parsed = parseAgentListing(listing());
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.map((agent) => agent.id)).toEqual([...ALL_AGENTS]);
+    expect(parsed?.[0]?.rules).not.toBeNull();
+  });
+
+  it("refuses anything that is not a JSON array of identified agents", () => {
+    expect(parseAgentListing("")).toBeNull();
+    expect(parseAgentListing("not json")).toBeNull();
+    expect(parseAgentListing("{}")).toBeNull();
+    expect(parseAgentListing("null")).toBeNull();
+    expect(parseAgentListing('[{"name":"griller","permissions":[]}]')).toBeNull();
+    expect(parseAgentListing('[{"id":"","permissions":[]}]')).toBeNull();
+  });
+
+  it("reads an empty array as an empty listing rather than as unreadable", () => {
+    // The two are different facts. An empty array is a real answer: the binary ran and found nothing.
+    expect(parseAgentListing("[]")).toEqual([]);
+  });
+
+  it("keeps an entry whose permissions cannot be read, with no rules", () => {
+    const parsed = parseAgentListing('[{"id":"griller"},{"id":"planner","permissions":[{"effect":"maybe"}]}]');
+
+    expect(parsed).toEqual([
+      { id: "griller", rules: null },
+      { id: "planner", rules: null },
+    ]);
+  });
+
+  it("ignores fields this adapter does not know instead of rejecting the entry", () => {
+    const parsed = parseAgentListing(
+      '[{"id":"griller","name":"Griller","mode":"primary","hidden":false,"somethingNew":{"a":1},"permissions":[]}]',
+    );
+
+    expect(parsed).toEqual([{ id: "griller", rules: [] }]);
   });
 });
 
@@ -340,7 +738,7 @@ describe("the configuration smoke test", () => {
   });
 
   it("keeps its temporary project when asked, and removes it otherwise", async () => {
-    const command = await fakeBinary(V2_REPLIES);
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing() });
     const kept = await runOpenCodeConfigSmokeTest({ command, keepDirectory: true, timeoutMs: 20_000 });
 
     expect(kept.directory).not.toBeNull();
@@ -352,21 +750,162 @@ describe("the configuration smoke test", () => {
     expect(discarded.directory).toBeNull();
   });
 
-  it("skips rather than fails when debug agent support cannot be determined", async () => {
-    const command = await fakeBinary({ "--version": "2.0.6\n", "--help": "no commands here" });
+  it("passes when the binary resolves every generated role as written", async () => {
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing() });
     const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
 
-    expect(report.status).toBe("skipped");
     expect(report.failures).toEqual([]);
-    expect(report.reason).toContain("debug agent");
+    expect(report.agents).toHaveLength(ALL_AGENTS.length);
+    expect(report.agents.every((agent) => agent.discovered)).toBe(true);
+    expect(report.agents.every((agent) => agent.verified)).toBe(true);
+    expect(report.status).toBe("passed");
   });
 
-  it("skips a V1 binary rather than reporting its ignore of the generated rules as a failure", async () => {
-    const command = await fakeBinary({ ...V2_REPLIES, "--version": "1.18.18\n", "*": "{}" });
+  it("fails when the binary reports every role with its untouched default capabilities", async () => {
+    // This is what OpenCode 2.0.18 actually reports for an agent whose `permissions:` frontmatter it
+    // did not read: the base allow-everything ruleset and nothing else. Every role then has full
+    // access, so the report has to say so rather than pass on a listing that parsed cleanly.
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing({ resolved: false }) });
+    const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
+
+    expect(report.status).toBe("failed");
+    expect(report.agents.every((agent) => agent.verified === false)).toBe(true);
+    expect(report.failures.join(" ")).toContain("shell git status resolved to allow instead of deny");
+    expect(report.failures.join(" ")).toContain("edit .agentflow/session.json resolved to allow instead of deny");
+  });
+
+  it("leaves a role unverified rather than passing it when its permissions cannot be read", async () => {
+    const payload = JSON.parse(listing()) as { id: string; permissions?: unknown }[];
+
+    for (const agent of payload) {
+      if (agent.id === "planner") {
+        delete agent.permissions;
+      }
+    }
+
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": JSON.stringify(payload) });
+    const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
+
+    const planner = report.agents.find((agent) => agent.agent === "planner");
+
+    expect(planner?.discovered).toBe(true);
+    expect(planner?.verified).toBeNull();
+    expect(planner?.failures.join(" ")).toContain("no readable permissions array");
+  });
+
+  it("fails when the binary does not discover a generated role", async () => {
+    const payload = (JSON.parse(listing()) as { id: string }[]).filter((agent) => agent.id !== "verifier");
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": JSON.stringify(payload) });
+    const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
+
+    const verifier = report.agents.find((agent) => agent.agent === "verifier");
+
+    expect(report.status).toBe("failed");
+    expect(verifier?.discovered).toBe(false);
+    expect(verifier?.failures.join(" ")).toContain('did not list the agent "verifier"');
+  });
+
+  it("fails, and never passes, when the listing is not the array the parser reads", async () => {
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": "griller (primary)\n" });
+    const report = await runOpenCodeConfigSmokeTest({
+      command,
+      timeoutMs: 20_000,
+      readyTimeoutMs: 200,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.agents.every((agent) => agent.verified === null)).toBe(true);
+    expect(report.failures.join(" ")).toContain("not the JSON array of agents");
+  });
+
+  it("reports a listing the binary could not produce as a failure, not as an empty discovery", async () => {
+    const root = await makeRoot();
+    const path = join(root, "no-service-opencode.mjs");
+
+    await writeFile(
+      path,
+      [
+        "#!/usr/bin/env node",
+        `const replies = ${JSON.stringify(V2_REPLIES)};`,
+        'const key = process.argv.slice(2).join(" ");',
+        "if (key === 'debug agents') {",
+        "  process.stderr.write('Error: Timed out waiting for the background service to start');",
+        "  process.exit(1);",
+        "}",
+        "process.stdout.write(replies[key] ?? replies['*']);",
+      ].join("\n"),
+      { encoding: "utf8", mode: 0o755 },
+    );
+    await chmod(path, 0o755);
+
+    const report = await runOpenCodeConfigSmokeTest({
+      command: path,
+      timeoutMs: 20_000,
+      readyTimeoutMs: 200,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.agents.every((agent) => agent.verified === null)).toBe(true);
+    expect(report.failures.join(" ")).toContain("could not list the agents it discovered");
+  });
+
+  it("waits for a listing that accounts for the generated agents before judging it", async () => {
+    // A real V2 binary answers its first `debug agents` with an empty array while the background
+    // service it just started is still loading the directory, and answers the next one properly.
+    // Believing the first answer would report all eleven roles as missing.
+    const root = await makeRoot();
+    const state = join(root, "calls.txt");
+    const command = await fakeBinaryThatWarmsUp(V2_REPLIES, listing(), state);
+    const report = await runOpenCodeConfigSmokeTest({
+      command,
+      timeoutMs: 20_000,
+      readyTimeoutMs: 20_000,
+    });
+
+    const calls = (await readFile(state, "utf8")).split("\n").filter((line) => line === "call");
+
+    expect(calls.length).toBeGreaterThan(1);
+    expect(report.status).toBe("passed");
+    expect(report.agents.every((agent) => agent.discovered)).toBe(true);
+    expect(report.agents.every((agent) => agent.verified)).toBe(true);
+  });
+
+  it("still fails, rather than waiting for ever, when the agents never appear", async () => {
+    const root = await makeRoot();
+    const state = join(root, "calls.txt");
+    // The same cold-service answer, every time: a listing that never accounts for the generated
+    // agents. Waiting must end and report the truth rather than keep polling.
+    const command = await fakeBinaryThatWarmsUp(
+      V2_REPLIES,
+      JSON.stringify([{ id: "build", name: "Build", mode: "primary", hidden: false, permissions: [] }]),
+      state,
+      { alwaysWarm: true },
+    );
+    const report = await runOpenCodeConfigSmokeTest({
+      command,
+      timeoutMs: 20_000,
+      readyTimeoutMs: 400,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.agents.every((agent) => !agent.discovered)).toBe(true);
+    expect(report.failures.join(" ")).toContain('did not list the agent "griller"');
+  });
+
+  it("skips rather than fails when debug agents support cannot be determined", async () => {
+    const command = await fakeBinary({ "--version": "opencode v2.0.18\n", "--help": "no commands here" });
     const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
 
     expect(report.status).toBe("skipped");
     expect(report.failures).toEqual([]);
+    expect(report.reason).toContain("debug agents");
+  });
+
+  it("skips rather than fails when the binary advertises no debug agents", async () => {
+    const command = await fakeBinary({ ...V1_REPLIES, "run --help": V2_RUN_HELP });
+    const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
+
+    expect(report.status).toBe("skipped");
     expect(report.reason).toContain("1.18.18");
     expect(report.reason).toContain("silently ignore");
   });
@@ -379,22 +918,10 @@ describe("the configuration smoke test", () => {
     expect(report.reason).toContain("version could not be read");
   });
 
-  it("skips rather than fails when the binary advertises no debug agent", async () => {
-    const command = await fakeBinary({ ...V2_REPLIES, "debug agent --help": "no such command" });
-    const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
-
-    expect(report.status).toBe("skipped");
-    expect(report.reason).toContain("does not advertise");
-  });
-
   it("never runs a model, and asks the binary to skip its remote model catalog", async () => {
     const root = await makeRoot();
     const trace = join(root, "trace.log");
-    const command = await fakeBinary({
-      ...V2_REPLIES,
-      "agent list": "planner (primary)\n",
-      "*": "{}",
-    });
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing() });
 
     const report = await runOpenCodeConfigSmokeTest({
       command,
@@ -411,17 +938,43 @@ describe("the configuration smoke test", () => {
       expect(call.autoupdate).toBe("1");
     }
 
-    // Every invocation is a version, help, or inspection command. `run --help` is a help command;
-    // a stage run would be `run` with a prompt, and no such command appears.
-    const allowed = ["--version", "--help", "run --help", "debug agent --help", "agent list"];
+    // Every invocation is a version, a help, or the one agent listing. `run --help` is a help
+    // command; a stage run would be `run` with a prompt, and no such command appears.
+    const allowed = new Set(["--version", "--help", "run --help", "debug --help", "debug agents --help", "debug agents"]);
 
-    for (const command of commands) {
-      expect(allowed.includes(command) || command.startsWith("debug agent ")).toBe(true);
+    for (const seen of commands) {
+      expect(allowed.has(seen)).toBe(true);
     }
 
-    expect(commands).toContain("agent list");
-    expect(commands.some((command) => command.startsWith("debug agent "))).toBe(true);
-    expect(report.status).not.toBe("skipped");
+    // The listing is asked for once, not once per agent: V2 has no per-agent debug command at all.
+    expect(commands.filter((seen) => seen === "debug agents")).toHaveLength(1);
+    expect(commands.some((seen) => seen.startsWith("agent ") || seen.startsWith("debug agent "))).toBe(false);
+    expect(report.status).toBe("passed");
     await rm(report.directory ?? "", { recursive: true, force: true });
+  });
+
+  it("keeps the offline environment entries even when a caller tries to switch them off", async () => {
+    const root = await makeRoot();
+    const trace = join(root, "trace.log");
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing() });
+
+    await runOpenCodeConfigSmokeTest({
+      command,
+      timeoutMs: 20_000,
+      env: {
+        FAKE_OPENCODE_TRACE: trace,
+        OPENCODE_DISABLE_MODELS_FETCH: "0",
+        OPENCODE_DISABLE_AUTOUPDATE: "0",
+      },
+    });
+
+    const seen = await readTrace(trace);
+
+    expect(seen.length).toBeGreaterThan(0);
+
+    for (const call of seen) {
+      expect(call.modelsFetch).toBe("1");
+      expect(call.autoupdate).toBe("1");
+    }
   });
 });

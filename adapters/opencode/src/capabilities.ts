@@ -22,11 +22,12 @@ export interface OpenCodeCapabilities {
   /**
    * Whether the binary is new enough to read the V2 configuration this adapter generates.
    *
-   * This is not redundant with the flag fields. A V1 CLI advertises `--agent`, `--format`,
-   * `--pure`, and `debug agent` just as V2 does, so a missing flag never reveals the version. What a
-   * V1 CLI does is silently ignore a `permissions:` list, which leaves every role with the default
-   * capability set. Reading the version is the only thing that catches that, and it is why this
-   * field is not derived from the flag probe.
+   * This is not redundant with the flag fields, and the reason is specific. V1 advertises
+   * `--agent`, `--format`, and `--auto` exactly as V2 does, and V1 does advertise a debug subcommand
+   * for agents, so a flag probe alone cannot tell the two CLIs apart. What V1 does with a
+   * `permissions:` list is silently ignore it, which leaves every role with the default capability
+   * set. Reading the version is the only thing that catches that, and it is why this field is not
+   * derived from the flag probe.
    */
   readonly versionSupportsV2: boolean | null;
   /** Whether `opencode run` is a command the binary advertises. */
@@ -40,8 +41,15 @@ export interface OpenCodeCapabilities {
   readonly autoFlagAvailable: boolean | null;
   /** `--pure` is a global flag, so it is read from the root help rather than the run help. */
   readonly pureFlagAvailable: boolean | null;
-  /** Whether `opencode debug agent` exists, which the configuration smoke test needs. */
-  readonly debugAgentAvailable: boolean | null;
+  /**
+   * Whether `opencode debug agents` exists, which the configuration smoke test needs.
+   *
+   * This is the plural, model-free listing V2 provides. V1 has no such command: it offers
+   * `opencode agent list` and a singular `opencode debug agent <name>`, and V2 has neither. A probe
+   * that only looked for the substring `agent` would accept the V1 command and then send V2 an
+   * argument list it rejects, so the check is anchored on the exact subcommand name.
+   */
+  readonly debugAgentsAvailable: boolean | null;
   /** Human-readable reasons a field could not be determined. */
   readonly failures: readonly string[];
 }
@@ -59,9 +67,20 @@ export const DEFAULT_CAPABILITY_PROBE_TIMEOUT_MS = 10_000;
 /** The OpenCode major version whose configuration this adapter generates. */
 export const TARGET_OPENCODE_MAJOR = 2;
 
-/** The leading major version of an `opencode --version` string, or `null` if there is not one. */
+/** The one OpenCode command that reports resolved agent permissions without calling a model. */
+export const DEBUG_AGENTS_COMMAND = "agents";
+
+/**
+ * The leading major version of an `opencode --version` string, or `null` if there is not one.
+ *
+ * The two supported CLIs do not print the same thing. V1 prints the bare number (`1.18.18`) while V2
+ * prints a prefixed, explicitly tagged one (`opencode v2.0.18`). Matching only a leading digit would
+ * read every V2 binary as having no version at all, which is the one answer that cannot be acted on:
+ * it would report the dialect as unknown and skip the configuration check instead of reading it.
+ * Leading non-numeric text is therefore skipped, and the first number after it is the major version.
+ */
 export function parseMajorVersion(version: string | null): number | null {
-  const match = /^(\d+)/u.exec(version?.trim() ?? "");
+  const match = /^\D*(\d+)/u.exec(version?.trim() ?? "");
 
   if (match?.[1] === undefined) {
     return null;
@@ -113,10 +132,6 @@ export function advertisesFlag(help: string, flag: string): boolean {
   return new RegExp(`(^|[\\s|'\`"])${escaped}([\\s|,'"\`:]|$)`, "mu").test(help);
 }
 
-function advertisesCommand(help: string, name: string): boolean {
-  return new RegExp(`(^|[\\s|'\`"])${name}([\\s|,'"\`:]|$)`, "mu").test(help);
-}
-
 function unadvertised(help: HelpProbe, flag: string): boolean | null {
   return help.available === true ? advertisesFlag(help.text, flag) : null;
 }
@@ -141,9 +156,11 @@ function advertisesJsonFormat(help: HelpProbe): boolean | null {
  * Inspects a locally installed OpenCode binary.
  *
  * It runs only safe, local, provider-free commands: `opencode --version`, `opencode --help`,
- * `opencode run --help`, and `opencode debug agent --help`. It never contacts a model, never
- * contacts the network, and never writes anything. A missing or broken binary is a normal result,
- * reported as `executableFound: false` with every other field left unknown.
+ * `opencode run --help`, `opencode debug --help`, and `opencode debug agents --help`. It never
+ * contacts a model, never contacts the network, and never writes anything. In particular the
+ * `debug agents` probe is given `--help`, which prints the subcommand's usage and returns without
+ * starting the background service that the real listing needs. A missing or broken binary is a
+ * normal result, reported as `executableFound: false` with every other field left unknown.
  */
 export async function probeOpenCodeCapabilities(
   options?: ProbeOpenCodeCapabilitiesOptions,
@@ -201,7 +218,7 @@ export async function probeOpenCodeCapabilities(
       modelFlagAvailable: null,
       autoFlagAvailable: null,
       pureFlagAvailable: null,
-      debugAgentAvailable: null,
+      debugAgentsAvailable: null,
       failures,
     };
   }
@@ -218,15 +235,26 @@ export async function probeOpenCodeCapabilities(
     failures.push(`${command} run --help did not succeed, so run flags are unknown.`);
   }
 
-  const debugHelp = await readHelp(
+  const debugHelp = await readHelp(command, ["debug", "--help"], "The OpenCode debug help probe", runOptions);
+
+  if (debugHelp.available !== true) {
+    failures.push(`${command} debug --help did not succeed, so debug subcommands are unknown.`);
+  }
+
+  // The listing's own help is asked for with `--help` so the probe stays a pure help read. Running
+  // `debug agents` for real would be a different kind of command: V2 answers it from a background
+  // service, so it is the smoke test's call to make, not the capability probe's.
+  const debugAgentsHelp = await readHelp(
     command,
-    ["debug", "agent", "--help"],
-    "The OpenCode debug agent help probe",
+    ["debug", DEBUG_AGENTS_COMMAND, "--help"],
+    `The OpenCode debug ${DEBUG_AGENTS_COMMAND} help probe`,
     runOptions,
   );
 
-  if (debugHelp.available !== true) {
-    failures.push(`${command} debug agent --help did not succeed, so debug agent support is unknown.`);
+  if (debugAgentsHelp.available !== true) {
+    failures.push(
+      `${command} debug ${DEBUG_AGENTS_COMMAND} --help did not succeed, so debug ${DEBUG_AGENTS_COMMAND} support is unknown.`,
+    );
   }
 
   return {
@@ -243,10 +271,28 @@ export async function probeOpenCodeCapabilities(
     modelFlagAvailable: unadvertised(runHelp, "--model"),
     autoFlagAvailable: unadvertised(runHelp, "--auto"),
     pureFlagAvailable: rootHelp.available === true ? advertisesFlag(rootHelp.text, "--pure") : null,
-    debugAgentAvailable:
-      debugHelp.available === true ? advertisesCommand(debugHelp.text, "agent") : null,
+    debugAgentsAvailable: advertiseDebugAgents(debugHelp, debugAgentsHelp),
     failures,
   };
+}
+
+/**
+ * `debug agents` is available when its own help is readable, and is definitively unavailable when it
+ * is not and the debug help was readable too.
+ *
+ * The command's own help is the evidence that counts, because it is the only one that answers
+ * "does this command work here". The debug help is the corroborating list, and it settles the case
+ * where the command's help could not be read at all: a readable list that does not include the
+ * subcommand, or a command that will not start, is a real `false` rather than a reason to look again.
+ * `null` is reserved for the one case with no evidence either way, which is when neither help could
+ * be read.
+ */
+function advertiseDebugAgents(debugHelp: HelpProbe, debugAgentsHelp: HelpProbe): boolean | null {
+  if (debugAgentsHelp.available === true) {
+    return true;
+  }
+
+  return debugHelp.available === true ? false : null;
 }
 
 /**
@@ -291,6 +337,6 @@ export function describeCapabilities(capabilities: OpenCodeCapabilities): string
     `--format json: ${known(capabilities.formatJsonAvailable)},`,
     `--dir: ${known(capabilities.dirFlagAvailable)},`,
     `--pure: ${known(capabilities.pureFlagAvailable)},`,
-    `debug agent: ${known(capabilities.debugAgentAvailable)}.`,
+    `debug agents: ${known(capabilities.debugAgentsAvailable)}.`,
   ].join(" ");
 }

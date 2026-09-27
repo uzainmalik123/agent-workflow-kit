@@ -114,6 +114,7 @@ export type {
 
 export {
   advertisesFlag,
+  DEBUG_AGENTS_COMMAND,
   DEFAULT_CAPABILITY_PROBE_TIMEOUT_MS,
   describeCapabilities,
   missingRunCapabilities,
@@ -125,12 +126,16 @@ export {
 export type { OpenCodeCapabilities, ProbeOpenCodeCapabilitiesOptions } from "./capabilities.js";
 
 export {
+  DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS,
+  DEFAULT_AGENT_LISTING_TIMEOUT_MS,
   DEFAULT_SMOKE_TEST_TIMEOUT_MS,
   describeSmokeTest,
+  parseAgentListing,
   runOpenCodeConfigSmokeTest,
   verifyRuleset,
 } from "./smoke-test.js";
 export type {
+  OpenCodeListedAgent,
   OpenCodeSmokeTestAgentReport,
   OpenCodeSmokeTestCheck,
   OpenCodeSmokeTestReport,
