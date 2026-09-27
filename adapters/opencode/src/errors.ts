@@ -9,7 +9,8 @@ export type OpenCodeAdapterErrorCode =
   | "empty_response"
   | "malformed_response"
   | "invalid_result"
-  | "unsafe_output_path";
+  | "unsafe_output_path"
+  | "project_plugin_detected";
 
 export interface OpenCodeAdapterErrorOptions {
   readonly cause?: unknown;

@@ -94,17 +94,72 @@ capability set - a malformed emitter that handed every stage full access. The re
 the emitted frontmatter as YAML and count list items, so a folded rule fails a unit test instead of
 appearing as eleven unrestricted agents in a live smoke test.
 
-`mode: primary` is set for every agent. V2 removed `--pure`, so plugin isolation is generated
-configuration instead: `opencode.json` sets `plugins: ["-*", "opencode.*"]`, which disables every
-plugin and then re-enables the `opencode.` namespace. A plugin is arbitrary code that can rewrite a
-system prompt, replace a tool, or register a new one, so a repository plugin discovered under
-`.opencode/plugins/` would otherwise be able to change what a verifier, reviewer, or implementer is
-allowed to do, and therefore what it reports. Everything OpenCode itself ships lives under
-`opencode.`, including `opencode.config.agent`, which loads the generated agents, and the permission
-machinery the generated rules depend on; disabling the namespace would not harden a run, it would
-break it. Verified against OpenCode 2.0.18: a local plugin is listed without the directive and gone
-with it, and all eighteen agents and all thirty-five resolved rules for a read-only role are
-unchanged.
+`mode: primary` is set for every agent. A plugin is arbitrary code that can rewrite a system
+prompt, replace a tool, or register a new one, so a plugin is a way to change what a verifier,
+reviewer, or implementer is allowed to do, and therefore what it reports. Plugin isolation is
+therefore two independent layers, because they defend against different things.
+
+**Preflight: refuse repository plugin code, before OpenCode starts.** `assertNoProjectLocalPlugins`
+runs at the top of every stage execution, before the transport is touched and before anything is read
+out of the repository. If an auto-discovered plugin location holds loadable code, the stage is
+refused with a structured `project_plugin_detected` error listing the offending paths, and the
+transport is never invoked. Nothing is deleted, renamed, or ignored, because the repository is not
+the framework's to modify.
+
+**Configuration: disable the plugins OpenCode would otherwise load.** V2 removed `--pure`, so the
+generated `opencode.json` sets `plugins: ["-*", "opencode.*"]`: `-*` disables every plugin and the
+later entry re-enables the `opencode.` namespace. That is what stops a third-party integration
+arriving through `node_modules`, a global config, or an explicit `plugins` entry in a config file.
+The re-enable is load-bearing rather than cosmetic, because `opencode.config.agent`, which loads the
+generated agents, and the permission machinery are themselves plugins under `opencode.`, so disabling
+the namespace would not harden a run, it would break it and produce an empty agent list.
+
+**Why the preflight does not lean on the configuration.** The namespace re-enable really does match a
+repository-chosen id. Against OpenCode 2.0.18, a repository plugin at `.opencode/plugin/evil.ts`
+declaring `id: "opencode.evil"` is listed by `opencode plugin list` under `plugins: ["opencode.*"]`,
+so `opencode.evil` is a repository-controlled string that the trusted namespace admits. What closes
+*this particular* vector today is the ordering: with the generated `["-*", "opencode.*"]` the earlier
+`-*` wins and the plugin is not enabled, while with `["-*"]` alone it is also not enabled. So on
+2.0.18 the configuration alone blocks this path.
+
+That is not a property to depend on. It is undocumented behaviour, it was established by probing one
+patch release rather than from a specification, and the outcome flips if the directives are reordered
+or a version resolves them differently. A control whose safety rests on the ordering of two strings
+in a config file a future CLI version owns is not a control. The preflight does not read plugin
+directives at all: it refuses repository plugin code from the filesystem, before OpenCode runs, so it
+holds regardless of how any version filters ids, and regardless of paths that never reach the filter
+at all, such as a plugin pulled in by an ancestor configuration. The configuration stays because it
+does the job the preflight cannot: disabling non-framework integrations that arrive from
+`node_modules` or a global config, in a repository that contains no plugin of its own.
+
+The fixture at `fixtures/opencode-plugin-repo/` is exactly the repository described above, and
+`tests/opencode-plugin-preflight.test.ts` proves the executor refuses it with zero transport calls.
+
+**Paths checked.** For the project and each ancestor up to the workspace boundary, the four
+auto-discovered locations: `.opencode/plugin/`, `.opencode/plugins/`, `plugin/`, and `plugins/`.
+These are not guesses; in a real 2.0.18 bundle the plugin source directory scan is a literal
+`["plugin", "plugins"]` list applied to the project and to every applicable ancestor, and `.opencode/`
+is itself one of those configuration directories, which is where the two dotted forms come from.
+
+**The workspace boundary.** The ancestor walk stops at the repository root, found by looking for
+`.git` upward. That is what keeps this from becoming a filesystem scan, and it is a correctness
+boundary rather than only a work bound: a developer's global `~/.opencode` is an ancestor of a
+checkout but is not repository-controlled, so refusing on it would make a workflow stage depend on
+machine-level state. A monorepo project in a subdirectory is covered without configuration, because
+the repository root is above it. Pass `pluginPreflightOptions.stopAt` when the workspace is wider
+than the repository.
+
+**Symlinks.** Checks use `lstat` and never follow a link that leaves the repository boundary. A plugin
+directory that is a symlink out of the tree, or an executable entry inside one, is reported as
+`escaping_symlink` and the link is not read. A link that stays inside the repository is followed and
+inspected, since that code is the repository's own. A dangling link loads nothing and is ignored.
+
+**What is deliberately allowed.** `.opencode/agents/` and `.opencode/commands/` are the framework's
+own generated output and are never reported; a correctly generated project has to pass. An empty
+plugin directory, or one holding only text such as a README or a licence, is also allowed: the
+preflight refuses executable plugin code, not the existence of a directory, and a path that cannot
+load is not a risk. Only `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx`, and a
+`package.json` entry count as executable.
 
 ## The prompt boundary
 

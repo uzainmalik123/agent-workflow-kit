@@ -4,6 +4,10 @@ import {
   type StageExecutor,
 } from "@agent-workflow-kit/orchestration";
 import { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
+import {
+  assertNoProjectLocalPlugins,
+  type FindProjectLocalPluginsOptions,
+} from "./plugin-preflight.js";
 import { buildStagePrompt } from "./prompts.js";
 import {
   loadProjectInstructions,
@@ -32,6 +36,18 @@ export interface OpenCodeStageExecutorOptions {
    */
   readonly loadProjectInstructionsFromDisk?: boolean;
   readonly projectInstructionsOptions?: LoadProjectInstructionsOptions;
+  /**
+   * Stops the project-local plugin preflight's ancestor walk, for a workspace parent above the
+   * project. See {@link FindProjectLocalPluginsOptions}.
+   */
+  readonly pluginPreflightOptions?: FindProjectLocalPluginsOptions;
+  /**
+   * Skips the project-local plugin preflight. Off by default and not a hardening option: the check
+   * is what stops a repository that ships its own OpenCode plugin, whose chosen plugin id can match
+   * the trusted `opencode.*` namespace, from running a workflow stage at all. It exists so a test
+   * that is not about plugin isolation does not have to create a filesystem.
+   */
+  readonly skipPluginPreflight?: boolean;
 }
 
 /**
@@ -39,6 +55,7 @@ export interface OpenCodeStageExecutorOptions {
  *
  * ```
  * StageExecutionRequest
+ *   -> project-local plugin preflight   (refuse repository plugin code, before anything runs)
  *   -> prompt and agent id            (deterministic, orchestrator-routed context only)
  *   -> OpenCodeTransport              (substitutable; the real one spawns the CLI)
  *   -> structured response parsing     (a fenced JSON payload, never prose)
@@ -48,8 +65,9 @@ export interface OpenCodeStageExecutorOptions {
  * The adapter translates and refuses. It never decides a workflow transition, never approves a
  * gate, and never turns an unusable agent response into a stage outcome: a transport failure, a
  * timeout, a non-zero exit, malformed output, a mismatched feature or stage, a forbidden artifact
- * name, or a smuggled workflow field is thrown as an `OpenCodeAdapterError` so the orchestrator
- * reports an executor failure instead of trusting the agent.
+ * name, a smuggled workflow field, or repository-supplied OpenCode plugin code is thrown as an
+ * `OpenCodeAdapterError` so the orchestrator reports an executor failure instead of trusting the
+ * agent.
  */
 export class OpenCodeStageExecutor implements StageExecutor {
   readonly #transport: OpenCodeTransport;
@@ -67,6 +85,17 @@ export class OpenCodeStageExecutor implements StageExecutor {
       throw new OpenCodeAdapterError(
         "role_mismatch",
         `Stage "${request.stage}" runs as agent "${agent}", but the request asked for role "${request.role}".`,
+      );
+    }
+
+    // Before the transport is touched, and before anything is read out of the repository, because
+    // the thing being refused is code the repository would hand to OpenCode. The generated
+    // `plugins` configuration is not a substitute for this: it matches plugin ids, and a repository
+    // picks the id of its own plugin.
+    if (this.#options.skipPluginPreflight !== true) {
+      await assertNoProjectLocalPlugins(
+        this.#options.workingDirectory,
+        this.#options.pluginPreflightOptions,
       );
     }
 

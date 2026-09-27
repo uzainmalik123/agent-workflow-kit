@@ -77,6 +77,22 @@ export type {
 } from "./project-instructions.js";
 
 export {
+  assertNoProjectLocalPlugins,
+  describeProjectLocalPluginFindings,
+  EXECUTABLE_PLUGIN_ENTRY_NAMES,
+  EXECUTABLE_PLUGIN_EXTENSIONS,
+  findProjectLocalPlugins,
+  findRepositoryRoot,
+  PROJECT_LOCAL_PLUGIN_DIRECTORIES,
+  REPOSITORY_ROOT_MARKER,
+} from "./plugin-preflight.js";
+export type {
+  FindProjectLocalPluginsOptions,
+  OpenCodeProjectPluginFinding,
+  OpenCodeProjectPluginFindingKind,
+} from "./plugin-preflight.js";
+
+export {
   extractStructuredResponse,
   parseStageResponse,
   RESPONSE_PROTOCOL_VERSION,
