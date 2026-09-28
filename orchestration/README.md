@@ -155,6 +155,14 @@ A bundle is bound to the request that asked for it before anything else happens 
 
 The bundle also carries a workspace measurement: the fingerprint taken before the first command and the one taken after the last. Both are kept. A check carries the `before` digest, because that is the tree it ran against, and `workspace.changed` says whether that assumption survived. A command that rewrites the implementation it is verifying is a way to produce green exit codes about code that no longer exists, so a changed workspace forces `failed` on its own, with a finding naming both digests, and it is not waivable by a `passed` outcome or by anything the verifier says.
 
+The bundle carries a control-plane measurement as well: the same bracketing, applied to `.agentflow/` and
+`.opencode/` instead of the implementation. Those two are excluded from the workspace digest on purpose,
+because neither is project code, which is exactly why a separate pair of digests is needed. A verification
+command that writes to either is a command that reached into the framework, and a changed control plane
+forces `failed` with a finding naming both digests, on the same terms as a changed workspace. A bundle
+claiming `passed` or `deferred` over one is refused during validation, as is a bundle that carries no
+control-plane measurement at all: a provider that measured nothing cannot report that nothing moved.
+
 ## Fix loop
 
 1. A review or verification stage returns `needs_fix`; its artifacts are persisted and the legal `request_fix` event moves the session to `fixing`, recording the returning state.

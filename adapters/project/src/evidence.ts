@@ -149,7 +149,7 @@ export function commandEvidence(input: {
 }
 
 /**
- * The stage verdict, and it is a function of the checks and the workspace alone.
+ * The stage verdict, and it is a function of the checks and the two bracketed measurements alone.
  *
  * Any check that did not pass makes the stage fail; a check that could not start makes it blocked;
  * and a stage with nothing but skipped checks is deferred. A stage whose applicable checks all passed
@@ -160,12 +160,18 @@ export function commandEvidence(input: {
  * including all of them passing. The checks described a tree the run itself replaced, so a pass would
  * be a statement about code that no longer exists, and a lint run that rewrote the source it was
  * checking is precisely the case this exists for.
+ *
+ * A control plane that changed is a failure for the same reason and a stronger one. The checks said
+ * nothing about workflow state or about the generated OpenCode configuration, so they cannot vouch for
+ * a change to either; a command that moved the session past a stage it never ran exits 0, and without
+ * this it would be recorded as a clean pass.
  */
 export function outcomeForChecks(
   checks: readonly VerificationCommandEvidence[],
   workspaceChanged = false,
+  controlPlaneChanged = false,
 ): VerificationOutcome {
-  if (workspaceChanged) {
+  if (workspaceChanged || controlPlaneChanged) {
     return "failed";
   }
 
@@ -205,22 +211,31 @@ export function buildBundle(input: {
   readonly revision: number;
   readonly fingerprint: string;
   readonly workspaceAfter: string;
+  /** The control-plane measurement from before the run, and the one from after it. */
+  readonly controlPlaneBefore: string;
+  readonly controlPlaneAfter: string;
   readonly collectedAt: string;
   readonly projectRoot: string;
   readonly project: ProjectProfile;
   readonly checks: readonly VerificationCommandEvidence[];
 }): VerificationEvidenceBundle {
   // The bundle carries the fingerprint its commands saw, which is the measurement from before the run.
-  // `changed` is derived here rather than accepted, so no caller can report an unchanged workspace
+  // `changed` is derived here rather than accepted, so no caller can report an unchanged measurement
   // over two different digests.
   const changed = input.workspaceAfter !== input.fingerprint;
+  const controlPlaneChanged = input.controlPlaneAfter !== input.controlPlaneBefore;
 
   return {
     verification: input.verification,
-    outcome: outcomeForChecks(input.checks, changed),
+    outcome: outcomeForChecks(input.checks, changed, controlPlaneChanged),
     revision: input.revision,
     implementationFingerprint: input.fingerprint,
     workspace: { before: input.fingerprint, after: input.workspaceAfter, changed },
+    controlPlane: {
+      before: input.controlPlaneBefore,
+      after: input.controlPlaneAfter,
+      changed: controlPlaneChanged,
+    },
     collectedAt: input.collectedAt,
     projectRoot: input.projectRoot,
     project: profileSummary(input.project),

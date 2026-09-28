@@ -17,7 +17,7 @@ import {
   commandEvidence,
   absentCheck,
 } from "./evidence.js";
-import { fingerprintImplementation } from "./fingerprint.js";
+import { fingerprintControlPlane, fingerprintImplementation } from "./fingerprint.js";
 import {
   discoverProject,
   unmeasurableCapabilities,
@@ -93,35 +93,42 @@ function detectionFor(
  * a blocked lint check whether or not its dependencies happen to be installed, and reporting a missing
  * `node_modules` first would blame the environment for a decision the manifest made.
  *
- * The two environment preconditions belong to detection rather than to execution. A command the
- * project declared names its own executable and does not go through a package manager, so neither a
- * missing manager nor a missing `node_modules` says anything about whether it can run; blocking it
- * would replace a real result with a guess. A detected command is a script invoked through a manager,
- * so both preconditions are facts about it, and reporting them is more useful than running a command
- * that cannot work.
+ * The hook rule does not care where the command came from. Being written down explicitly in
+ * `agent-workflow.config.json` says which command to run, not which scripts the manifest will run
+ * alongside it, so a configured `npm run lint` is blocked by a `prelint` script for the same reason a
+ * detected `pnpm run lint` is. The way to state a check whose script has neighbouring hooks is to name
+ * the tool itself, which involves no package manager and therefore implies nothing.
+ *
+ * The two environment preconditions belong to detection rather than to execution, and only to it. A
+ * command the project declared as a bare tool names its own executable and does not go through a
+ * package manager, so neither a missing manager nor a missing `node_modules` says anything about
+ * whether it can run; blocking it would replace a real result with a guess. A detected command is a
+ * script invoked through a manager, so both preconditions are facts about it, and reporting them is
+ * more useful than running a command that cannot work.
  */
 function startupBlock(
   profile: ProjectProfile,
   command: PlannedVerificationCommand,
 ): { readonly reason: string; readonly detail: string } | null {
-  if (command.source === "configured") {
-    // A configured command names an executable and its arguments, so no package manager reads it and
-    // no adjacent script name can be implied. This is the way a project opts out of the hook policy.
-    return null;
-  }
-
-  const manager = profile.packageManager;
-
-  if (manager !== null) {
+  if (command.script !== null) {
     const hook = implicitScriptHook(command.script, profile.scripts);
 
     if (hook !== null) {
       return {
         reason: "implicit_script_hook",
-        detail: `"${command.executable} ${command.args.join(" ")}" would also execute the "${hook}" script, because ${manager} runs the pre and post script of a selected script name. Running it would execute a script the framework never selected, so the check is blocked. Declare the command in agent-workflow.config.json to run the tool directly instead.`,
+        detail: `"${command.executable} ${command.args.join(" ")}" would also execute the "${hook}" script, because ${command.executable} runs the pre and post script of a selected script name. Running it would execute a script the framework never selected, so the check is blocked. Declare the tool itself in agent-workflow.config.json to run it directly instead.`,
       };
     }
   }
+
+  if (command.source === "configured") {
+    // A configured command that names no script involves no package manager, so there is nothing left
+    // to check: no manager to identify, no adjacent script name to imply, and no dependency install
+    // that would have to exist for a bare tool to be on the path.
+    return null;
+  }
+
+  const manager = profile.packageManager;
 
   if (manager === null) {
     return {
@@ -251,6 +258,10 @@ export class ProjectVerificationProvider implements VerificationProvider {
         // consistent is a tree that was not measured against itself. Reporting an unmeasured tree as
         // changed would blame the project for a fingerprint the framework never produced.
         workspaceAfter: UNMEASURED_FINGERPRINT,
+        // The control plane was never measured either, for the same reason, and the same unmeasured
+        // digest on both sides is the consistent answer rather than a claim that nothing changed.
+        controlPlaneBefore: UNMEASURED_FINGERPRINT,
+        controlPlaneAfter: UNMEASURED_FINGERPRINT,
         collectedAt,
         projectRoot: this.#root,
         project: {
@@ -296,6 +307,10 @@ export class ProjectVerificationProvider implements VerificationProvider {
     // a tree the run may itself have replaced. The second measurement is taken after the last command
     // has finished, and any difference is a failure the verifier cannot argue with.
     const fingerprint = (await fingerprintImplementation(this.#root)).hash;
+    // The control plane is bracketed the same way. `.agentflow/` and `.opencode/` are outside the
+    // implementation fingerprint on purpose, so this is the only measurement that notices a command
+    // rewriting the session it is running inside or the agent file the next stage is about to load.
+    const controlPlaneBefore = (await fingerprintControlPlane(this.#root)).hash;
     const checks = await this.#runStage(
       request.verification,
       request.revision,
@@ -306,12 +321,15 @@ export class ProjectVerificationProvider implements VerificationProvider {
       request.signal ?? null,
     );
     const workspaceAfter = (await fingerprintImplementation(this.#root)).hash;
+    const controlPlaneAfter = (await fingerprintControlPlane(this.#root)).hash;
 
     return buildBundle({
       verification: request.verification,
       revision: request.revision,
       fingerprint,
       workspaceAfter,
+      controlPlaneBefore,
+      controlPlaneAfter,
       collectedAt,
       projectRoot: this.#root,
       project: profile,

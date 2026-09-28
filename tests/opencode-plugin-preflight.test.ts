@@ -11,6 +11,7 @@ import {
   findProjectLocalPlugins,
   isOpenCodeAdapterError,
   PROJECT_LOCAL_PLUGIN_DIRECTORIES,
+  writeOpenCodeProjectFiles,
 } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakeOpenCodeTransport } from "../fixtures/opencode-transport.js";
@@ -223,7 +224,8 @@ describe("what is allowed", () => {
 
   it("allows a project with generated agents and no plugins, end to end", async () => {
     const transport = createFakeOpenCodeTransport();
-    const root = await makeProject({ ".opencode/agents/griller.md": "---\nmode: \"primary\"\n---\n" });
+    const root = await makeProject({});
+    await writeOpenCodeProjectFiles(root);
     const executor = createOpenCodeStageExecutor({ transport, workingDirectory: root });
 
     const result = await executor.execute(grillRequest());

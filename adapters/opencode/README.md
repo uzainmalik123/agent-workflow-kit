@@ -32,6 +32,7 @@ Dependencies point one way: `core -> persistence -> orchestration -> opencode`. 
 | `cli-transport.ts` | The real transport: `opencode run` as a child process, with no shell, and the V2 event-stream reader. |
 | `capabilities.ts` | A safe local probe of the installed binary. No model, no network. |
 | `smoke-test.ts` | Optional generated-configuration validation against a real binary. Skips when there is none. |
+| `configuration-integrity.ts` | The pre-run check on the generated files this run depends on. |
 | `executor.ts` | The `StageExecutor` implementation that wires the two together. |
 | `install-policy.ts` | The recorded installer decision. No installer exists. |
 
@@ -228,6 +229,61 @@ opencode.json
 
 `renderOpenCodeProjectFiles()` returns these as `{ path, contents }` values and is byte-for-byte deterministic. `writeOpenCodeProjectFiles(root, { force })` writes them with the same symlink guards the persistence adapter uses, leaves identical files untouched, and reports a human-edited file as a `conflict` instead of silently reverting it. `opencode.json` is deliberately minimal — a schema reference and `share: "disabled"` — because the capability model lives in the agent files and model, temperature, and prompt defaults belong to the repository and the user.
 
+## What is customizable, and what is not
+
+The generated files are not all one thing, and the distinction is a security boundary rather than a
+convention. Editing either kind is allowed; only one of them stops the workflow.
+
+**Framework-controlled, verified before every run.** The agent file's frontmatter, which is the ordered
+`permissions` rule list and the `mode` that keeps these agents out of the subagent graph. Every framework
+hard rule, which has to be present verbatim. And in `opencode.json`, the `plugins` list and the `share`
+setting.
+
+**Project-owned, and yours to edit.** The prose under each role's instructions: what the role is for,
+house style, domain vocabulary, the way you want findings worded. `AGENTS.md`, read by
+`project-instructions.ts`, is entirely project guidance. Every other `opencode.json` field, including the
+model, temperature, and provider settings. The allowlist here is deliberately narrow rather than
+byte-for-byte, so a model preference is not treated as a security change — but the `plugins` list is
+compared element by element and in order, because V2 applies directives in sequence and a later entry
+re-enables what an earlier one disabled.
+
+## Configuration integrity, checked before every run
+
+A verification command is repository-defined code, and repository-defined code writes files. The project
+adapter fingerprints the implementation, and `.opencode/` is excluded from that measurement on purpose: a
+generated agent file is not implementation, and it is not a change to the code under review. That
+exclusion is correct for judging the code and wrong for judging the control plane, so the adapter checks
+the control plane itself, immediately before every `transport.run()`.
+
+What it is protecting is a two-step escalation. A command rewrites the generated file for the role that
+is about to run — grants a shell, widens a permission, drops a framework rule — and exits 0. Deterministic
+verification records a pass, because the command did pass. The next stage then loads the rewritten agent
+and runs with it, and nothing in the verification path ever looks at `.opencode/`, so the second stage
+consumes the first stage's edit without a trace.
+
+So each run, before the prompt is built, checks that:
+
+- the agent file for the role about to run exists, is a regular file, and is not a symlink — a missing
+  file is a failure rather than an absent requirement, because OpenCode's own fallback carries none of
+  these permissions;
+- its frontmatter matches the generated frontmatter exactly;
+- every entry of `FRAMEWORK_HARD_RULES` is present verbatim;
+- `opencode.json` parses, its `plugins` list is exactly the generated list in order, and `share` is still
+  disabled.
+
+A failure raises `opencode_configuration_tampered` and names the file, the reason
+(`missing`, `unreadable`, `unsafe_path`, `frontmatter_changed`, `hard_rules_missing`,
+`project_config_changed`), and the expected value. **It never repairs.** Overwriting the file would
+destroy the evidence, and regenerating it would make a tampered repository look untouched while the
+tampered content is exactly what a reviewer needs to see. The message points at
+`writeOpenCodeProjectFiles(root, { force: true })` and leaves the decision with the operator, because the
+tamper may well be theirs.
+
+The project adapter's control-plane measurement is the other half of this and runs first: it fails the
+stage outright when a command changed `.opencode/` at all, which the adapter then never has to diagnose.
+The adapter's check is the tighter of the two, because it is the one that runs on every stage, not only
+on the ones a command ran in front of.
+
 ## Public API
 
 ```ts
@@ -255,7 +311,11 @@ await orchestrator.createFeature({ featureId: "F-001", title: "Google OAuth / AP
 await orchestrator.runNext("F-001");
 ```
 
-In tests, `createFakeOpenCodeTransport` from the repository's `fixtures/opencode-transport.ts` replaces the CLI transport and never spawns a process or calls a model.
+`assertOpenCodeConfigurationIntegrity({ workingDirectory, role })` is exported for a caller that wants to
+check a repository without running a stage, and `agentFilePathForRole(role)` names the file a role would
+load.
+
+In tests, `createFakeOpenCodeTransport` from the repository's `fixtures/opencode-transport.ts` replaces the CLI transport and never spawns a process or calls a model. The configuration integrity check is not among the things it replaces: a test root that wants to reach a stage has to write the real generated files, because a repository this framework would refuse to run in is not a fixture worth having.
 
 ### Checking the installed binary
 

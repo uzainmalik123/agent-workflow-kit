@@ -372,6 +372,108 @@ describe("project configuration", () => {
     ).rejects.toMatchObject({ code: "config_invalid" });
   });
 
+  it("refuses the shorthand lifecycle aliases, because `npm test` is a hidden `npm run test`", async () => {
+    // `npm test` and `pnpm test` are documented aliases that dispatch exactly what `run test` would,
+    // including the pre and post hooks around `test`. Allowing them while refusing `run test` would be
+    // a hole in the allowlist with a one-word key.
+    for (const [executable, args] of [
+      ["npm", ["test"]],
+      ["pnpm", ["test"]],
+      ["yarn", ["test"]],
+      ["bun", ["test"]],
+    ] as const) {
+      const config = JSON.stringify({
+        schemaVersion: 1,
+        verification: { static: [{ id: "lint", capability: "lint", executable, args }] },
+      });
+
+      await expect(
+        loadProjectVerificationConfig(await makeProject({ [PROJECT_CONFIG_FILENAME]: config })),
+      ).rejects.toMatchObject({ code: "command_forbidden" });
+    }
+  });
+
+  it("refuses a registry query or a publish, whatever the subcommand is called", async () => {
+    for (const args of [
+      ["view", "left-pad"],
+      ["info", "left-pad"],
+      ["search", "left-pad"],
+      ["pack"],
+      ["publish"],
+      ["dist-tag", "add", "latest"],
+      ["audit", "fix"],
+    ]) {
+      const config = JSON.stringify({
+        schemaVersion: 1,
+        verification: { static: [{ id: "lint", capability: "lint", executable: "npm", args }] },
+      });
+
+      await expect(
+        loadProjectVerificationConfig(await makeProject({ [PROJECT_CONFIG_FILENAME]: config })),
+      ).rejects.toMatchObject({ code: "command_forbidden" });
+    }
+  });
+
+  it("refuses a flag in the script's position, because the manager consumes it and the script name is then unknown", async () => {
+    // `npm run --if-present lint` runs `lint`, and `npm run --silent lint` runs it more quietly. Both put
+    // a manager flag where the script name belongs, which is the same unknown dispatch the hook policy
+    // exists to refuse. The allowlist fixes the form rather than enumerating manager flags.
+    for (const args of [["run", "--if-present", "lint"], ["run", "--silent", "lint"], ["run"]]) {
+      const config = JSON.stringify({
+        schemaVersion: 1,
+        verification: { static: [{ id: "lint", capability: "lint", executable: "npm", args }] },
+      });
+
+      await expect(
+        loadProjectVerificationConfig(await makeProject({ [PROJECT_CONFIG_FILENAME]: config })),
+      ).rejects.toMatchObject({ code: "command_forbidden" });
+    }
+  });
+
+  it("refuses a manager flag before the `--` separator, and allows anything after it", async () => {
+    const refused = JSON.stringify({
+      schemaVersion: 1,
+      verification: {
+        static: [{ id: "lint", capability: "lint", executable: "npm", args: ["run", "lint", "--ignore-scripts"] }],
+      },
+    });
+
+    await expect(
+      loadProjectVerificationConfig(await makeProject({ [PROJECT_CONFIG_FILENAME]: refused })),
+    ).rejects.toMatchObject({ code: "command_forbidden" });
+
+    // After `--` the arguments belong to the script, so a flag there is the script's own business and
+    // the manager is not reading it.
+    const allowed = JSON.stringify({
+      schemaVersion: 1,
+      verification: {
+        static: [{ id: "lint", capability: "lint", executable: "npm", args: ["run", "lint", "--", "--fix", "--quiet"] }],
+      },
+    });
+
+    const config = await loadProjectVerificationConfig(await makeProject({ [PROJECT_CONFIG_FILENAME]: allowed }));
+
+    expect(config.static[0]).toMatchObject({
+      executable: "npm",
+      args: ["run", "lint", "--", "--fix", "--quiet"],
+      script: "lint",
+      source: "configured",
+    });
+  });
+
+  it("refuses npx in every form, because each invocation downloads and runs a package", async () => {
+    for (const args of [["eslint", "."], ["run", "lint"], ["--no-install", "eslint"]]) {
+      const config = JSON.stringify({
+        schemaVersion: 1,
+        verification: { static: [{ id: "lint", capability: "lint", executable: "npx", args }] },
+      });
+
+      await expect(
+        loadProjectVerificationConfig(await makeProject({ [PROJECT_CONFIG_FILENAME]: config })),
+      ).rejects.toMatchObject({ code: "command_forbidden" });
+    }
+  });
+
   it("refuses a command that names a lifecycle script or an install", async () => {
     for (const args of [["install"], ["add", "left-pad"], ["run", "postinstall"], ["exec", "sh"]]) {
       const config = JSON.stringify({

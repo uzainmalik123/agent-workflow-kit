@@ -100,6 +100,7 @@ function evidenceFor(
     revision: request.revision,
     implementationFingerprint: FINGERPRINT,
     workspace: { before: FINGERPRINT, after: FINGERPRINT, changed: false },
+    controlPlane: { before: FINGERPRINT, after: FINGERPRINT, changed: false },
     collectedAt: fixedTimestamp,
     projectRoot: request.projectRoot,
     project: profileSummary(),
@@ -347,6 +348,49 @@ describe("orchestrator verification integration", () => {
     expect(result).toMatchObject({ status: "fix_requested", state: WorkflowState.Fixing });
     expect(result.findings[0]?.message).toContain("working tree changed");
     expect(result.findings[0]?.message).toContain(OTHER_FINGERPRINT);
+  });
+
+  it("refuses a passing bundle when the control plane changed underneath the checks", async () => {
+    const root = await makeRoot();
+    const provider = new RecordingProvider((request) =>
+      evidenceFor(request, {
+        outcome: "failed",
+        controlPlane: { before: FINGERPRINT, after: OTHER_FINGERPRINT, changed: true },
+      }),
+    );
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    const result = await harness.orchestrator.runNext("F-001");
+
+    // The stage fails and the fixer is handed a finding naming the control plane, rather than the
+    // stage advancing as if the run had been clean. The findings are ordered after the workspace ones
+    // and before the check ones, and there is no workspace change here, so this is the first.
+    expect(result).toMatchObject({ status: "fix_requested", state: WorkflowState.Fixing });
+    expect(result.findings[0]?.message).toContain("control plane changed");
+    expect(result.findings[0]?.message).toContain(OTHER_FINGERPRINT);
+  });
+
+  it("refuses a bundle that claims a passed run while the control plane changed", async () => {
+    const root = await makeRoot();
+    const provider = new RecordingProvider((request) =>
+      evidenceFor(request, {
+        outcome: "passed",
+        controlPlane: { before: FINGERPRINT, after: OTHER_FINGERPRINT, changed: true },
+      }),
+    );
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    // A provider that reports a clean pass over a control plane it knows it changed is one that cannot
+    // be believed about either, so the bundle is refused before it is interpreted.
+    const result = await harness.orchestrator.runNext("F-001");
+
+    expect(result.status).toBe("rejected");
+    expect(result.error?.code).toBe("verification_evidence_invalid");
+    expect(result.error?.message).toContain("control plane");
   });
 
   it("accepts a verifier failure on evidence that passed, because a reader can see more than a code", async () => {
@@ -630,6 +674,46 @@ describe("binding evidence to the request that asked for it", () => {
     await runToStaticVerification(harness);
 
     expect(await harness.orchestrator.runNext("F-001")).toMatchObject({ status: "stage_completed" });
+  });
+
+  it("refuses a bundle with no control-plane measurement at all", async () => {
+    const root = await makeRoot();
+    const provider = new RecordingProvider((request) => {
+      const withoutControlPlane: Record<string, unknown> = { ...evidenceFor(request) };
+
+      delete withoutControlPlane["controlPlane"];
+
+      return withoutControlPlane as unknown as VerificationEvidenceBundle;
+    });
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    const result = await harness.orchestrator.runNext("F-001");
+
+    // A provider that measures nothing cannot report that nothing moved, so this is missing evidence
+    // rather than a pass.
+    expect(result.status).toBe("rejected");
+    expect(result.error?.code).toBe("verification_evidence_invalid");
+    expect(result.error?.message).toContain("control-plane measurement");
+  });
+
+  it("refuses a bundle whose control-plane claim contradicts its own hashes", async () => {
+    const root = await makeRoot();
+    const provider = new RecordingProvider((request) =>
+      evidenceFor(request, {
+        controlPlane: { before: FINGERPRINT, after: OTHER_FINGERPRINT, changed: false },
+      }),
+    );
+    const harness = makeHarness(root, provider);
+
+    await runToStaticVerification(harness);
+
+    const result = await harness.orchestrator.runNext("F-001");
+
+    expect(result.status).toBe("rejected");
+    expect(result.error?.code).toBe("verification_evidence_invalid");
+    expect(result.error?.message).toContain("claims changed=false");
   });
 
   it("refuses a bundle whose workspace claim contradicts its own hashes", async () => {

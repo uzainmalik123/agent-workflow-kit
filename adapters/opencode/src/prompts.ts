@@ -308,7 +308,7 @@ function renderCapabilities(bundle: VerificationEvidenceBundle): string {
 }
 
 /**
- * The pair of measurements that bracket the run, and what they mean when they disagree.
+ * The working-tree measurements that bracket the run, and what they mean when they disagree.
  *
  * A verifier that sees only a list of passing exit codes has no way to know that the command it was
  * judging rewrote the file it was judging, so the measurement is shown rather than summarised, and a
@@ -338,6 +338,42 @@ function renderWorkspace(bundle: VerificationEvidenceBundle): string {
     "cannot pass, whatever they say. This is a fact about the run and not a question for you to weigh. Do",
     "not treat a passing check above as evidence about the current tree: say which command did it and what it",
     "wrote, and whether the check should be declared in agent-workflow.config.json so it runs the tool directly.",
+  ].join("\n");
+}
+
+/**
+ * The control-plane measurements, which answer a different question.
+ *
+ * `.agentflow/` and `.opencode/` are the framework's own, and they are outside the implementation
+ * fingerprint on purpose, so a command that writes to them leaves the tree measurement above untouched
+ * and clean. When these two differ, a project command reached into workflow state or into the generated
+ * OpenCode configuration, which no lint or test run has any reason to do, and the verifier is told so
+ * in the same terms: a fact about the run, not a judgement to make.
+ */
+function renderControlPlane(bundle: VerificationEvidenceBundle): string {
+  const { before, after, changed } = bundle.controlPlane;
+
+  if (!changed) {
+    return [
+      bulletList([
+        `measured before the commands: \`${before}\``,
+        `measured after they finished: \`${after}\``,
+        "workflow state and the generated OpenCode configuration were not modified while these checks ran",
+      ]),
+    ].join("\n");
+  }
+
+  return [
+    bulletList([
+      `measured before the commands: \`${before}\``,
+      `measured after they finished: \`${after}\``,
+    ]),
+    "",
+    "**The control plane changed while these checks were running.** A command wrote to `.agentflow/` or",
+    "`.opencode/`, so it reached into this workflow's own state or into the generated OpenCode",
+    "configuration. The checks above say nothing about either, so they cannot vouch for what changed, and",
+    "the stage cannot pass. Treat this the same way as a changed working tree: name the command that did",
+    "it, say what it wrote, and treat any passing check above as evidence about nothing.",
   ].join("\n");
 }
 
@@ -374,10 +410,14 @@ function renderEvidence(bundle: VerificationEvidenceBundle): string {
     "",
     renderWorkspace(bundle),
     "",
+    "### Control plane measurement",
+    "",
+    renderControlPlane(bundle),
+    "",
     "### What this means for your response",
     "",
     bulletList([
-      `The framework recorded this stage as \`${bundle.outcome}\` before you were invoked. A recorded failure, a blocked check, or a workspace that changed under the run cannot be turned into a pass by any response you give; the orchestrator enforces that independently.`,
+      `The framework recorded this stage as \`${bundle.outcome}\` before you were invoked. A recorded failure, a blocked check, or a workspace or control plane that changed under the run cannot be turned into a pass by any response you give; the orchestrator enforces that independently.`,
       "Judge the implementation against the code and against these records. Do not repeat them as your own findings and do not contradict them.",
       "For every failing or blocked check, localize the defect precisely enough that a repair targets it, and state plainly what you could not determine.",
       "If the recorded outcome and your reading of the code disagree, report the disagreement as a finding. Do not resolve it by reclassifying the result.",

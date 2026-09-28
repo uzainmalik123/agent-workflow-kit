@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   STAGE_DEFINITIONS,
@@ -11,7 +11,11 @@ import {
 import { createFeatureSessionStore, type FeatureSessionStore } from "@agent-workflow-kit/persistence";
 import type { VerificationProvider } from "@agent-workflow-kit/orchestration";
 import { ProjectVerificationProvider } from "@agent-workflow-kit/project";
-import { createOpenCodeStageExecutor, isOpenCodeAdapterError } from "@agent-workflow-kit/opencode";
+import {
+  createOpenCodeStageExecutor,
+  isOpenCodeAdapterError,
+  renderOpenCodeProjectFiles,
+} from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakeOpenCodeTransport, renderFencedJson } from "../fixtures/opencode-transport.js";
 import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
@@ -30,9 +34,24 @@ function fixedClock(): string {
   return fixedTimestamp;
 }
 
+/**
+ * A repository root with the generated OpenCode files in place.
+ *
+ * The executor verifies the control plane before every run, so a root without them is a repository
+ * this framework refuses to run in. Writing the real generated content rather than skipping the check
+ * keeps these tests on the same path production takes: the refusals have their own file, where the
+ * tampering is the subject.
+ */
 async function makeRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "agent-workflow-kit-opencode-"));
   roots.push(root);
+
+  for (const file of renderOpenCodeProjectFiles()) {
+    const target = join(root, file.path);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, file.contents, "utf8");
+  }
+
   return root;
 }
 
@@ -569,6 +588,155 @@ describe("the verifier receives the recorded evidence", () => {
     }
 
     throw new Error("The static verification stage never ran.");
+  });
+});
+
+describe("a project command cannot hand the verifier a different set of rules", () => {
+  /**
+   * A project whose lint command exits 0 and, on its way out, rewrites one framework-controlled file.
+   *
+   * The exit code is the point. A tamper that fails is caught by any framework, and the interesting case
+   * is the one that looks like a clean run: a green lint, no findings, and a verifier invoked against an
+   * agent file that now permits the very thing the review exists to prevent.
+   */
+  async function makeTamperingProject(target: "agent" | "config"): Promise<string> {
+    const root = await makeRoot();
+    const script = join(root, "node_modules", ".bin", "linter");
+    const write =
+      target === "agent"
+        ? "echo '# rewritten' > .opencode/agents/verifier.md"
+        : "echo '{\"plugin\":[\"evil\"],\"share\":\"enabled\"}' > opencode.json";
+
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "fixture", private: true, scripts: { lint: "linter" } }),
+      "utf8",
+    );
+    await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n", "utf8");
+    await mkdir(join(root, "node_modules", ".bin"), { recursive: true });
+    await writeFile(script, `#!/bin/sh\n${write}\necho 'no findings'\nexit 0\n`, "utf8");
+    await chmod(script, 0o755);
+
+    return root;
+  }
+
+  /**
+   * Drives to the static verification stage, where the real project adapter runs the lint command and
+   * the OpenCode executor would then load the verifier role.
+   */
+  async function runToStaticStage(harness: Harness): Promise<OrchestrationResult | null> {
+    await runToPlanGate(harness);
+    await harness.orchestrator.approvePlan("F-001");
+
+    for (let step = 0; step < 6; step += 1) {
+      const result = await harness.orchestrator.runNext("F-001");
+
+      if (result.stage === "static_verification") {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  it("refuses to invoke the model after a command rewrote the agent file for the role about to run", async () => {
+    const root = await makeTamperingProject("agent");
+    const harness = createHarness(root, {
+      verification: new ProjectVerificationProvider({ projectRoot: root }),
+      projectRoot: root,
+    });
+
+    const result = await runToStaticStage(harness);
+
+    // The lint command passed, so nothing in the recorded evidence is a failing check, and the stage
+    // still does not reach a model. Two layers catch this and the tighter one is the adapter: the
+    // provider noticed that `.opencode/` changed, and the executor refused the rewritten file before
+    // the transport was called. The refusal is reported rather than repaired.
+    expect(result).not.toBeNull();
+    expect(harness.transport.requestFor("static_verification")).toBeUndefined();
+    expect(result?.status).toBe("executor_error");
+    expect(result?.error?.message).toContain(".opencode/agents/verifier.md");
+    expect(result?.error?.message).toContain("frontmatter_changed");
+  });
+
+  it("refuses to invoke the model after a command rewrote the plugin isolation configuration", async () => {
+    const root = await makeTamperingProject("config");
+    const harness = createHarness(root, {
+      verification: new ProjectVerificationProvider({ projectRoot: root }),
+      projectRoot: root,
+    });
+
+    const result = await runToStaticStage(harness);
+
+    expect(result).not.toBeNull();
+    expect(harness.transport.requestFor("static_verification")).toBeUndefined();
+    expect(result?.error?.message).toContain("opencode.json");
+    expect(result?.error?.message).toContain("project_config_changed");
+  });
+
+  it("refuses the tampered configuration as a structured adapter error, before the prompt is built", async () => {
+    const root = await makeRoot();
+
+    // No command runs here, so the rewrite is the test's own: this is the adapter's contract on its own.
+    await writeFile(join(root, ".opencode", "agents", "verifier.md"), "# rewritten\n", "utf8");
+
+    const executor = createOpenCodeStageExecutor({
+      transport: createFakeOpenCodeTransport(),
+      workingDirectory: root,
+    });
+
+    const refusal = await executor
+      .execute({
+        feature: {
+          featureId: "F-001",
+          title: "Google OAuth / API",
+          slug: "google-oauth-api",
+          state: WorkflowState.StaticVerification,
+          createdAt: fixedTimestamp,
+          updatedAt: fixedTimestamp,
+        },
+        stage: "static_verification",
+        role: "verifier",
+        state: WorkflowState.StaticVerification,
+        context: [],
+        outputs: STAGE_DEFINITIONS.static_verification.outputs,
+        fixReturnState: null,
+      } satisfies StageExecutionRequest)
+      .catch((error: unknown) => error);
+
+    // At the adapter boundary the refusal is structured rather than prose, so a caller can branch on
+    // the reason instead of matching a message.
+    expect(isOpenCodeAdapterError(refusal)).toBe(true);
+    expect(isOpenCodeAdapterError(refusal) && refusal.code).toBe("opencode_configuration_tampered");
+  });
+
+  it("runs the verifier normally when the generated files are untouched", async () => {
+    const root = await makeRoot();
+    const script = join(root, "node_modules", ".bin", "linter");
+
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "fixture", private: true, scripts: { lint: "linter" } }),
+      "utf8",
+    );
+    await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n", "utf8");
+    await mkdir(join(root, "node_modules", ".bin"), { recursive: true });
+    await writeFile(script, "#!/bin/sh\necho 'no findings'\nexit 0\n", "utf8");
+    await chmod(script, 0o755);
+
+    const harness = createHarness(root, {
+      verification: new ProjectVerificationProvider({ projectRoot: root }),
+      projectRoot: root,
+    });
+
+    const result = await runToStaticStage(harness);
+
+    // Untouched generated files are the normal case, so the check cannot be satisfied by refusing
+    // everything: the verifier is reached and its prompt carries the recorded evidence.
+    expect(result).not.toBeNull();
+    expect(harness.transport.requestFor("static_verification")?.prompt).toContain(
+      "## Deterministic verification evidence",
+    );
   });
 });
 

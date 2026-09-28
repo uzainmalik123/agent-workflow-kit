@@ -31,6 +31,7 @@ export type {
 } from "./process.js";
 
 export {
+  ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS,
   assertArgs,
   assertExecutable,
   assertNoCommandShell,
@@ -39,10 +40,10 @@ export {
   CAPABILITIES_BY_STAGE,
   capabilityBelongsToStage,
   capabilitiesForStage,
-  FORBIDDEN_PACKAGE_MANAGER_COMMANDS,
   FORBIDDEN_PACKAGE_SCRIPTS,
   implicitScriptHook,
   isNodePackageManager,
+  packageManagerScriptOf,
   PACKAGE_MANAGERS,
 } from "./commands.js";
 export type { NodePackageManager, PlannedVerificationCommand } from "./commands.js";
@@ -81,6 +82,8 @@ export {
   DEFAULT_MAX_FINGERPRINT_FILES,
   DEFAULT_MAX_FINGERPRINT_FILE_BYTES,
   FINGERPRINT_IGNORED_DIRECTORIES,
+  CONTROL_PLANE_DIRECTORIES,
+  fingerprintControlPlane,
   fingerprintImplementation,
 } from "./fingerprint.js";
 export type { FingerprintOptions, ImplementationFingerprint } from "./fingerprint.js";

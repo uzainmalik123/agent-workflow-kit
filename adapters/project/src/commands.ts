@@ -10,10 +10,10 @@ import { ProjectAdapterError } from "./errors.js";
  * as one file name.
  *
  * The policy has three parts. `assertExecutable` and `assertArgs` refuse anything that smells like a
- * shell line. `assertPackageManagerInvocation` refuses the package-manager subcommands that install
- * dependencies, run lifecycle hooks, reach the network, or execute arbitrary code, so neither
- * detection nor project configuration can smuggle an install past it. And `FORBIDDEN_PACKAGE_SCRIPTS`
- * names the lifecycle hooks a package manager would otherwise run for a script invocation.
+ * shell line. `assertPackageManagerInvocation` allows exactly one package-manager command form, so
+ * neither detection nor project configuration can smuggle an install, a registry query, or a
+ * shorthand lifecycle call past it. And `implicitScriptHook` names the lifecycle hooks a package
+ * manager would otherwise run around a script invocation.
  */
 export const PACKAGE_MANAGERS = ["pnpm", "npm", "yarn", "bun"] as const;
 
@@ -45,36 +45,36 @@ export const FORBIDDEN_PACKAGE_SCRIPTS: readonly string[] = [
 ];
 
 /**
- * Package-manager subcommands that install, mutate the dependency tree, reach a registry, publish, or
- * run an arbitrary binary. Refused for every package manager, whether the command came from
- * detection or from project configuration.
+ * The package-manager subcommands this framework is willing to run.
+ *
+ * A blacklist cannot answer the question that matters here, which is "what did we not think of". The
+ * allowlist can: a package manager is invoked to run exactly the script a project declared, and every
+ * other subcommand is refused because it is not that. `npm test` is the sharpest example, because it
+ * is shorthand for `npm run test` and reads like a test command while being a lifecycle dispatch; it
+ * also runs whatever `pretest` and `posttest` declare, which is why it is not merely redundant here
+ * but wrong. `npm view`, `npm search`, and `npm publish` reach a registry, `npm install` mutates the
+ * tree, and `pnpm exec` runs an arbitrary binary. None of them is verification, and none of them is
+ * listed, so none of them runs.
+ *
+ * `run-script` is the documented long form of the same dispatch, so it is allowed, and the script
+ * name it names is subject to the same lifecycle-hook and implicit-hook rules as `run`.
  */
-export const FORBIDDEN_PACKAGE_MANAGER_COMMANDS: readonly string[] = [
-  "add",
-  "audit",
-  "ci",
-  "create",
-  "dedupe",
-  "dlx",
-  "exec",
-  "fund",
-  "i",
-  "install",
-  "install-test",
-  "link",
-  "pack",
-  "prune",
-  "publish",
-  "rebuild",
-  "remove",
-  "rm",
-  "uninstall",
-  "unlink",
-  "update",
-  "up",
-  "upgrade",
-  "x",
-];
+export const ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS: readonly string[] = ["run", "run-script"];
+
+const PACKAGE_MANAGER_EXECUTABLES: ReadonlySet<string> = new Set(PACKAGE_MANAGERS);
+
+/**
+ * Executables whose purpose is to run a package rather than a script.
+ *
+ * `npx` does not belong under the subcommand allowlist, even though it is spelled like a package
+ * manager. The allowlist works because every subcommand on it is a real subcommand of a real manager,
+ * so a name that is not one of them is refused; `npx` takes a package name in the first position
+ * instead, which means `npx run lint` names a package called `run`. Allowing that on the strength of
+ * the first argument would permit a download and an execution of the operator's choosing, and it would
+ * do it while claiming to have applied the script allowlist. So it is refused outright, with its own
+ * message, in every form.
+ */
+const ARBITRARY_PACKAGE_RUNNERS: ReadonlySet<string> = new Set(["npx"]);
 
 /** Shell metacharacters and quoting characters. None of them can appear in an executable name. */
 const SHELL_METACHARACTERS = /[\s;&|<>$`'"\\()[\]{}*?!#~\n\r\0]/u;
@@ -199,41 +199,109 @@ function commandBaseName(executable: string): string {
 }
 
 /**
- * The install and arbitrary-code boundary.
+ * The install, registry, and arbitrary-code boundary.
  *
- * `pnpm run lint` is a script invocation and is fine. `pnpm install`, `npm ci`, `bun x anything`, and
- * `pnpm run postinstall` are not, whatever their origin. This is checked on the argument array, so a
- * forbidden name cannot be reached by quoting, spacing, or nesting.
+ * `pnpm run lint` is a script invocation and is the only package-manager form that runs. `pnpm install`,
+ * `npm ci`, `npm test`, `npm view`, and `pnpm exec anything` are not, whatever their origin. This is
+ * checked on the argument array, so a refused subcommand cannot be reached by quoting, spacing, or
+ * nesting, and it is matched on the executable's base name so that an absolute path to the same binary
+ * is the same command.
+ *
+ * The allowed form is exactly `"<manager>" "run" "<script>"`, with nothing but forwarded arguments
+ * after the script. That last part is not pedantry: `npm run --if-present lint` and
+ * `npm run --silent lint` both run `lint`, and both put a flag where the script name belongs. A flag
+ * there is consumed by the manager rather than forwarded, so it can change which script runs, whether
+ * it is an error, or whether the `pre`/`post` hooks fire at all. A rule that allowed flags in that
+ * position would decide the hook question by accident, so the form is fixed instead. Arguments after a
+ * `--` are forwarded to the script and are left alone.
  */
 export function assertPackageManagerInvocation(
-  packageManager: NodePackageManager,
+  packageManager: string,
   args: readonly string[],
 ): void {
   const first = args[0];
 
   if (first === undefined) {
+    // `<manager>` on its own prints help. It runs no project code, so there is nothing to allow or
+    // refuse, and refusing it would only make the failure message worse.
     return;
   }
 
-  if (first === "run" || first === "run-script") {
-    const script = args[1];
-
-    if (script !== undefined && FORBIDDEN_PACKAGE_SCRIPTS.includes(script)) {
-      throw new ProjectAdapterError(
-        "command_forbidden",
-        `The "${script}" script is a package lifecycle hook and is never executed by this framework.`,
-      );
-    }
-
-    return;
-  }
-
-  if (FORBIDDEN_PACKAGE_MANAGER_COMMANDS.includes(first)) {
+  if (!ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS.includes(first)) {
     throw new ProjectAdapterError(
       "command_forbidden",
-      `The package-manager subcommand "${first}" is refused: this framework never installs dependencies, runs lifecycle hooks, publishes, or executes arbitrary code.`,
+      `The package-manager subcommand "${first}" is refused. This framework invokes a package manager only as "${ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS.map((entry) => `"${entry}"`).join(" or ")} <script>", because every other subcommand either installs or mutates the dependency tree, reaches a registry, publishes, or executes an arbitrary binary instead of running the check the project declared. State the tool directly.`,
     );
   }
+
+  const script = args[1];
+
+  if (script === undefined || script.startsWith("-")) {
+    throw new ProjectAdapterError(
+      "command_forbidden",
+      `The "${first}" subcommand of "${packageManager}" needs a script name as its first argument, and a flag cannot be one. This framework accepts only "${packageManager} ${first} <script>" with nothing but forwarded arguments after the script, because a flag in the script's position is consumed by the manager instead of the script and can change which script runs, or whether the implicit pre and post hooks fire at all. State the tool directly.`,
+    );
+  }
+
+  if (FORBIDDEN_PACKAGE_SCRIPTS.includes(script)) {
+    throw new ProjectAdapterError(
+      "command_forbidden",
+      `The "${script}" script is a package lifecycle hook and is never executed by this framework.`,
+    );
+  }
+
+  const forwarded = forwardedArguments(args);
+
+  if (forwarded === null) {
+    throw new ProjectAdapterError(
+      "command_forbidden",
+      `The arguments after "${packageManager} ${first} ${script}" include a flag that "${packageManager}" would consume itself rather than forward to "${script}". This framework accepts only arguments after a "--" separator, so that every argument the script receives is visible to the hook policy. State the tool directly.`,
+    );
+  }
+}
+
+/**
+ * The arguments the script itself would receive, or `null` if the manager would take one of them first.
+ *
+ * Everything after a `--` is forwarded verbatim. Everything before it is the manager's own, and a
+ * manager that reads `--ignore-scripts` or `--silent` or `--if-present` there changes the run in ways
+ * the framework does not model, so it is refused rather than interpreted.
+ */
+function forwardedArguments(args: readonly string[]): readonly string[] | null {
+  const separator = args.indexOf("--");
+
+  const managerOwned = separator === -1 ? args.slice(2) : args.slice(2, separator);
+
+  return managerOwned.some((argument) => argument.startsWith("-")) ? null : managerOwned;
+}
+
+/**
+ * The script a package-manager invocation names, or `null` when the invocation names none.
+ *
+ * This is what makes a configured command answerable to the implicit-hook rule. A project that writes
+ * `{ "executable": "npm", "args": ["run", "lint"] }` has asked for the same dispatch the detection
+ * would have produced, and the `prelint` script it implies is the same implied script either way, so
+ * the name is derived here and carried on the planned command rather than being assumed from the
+ * command's `source`. A configured command that names the tool itself, such as `eslint .`, yields
+ * `null` and involves no package manager at all.
+ */
+export function packageManagerScriptOf(
+  executable: string,
+  args: readonly string[],
+): string | null {
+  if (!PACKAGE_MANAGER_EXECUTABLES.has(commandBaseName(executable))) {
+    return null;
+  }
+
+  const first = args[0];
+
+  if (first === undefined || !ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS.includes(first)) {
+    return null;
+  }
+
+  const script = args[1];
+
+  return script === undefined || script.startsWith("-") ? null : script;
 }
 
 /**
@@ -332,6 +400,10 @@ export function buildVerificationCommand(input: {
   readonly executable: string;
   readonly args: readonly string[];
   readonly cwd: string;
+  /**
+   * The project script this runs. Detection states it, and a configured command's is derived from its
+   * own argument array, so the implicit-hook policy sees the same fact in both cases.
+   */
   readonly script: string | null;
   readonly source: "detected" | "configured";
 }): PlannedVerificationCommand {
@@ -339,7 +411,16 @@ export function buildVerificationCommand(input: {
   assertArgs(input.args);
   assertNoCommandShell(input.executable, input.args);
 
-  if (isNodePackageManager(input.executable)) {
+  const baseName = commandBaseName(input.executable);
+
+  if (ARBITRARY_PACKAGE_RUNNERS.has(baseName)) {
+    throw new ProjectAdapterError(
+      "command_forbidden",
+      `The executable "${input.executable}" is refused. Every "npx" invocation names a package to download and run, so there is no form of it that is a check of this project; a subcommand allowlist does not apply to it, because the first argument is a package name rather than a subcommand. Name the tool itself, and its version is then whatever the project installed.`,
+    );
+  }
+
+  if (PACKAGE_MANAGER_EXECUTABLES.has(baseName)) {
     assertPackageManagerInvocation(input.executable, input.args);
   }
 

@@ -10,7 +10,8 @@ export type OpenCodeAdapterErrorCode =
   | "malformed_response"
   | "invalid_result"
   | "unsafe_output_path"
-  | "project_plugin_detected";
+  | "project_plugin_detected"
+  | "opencode_configuration_tampered";
 
 export interface OpenCodeAdapterErrorOptions {
   readonly cause?: unknown;

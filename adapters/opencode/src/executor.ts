@@ -3,6 +3,7 @@ import {
   type StageExecutionResult,
   type StageExecutor,
 } from "@agent-workflow-kit/orchestration";
+import { assertOpenCodeConfigurationIntegrity } from "./configuration-integrity.js";
 import { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
 import {
   assertNoProjectLocalPlugins,
@@ -56,6 +57,7 @@ export interface OpenCodeStageExecutorOptions {
  * ```
  * StageExecutionRequest
  *   -> project-local plugin preflight   (refuse repository plugin code, before anything runs)
+ *   -> configuration integrity          (refuse a tampered agent file or opencode.json)
  *   -> prompt and agent id            (deterministic, orchestrator-routed context only)
  *   -> OpenCodeTransport              (substitutable; the real one spawns the CLI)
  *   -> structured response parsing     (a fenced JSON payload, never prose)
@@ -68,6 +70,11 @@ export interface OpenCodeStageExecutorOptions {
  * name, a smuggled workflow field, or repository-supplied OpenCode plugin code is thrown as an
  * `OpenCodeAdapterError` so the orchestrator reports an executor failure instead of trusting the
  * agent.
+ *
+ * The two preflight checks answer different questions and neither substitutes for the other. The plugin
+ * preflight asks whether the repository ships OpenCode code at all. The configuration integrity check
+ * asks whether the framework's own OpenCode configuration is still the framework's, which is the
+ * question a repository answers by editing a generated file rather than by adding a plugin.
  */
 export class OpenCodeStageExecutor implements StageExecutor {
   readonly #transport: OpenCodeTransport;
@@ -98,6 +105,15 @@ export class OpenCodeStageExecutor implements StageExecutor {
         this.#options.pluginPreflightOptions,
       );
     }
+
+    // Before the prompt is built and before the transport is touched. A generated agent file is not
+    // project implementation and is deliberately outside the implementation fingerprint, so the
+    // verification path has nothing to compare it against; this is the only place that does, and the
+    // only place where a file rewritten by a command that exited 0 is noticed before a model reads it.
+    await assertOpenCodeConfigurationIntegrity({
+      workingDirectory: this.#options.workingDirectory,
+      role: request.role,
+    });
 
     const prompt = buildStagePrompt({
       request,

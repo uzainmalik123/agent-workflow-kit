@@ -721,6 +721,140 @@ describe("workspace mutation during verification", () => {
   });
 });
 
+describe("control plane mutation during verification", () => {
+  const collectStatic = async (project: Project, provider: ProjectVerificationProvider) =>
+    provider.collect({
+      featureId: "F-001",
+      stage: "static_verification",
+      verification: "static",
+      revision: 1,
+      projectRoot: project.root,
+    });
+
+  /**
+   * A session in the same shape the persistence adapter writes, at the revision and state a static
+   * stage starts from. The slug is the one `createFeatureSessionStore` derives from `F-001-t`, because
+   * a test that wrote to `.agentflow/F-001/session.json` would be measuring a path no run ever uses.
+   */
+  const sessionJson = (state: string, revision: number): string =>
+    `${JSON.stringify(
+      {
+        feature: {
+          id: "F-001",
+          slug: "F-001-t",
+          title: "Feature",
+          summary: "Summary.",
+          request: "Do the thing.",
+          risk: "low",
+        },
+        machine: { state, revision, history: [] },
+        artifacts: { request: "request.md", spec: "spec.json", plan: "plan.md" },
+        approvals: { plan: null },
+      },
+      null,
+      2,
+    )}\n`;
+
+  it("refuses a stage whose command moved the session past a stage it never ran", async () => {
+    // The exact bypass this exists for: the same revision, a legal successor, exit 0. The state machine
+    // would compute the next transition from the file on disk, turn the static commit into a
+    // test-to-runtime advance, and never run the test stage.
+    const project = await makeNodeProject(
+      `#!/bin/sh\nprintf '%s' '${sessionJson("test_verification", 11).replace(/'/g, "'\\''")}' > .agentflow/features/F-001-t/session.json\nexit 0\n`,
+      { lint: "runner" },
+    );
+
+    await mkdir(project.path(".agentflow/features/F-001-t"), { recursive: true });
+    await writeFile(project.path(".agentflow/features/F-001-t/session.json"), sessionJson("static_verification", 11), "utf8");
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    // The command succeeded. The stage did not, and the reason is the control plane, not the tree: the
+    // implementation fingerprint is untouched, which is why the revision check alone did not catch it.
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed", exitCode: 0 });
+    expect(bundle.outcome).toBe("failed");
+    expect(bundle.workspace.changed).toBe(false);
+    expect(bundle.controlPlane.changed).toBe(true);
+    expect(bundle.controlPlane.before).not.toBe(bundle.controlPlane.after);
+  });
+
+  it("refuses a stage whose command deleted the recorded evidence history", async () => {
+    const project = await makeNodeProject(
+      `#!/bin/sh\nrm -f .agentflow/features/F-001-t/history.json\nexit 0\n`,
+      { lint: "runner" },
+    );
+
+    await mkdir(project.path(".agentflow/features/F-001-t"), { recursive: true });
+    await writeFile(project.path(".agentflow/features/F-001-t/session.json"), sessionJson("static_verification", 11), "utf8");
+    await writeFile(project.path(".agentflow/features/F-001-t/history.json"), '[{"entry":"one"}]\n', "utf8");
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.controlPlane.changed).toBe(true);
+    expect(bundle.outcome).toBe("failed");
+  });
+
+  it("refuses a stage whose command rewrote the generated OpenCode configuration", async () => {
+    const project = await makeNodeProject(
+      `#!/bin/sh\nmkdir -p .opencode/agents\necho '# rewritten' > .opencode/agents/verifier.md\nexit 0\n`,
+      { lint: "runner" },
+    );
+
+    await mkdir(project.path(".opencode/agents"), { recursive: true });
+    await writeFile(project.path(".opencode/agents/verifier.md"), "# generated\n", "utf8");
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    // The adapter refuses the tampered file before any model reads it, and this is the layer that
+    // noticed it at all: the implementation fingerprint ignores `.opencode/` by design.
+    expect(bundle.workspace.changed).toBe(false);
+    expect(bundle.controlPlane.changed).toBe(true);
+    expect(bundle.outcome).toBe("failed");
+  });
+
+  it("reports an unchanged control plane for a clean run, so a clean run is provably clean", async () => {
+    const project = await makeNodeProject(exitWith(0), { lint: "runner" });
+
+    await mkdir(project.path(".agentflow/features/F-001-t"), { recursive: true });
+    await writeFile(project.path(".agentflow/features/F-001-t/session.json"), sessionJson("static_verification", 11), "utf8");
+    await mkdir(project.path(".opencode/agents"), { recursive: true });
+    await writeFile(project.path(".opencode/agents/verifier.md"), "# generated\n", "utf8");
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    expect(bundle.controlPlane.changed).toBe(false);
+    expect(bundle.outcome).toBe("passed");
+  });
+
+  it("measures a project with no control-plane directories as stable rather than broken", async () => {
+    const project = await makeNodeProject(exitWith(0), { lint: "runner" });
+
+    const bundle = await collectStatic(project, new ProjectVerificationProvider({ projectRoot: project.root }));
+
+    // Nothing there to change, hashed on both sides, so a project that does not use these directories
+    // gets a real digest rather than a missing one.
+    expect(bundle.controlPlane.before).toBe(bundle.controlPlane.after);
+    expect(bundle.controlPlane.changed).toBe(false);
+  });
+
+  it("notices a control-plane change made between two collections, so the digest cannot be a stale constant", async () => {
+    const project = await makeNodeProject(exitWith(0), { lint: "runner" });
+
+    await mkdir(project.path(".opencode"), { recursive: true });
+    await writeFile(project.path(".opencode/opencode.json"), '{"plugin":[]}\n', "utf8");
+
+    const provider = new ProjectVerificationProvider({ projectRoot: project.root });
+    const before = await collectStatic(project, provider);
+
+    await writeFile(project.path(".opencode/opencode.json"), '{"plugin":["-x"]}\n', "utf8");
+
+    const after = await collectStatic(project, provider);
+
+    expect(after.controlPlane.before).not.toBe(before.controlPlane.before);
+    expect(after.controlPlane.changed).toBe(false);
+  });
+});
+
 describe("implicit pre and post script hooks", () => {
   const collectStatic = async (project: Project) =>
     new ProjectVerificationProvider({ projectRoot: project.root }).collect({
@@ -841,6 +975,84 @@ describe("implicit pre and post script hooks", () => {
 
     expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed", exitCode: 0 });
     expect(checkFor(bundle, "lint")?.stdoutExcerpt).toContain("checked");
+    expect(bundle.outcome).toBe("passed");
+  });
+
+  it("blocks a configured `npm run lint` when the project has a prelint, because the config cannot grant itself an exemption", async () => {
+    const project = await makeNodeProject(exitWith(0, "checked"), { prelint: "runner", lint: "runner" });
+
+    // A configured command used to skip the startup checks entirely on the grounds that the operator
+    // asked for it. That is exactly the gap: the operator can also be the person who added `prelint`, and
+    // `npm run lint` dispatches it the same way detection would.
+    await writeFile(
+      project.path(PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        schemaVersion: 1,
+        verification: { static: [{ id: "lint", capability: "lint", executable: "npm", args: ["run", "lint"] }] },
+      }),
+      "utf8",
+    );
+
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "blocked", reason: "implicit_script_hook" });
+    expect(checkFor(bundle, "lint")?.detail).toContain("prelint");
+    expect(bundle.outcome).toBe("blocked");
+  });
+
+  it("blocks a configured `npm run lint` on a postlint hook, on the same terms as a detected one", async () => {
+    const project = await makeNodeProject(exitWith(0, "checked"), { lint: "runner", postlint: "runner" });
+
+    await writeFile(
+      project.path(PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        schemaVersion: 1,
+        verification: { static: [{ id: "lint", capability: "lint", executable: "npm", args: ["run", "lint"] }] },
+      }),
+      "utf8",
+    );
+
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "blocked", reason: "implicit_script_hook" });
+    expect(checkFor(bundle, "lint")?.detail).toContain("postlint");
+  });
+
+  it("lets a configured package-manager command with no hook run, so the ordinary case is not blocked", async () => {
+    const project = await makeNodeProject(exitWith(0, "checked"), { lint: "runner" });
+
+    await writeFile(
+      project.path(PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        schemaVersion: 1,
+        verification: { static: [{ id: "lint", capability: "lint", executable: "npm", args: ["run", "lint"] }] },
+      }),
+      "utf8",
+    );
+
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed", exitCode: 0 });
+    expect(bundle.outcome).toBe("passed");
+  });
+
+  it("lets a configured direct tool run even when a same-named script has a hook, since no manager dispatches it", async () => {
+    const project = await makeNodeProject(exitWith(0, "checked"), { prelint: "runner", lint: "runner" });
+
+    await writeFile(
+      project.path(PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        schemaVersion: 1,
+        verification: {
+          static: [{ id: "lint", capability: "lint", executable: "./node_modules/.bin/runner", args: ["--check"] }],
+        },
+      }),
+      "utf8",
+    );
+
+    const bundle = await collectStatic(project);
+
+    expect(checkFor(bundle, "lint")).toMatchObject({ status: "passed", exitCode: 0 });
     expect(bundle.outcome).toBe("passed");
   });
 

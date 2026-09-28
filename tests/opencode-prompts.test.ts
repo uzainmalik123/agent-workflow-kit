@@ -206,6 +206,7 @@ describe("deterministic verification evidence in the prompt", () => {
       revision: 7,
       implementationFingerprint: "b".repeat(64),
       workspace: { before: "b".repeat(64), after: "b".repeat(64), changed: false },
+      controlPlane: { before: "b".repeat(64), after: "b".repeat(64), changed: false },
       collectedAt: created,
       projectRoot: "/repo",
       project: {

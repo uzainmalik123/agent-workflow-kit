@@ -63,6 +63,7 @@ export function passingEvidenceFor(
     revision: request.revision,
     implementationFingerprint: FINGERPRINT,
     workspace: { before: FINGERPRINT, after: FINGERPRINT, changed: false },
+    controlPlane: { before: FINGERPRINT, after: FINGERPRINT, changed: false },
     collectedAt: "2026-04-05T06:07:08.000Z",
     projectRoot: request.projectRoot,
     project: profileSummary(),

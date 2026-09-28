@@ -98,14 +98,33 @@ root or a subdirectory of it. There is no third shape:
   not assemble;
 - a missing dependency is reported and never repaired, because installing would execute
   repository-defined lifecycle hooks without a human having approved anything about it;
-- `add`, `install`, `remove`, `exec`, `dlx`, and lifecycle script names (`preinstall`, `install`,
-  `postinstall`, `prepare`, `prepublish`, …) are refused by the command policy itself, so a project
-  configuration cannot ask for them either;
+- the package-manager allowlist is exactly one form: `"<manager>" "run" "<script>"`, matched on the
+  executable's basename, so an absolute path to the same binary is the same command. Everything else is
+  refused, which is what covers the shorthand aliases as well: `npm test` and `pnpm test` dispatch
+  exactly what `run test` would, hooks included, so allowing them while refusing `run test` would be a
+  hole with a one-word key. `install`, `ci`, `add`, `remove`, `exec`, `dlx`, `view`, `info`, `search`,
+  `audit`, `pack`, `publish`, and `dist-tag` are all refused for the same reason, and so are the
+  lifecycle script names (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`, …);
+- a flag is refused in the script's position and before the `--` separator, so the only accepted
+  arguments after the script are forwarded ones. `npm run --if-present lint` and `npm run --silent
+  lint` both run `lint` with a manager flag where the script name belongs; a rule that allowed flags
+  there would be deciding the hook question by accident, since a flag can change which script runs or
+  whether the `pre` and `post` hooks fire at all. `npm run lint -- --fix` is accepted, because
+  everything after `--` belongs to the script and the manager is not reading it;
+- `npx` is refused outright rather than held to the subcommand allowlist. It takes a package name where
+  a manager takes a subcommand, so `npx run lint` names a package called `run`, and a list that
+  happened to contain `run` would permit a download and an execution of the operator's choosing while
+  claiming to have applied the allowlist;
 - a detected script that declares a `pre<name>` or `post<name>` hook is blocked, not run. Running
   `pnpm run lint` where the manifest also declares `prelint` executes code the stage never offered,
   through whichever manager happens to be installed, and the block says which hook was found and that
   the tool should be declared directly instead. The policy is the same for pnpm, npm, yarn, and bun,
   and it is a block rather than a fallback, because the fallback would be to execute a hook anyway;
+- the hook policy reads the script name, not the command's origin, so a configured `npm run lint` is
+  blocked by a `prelint` script exactly as a detected `pnpm run lint` would be. Being explicit about
+  the command in `agent-workflow.config.json` does not grant an exemption from the manifest's own
+  lifecycle rules, and the same file is where the escape is meant to be taken: declaring the tool
+  itself, `./node_modules/.bin/eslint .`, derives no script, involves no package manager, and runs;
 - no error message, evidence record, or excerpt contains an argument list or an environment value.
 
 ## Project configuration
@@ -198,6 +217,32 @@ per run rather than once per session: a session-long digest could be correct whe
 stale by the time the commands finished. A project that could not be measured at all records an
 all-zero fingerprint, which is visibly not a real digest. The `maxFiles` and `maxFileBytes` bounds cap
 what is reported and hashed; they are not a defense against a hostile tree.
+
+## Control plane integrity
+
+The workspace measurement above is the implementation, and it deliberately excludes `.agentflow/` and
+`.opencode/`. That exclusion is right for judging the code and wrong for judging the framework: neither
+directory is implementation, so neither belongs in a digest that answers "is this the code the checks
+ran against".
+
+The same bracketing is therefore applied a second time to those two directories, and the bundle carries
+`controlPlane: { before, after, changed }` beside the workspace pair. It is a detection and not a lock:
+nothing stops the write, and the after-digest turns it into a stage that cannot pass.
+
+What it catches is specific. A verification command is repository-defined code, and it can write to the
+session it is running inside. A revision bump is already refused, because finalization is a
+revision-guarded mutation, but a rewrite that leaves the revision alone is not: the state machine reads
+the file on disk, so a session moved from `static_verification` to `test_verification` during the static
+run turns that commit into a test-to-runtime advance and the test stage never runs. Both digests being
+equal is the only statement that nothing did that, and a project with neither directory hashes an empty
+selection, so the common case is a real digest rather than a missing one.
+
+A changed control plane forces the stage to `failed` with a finding naming both digests, on the same
+terms as a changed workspace, and a bundle claiming `passed` or `deferred` over one is refused during
+validation. The recorded evidence carries the pair to the verifier, and the prompt renders it as its own
+section, because a model shown only passing exit codes has no way to know that a command rewrote the
+rules it is being asked to apply. The OpenCode adapter's configuration integrity check is the second
+layer and the tighter one: this one fails the stage, that one refuses to load the file.
 
 ## Orchestration contract
 

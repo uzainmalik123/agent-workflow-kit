@@ -93,6 +93,7 @@ export type {
   VerificationProvider,
   VerificationRequest,
   VerificationStage,
+  ControlPlaneIntegrity,
   WorkspaceIntegrity,
 } from "./verification.js";
 

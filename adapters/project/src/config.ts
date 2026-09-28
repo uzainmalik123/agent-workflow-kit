@@ -4,6 +4,7 @@ import {
   buildVerificationCommand,
   CAPABILITIES_BY_STAGE,
   capabilityBelongsToStage,
+  packageManagerScriptOf,
   type PlannedVerificationCommand,
 } from "./commands.js";
 import { ProjectAdapterError } from "./errors.js";
@@ -17,12 +18,18 @@ import { isFile, isRecord, parseJsonFile, readProjectFile, resolveInsideRoot } f
  * declares the command itself, and the framework still executes it as an executable plus an argument
  * array, still refuses lifecycle and install invocations, and still records the exit status.
  *
- * Three things are structurally impossible here. A shell line cannot be written: the only accepted
+ * Four things are structurally impossible here. A shell line cannot be written: the only accepted
  * shape is `{ id, capability, executable, args }` plus an optional `cwd`, any other field is refused,
  * and a `command` or `shell` string has nowhere to go. A shell wrapper cannot do the same thing one
- * level down, because `{ "executable": "/bin/sh", "args": ["-c", ...] }` is refused by name. And a
+ * level down, because `{ "executable": "/bin/sh", "args": ["-c", ...] }` is refused by name. A
  * command cannot claim a capability its section does not cover, so a test command cannot answer the
- * static stage. The file is also project configuration rather than agent output: the OpenCode
+ * static stage. And a package manager can only be asked to `run` a script, because every other
+ * subcommand either installs, mutates, publishes, or reaches a registry.
+ *
+ * Being explicit does not exempt a command from the implicit-hook policy either. `{ "executable":
+ * "npm", "args": ["run", "lint"] }` is the same dispatch as the detected form, so a `prelint` script
+ * blocks it; declaring the tool itself, as `eslint .`, is the way to run a check whose script has
+ * neighbouring hooks. The file is also project configuration rather than agent output: the OpenCode
  * adapter denies writing it to every role, and this adapter never writes it.
  */
 export const PROJECT_CONFIG_FILENAME = "agent-workflow.config.json";
@@ -128,7 +135,13 @@ function parseCommand(
     executable,
     args,
     cwd: cwd === undefined ? root : resolveInsideRoot(root, cwd),
-    script: null,
+    // A configured command that goes through a package manager is the same dispatch detection would
+    // have produced, so the script it names is derived here. Being explicit about the command does not
+    // make the manifest's `pre` and `post` scripts stop applying, and the hook policy reads the script
+    // name rather than the command's source, so `npm run lint` is blocked by a `prelint` script
+    // exactly as `pnpm run lint` is. A configured command that names the tool itself derives `null`
+    // and involves no package manager, which is the documented way out.
+    script: packageManagerScriptOf(executable, args),
     source: "configured",
   });
 }

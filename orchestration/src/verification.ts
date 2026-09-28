@@ -154,6 +154,31 @@ export interface WorkspaceIntegrity {
   readonly changed: boolean;
 }
 
+/**
+ * The control plane, measured on both sides of a stage's commands.
+ *
+ * `.agentflow/` and `.opencode/` are excluded from the implementation fingerprint on purpose: neither
+ * is project code, and a generated agent file is not an implementation. That exclusion is what leaves
+ * them unguarded, and a verification command is repository-defined code, so it can write to both. A
+ * command that moves the workflow state past a stage it has not run, deletes the recorded evidence
+ * history, or rewrites the generated agent file for the role that is about to run would leave a green
+ * exit code and a workflow that quietly skipped a stage.
+ *
+ * The session revision check catches a command that changes the revision, because finalization is a
+ * revision-guarded mutation. It does not catch one that leaves the revision alone: the state machine
+ * then computes the next transition from the file on disk, so a machine moved from `static_verification`
+ * to `test_verification` during the static run turns the static commit into a test-to-runtime advance
+ * and the test stage never runs. This pair of measurements is the lightweight check that closes it.
+ */
+export interface ControlPlaneIntegrity {
+  /** The control-plane directories as they were immediately before the stage's commands ran. */
+  readonly before: string;
+  /** The same measurement, taken immediately after the last command finished. */
+  readonly after: string;
+  /** True when the two differ. A command that wrote here is a failure whatever it exited with. */
+  readonly changed: boolean;
+}
+
 export interface VerificationEvidenceBundle {
   readonly verification: VerificationStage;
   readonly outcome: VerificationOutcome;
@@ -165,6 +190,12 @@ export interface VerificationEvidenceBundle {
    */
   readonly implementationFingerprint: string;
   readonly workspace: WorkspaceIntegrity;
+  /**
+   * The framework's own state, bracketing the run the same way. A change here means a project command
+   * reached into workflow state or the generated OpenCode configuration, which no verification command
+   * is ever supposed to do.
+   */
+  readonly controlPlane: ControlPlaneIntegrity;
   readonly collectedAt: string;
   readonly projectRoot: string;
   readonly project: ProjectProfileSummary;
@@ -267,8 +298,10 @@ function optionalStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
+type IntegrityPair = { readonly before: string; readonly after: string; readonly changed: boolean };
+
 type WorkspaceValidation =
-  | { readonly ok: true; readonly integrity: WorkspaceIntegrity }
+  | { readonly ok: true; readonly integrity: IntegrityPair }
   | { readonly ok: false; readonly message: string };
 
 /**
@@ -288,21 +321,44 @@ function validateWorkspaceIntegrity(value: unknown): WorkspaceValidation {
     };
   }
 
+  return validateIntegrityPair(value, "workspace");
+}
+
+function validateControlPlaneIntegrity(value: unknown): WorkspaceValidation {
+  if (!isRecord(value)) {
+    return {
+      ok: false,
+      message:
+        "A verification evidence bundle must carry a control-plane measurement taken before and after its commands ran.",
+    };
+  }
+
+  return validateIntegrityPair(value, "control-plane");
+}
+
+/**
+ * Both bracketed measurements are the same shape, so they are checked the same way: the two hashes have
+ * to agree with the `changed` flag, in both directions. A provider that reports `changed: false` with
+ * two different digests has hidden a mutation, and one that reports `changed: true` with two identical
+ * digests has invented a reason to fail a stage. Either is a provider that cannot be believed about
+ * either.
+ */
+function validateIntegrityPair(value: Record<string, unknown>, label: string): WorkspaceValidation {
   if (!isFingerprint(value["before"]) || !isFingerprint(value["after"])) {
     return {
       ok: false,
-      message: "A workspace measurement must carry a SHA-256 fingerprint for each side of the run.",
+      message: `A ${label} measurement must carry a SHA-256 fingerprint for each side of the run.`,
     };
   }
 
   if (typeof value["changed"] !== "boolean") {
-    return { ok: false, message: "A workspace measurement must state whether the tree changed." };
+    return { ok: false, message: `A ${label} measurement must state whether it changed.` };
   }
 
   if (value["changed"] !== (value["before"] !== value["after"])) {
     return {
       ok: false,
-      message: `A workspace measurement claims changed=${String(value["changed"])} while its own fingerprints are ${value["before"] === value["after"] ? "identical" : "different"}.`,
+      message: `A ${label} measurement claims changed=${String(value["changed"])} while its own fingerprints are ${value["before"] === value["after"] ? "identical" : "different"}.`,
     };
   }
 
@@ -493,6 +549,12 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
     );
   }
 
+  const controlPlane = validateControlPlaneIntegrity(raw["controlPlane"]);
+
+  if (!controlPlane.ok) {
+    return invalid(controlPlane.message);
+  }
+
   if (typeof raw["projectRoot"] !== "string" || raw["projectRoot"].length === 0) {
     return invalid("Verification evidence bundle must carry the project root it ran in.");
   }
@@ -581,14 +643,32 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
     );
   }
 
-  // A failure needs a witness. A failed check is the usual one, and a workspace that changed under a
-  // run of otherwise-passing checks is the other: those results describe code that no longer exists.
+  // The same two rules for the control plane. A command that wrote to `.agentflow/` or `.opencode/`
+  // was not checking anything, so every check it reported describes a state the workflow is no longer
+  // in, and a deferred stage that changed it means something did run.
+  if (controlPlane.integrity.changed && outcome === "passed") {
+    return invalid(
+      'Verification evidence claims "passed" while the framework state or the generated OpenCode configuration changed while its commands ran, so a project command reached into the control plane.',
+    );
+  }
+
+  if (controlPlane.integrity.changed && outcome === "deferred") {
+    return invalid(
+      'Verification evidence claims "deferred" while the framework state or the generated OpenCode configuration changed while its commands ran.',
+    );
+  }
+
+  // A failure needs a witness. A failed check is the usual one, and a measurement that changed under a
+  // run of otherwise-passing checks is the other: those results describe something that no longer exists.
   if (
     outcome === "failed" &&
     !checks.some((check) => check.status === "failed") &&
-    !workspace.integrity.changed
+    !workspace.integrity.changed &&
+    !controlPlane.integrity.changed
   ) {
-    return invalid('Verification evidence claims "failed" without a failed check or a changed workspace.');
+    return invalid(
+      'Verification evidence claims "failed" without a failed check, a changed workspace, or a changed control plane.',
+    );
   }
 
   if (outcome === "blocked" && !checks.some((check) => check.status === "blocked")) {
@@ -607,6 +687,7 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
       revision: raw["revision"],
       implementationFingerprint: fingerprint,
       workspace: workspace.integrity,
+      controlPlane: controlPlane.integrity,
       collectedAt: raw["collectedAt"],
       projectRoot: raw["projectRoot"],
       project: {
@@ -760,7 +841,25 @@ export function verificationFailureFindings(
       ]
     : [];
 
-  return [...mutationFindings, ...checkFindings];
+  // So is a write into the control plane. Nothing a verification stage legitimately runs has a reason
+  // to edit workflow state or the generated OpenCode configuration, and a command that did so while
+  // exiting 0 is exactly the case a fixer cannot be told about with "lint passed".
+  const controlPlaneFindings: ReviewFinding[] = bundle.controlPlane.changed
+    ? [
+        {
+          featureId,
+          severity: "error" as const,
+          message: [
+            `The framework control plane changed while the ${bundle.verification} checks were running.`,
+            "A verification command wrote to .agentflow/ or .opencode/, so it reached into workflow state or into the generated OpenCode configuration, and the stage cannot pass.",
+            `Before: ${bundle.controlPlane.before}. After: ${bundle.controlPlane.after}.`,
+            "No verification command has a legitimate reason to write there. Check the command for a formatter, a code generator, or a script that mutates state, and make it read-only.",
+          ].join(" "),
+        },
+      ]
+    : [];
+
+  return [...mutationFindings, ...controlPlaneFindings, ...checkFindings];
 }
 
 /**

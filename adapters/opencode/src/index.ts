@@ -1,6 +1,17 @@
 export { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
 export type { OpenCodeAdapterErrorCode } from "./errors.js";
 
+export {
+  agentFilePathForRole,
+  assertOpenCodeConfigurationIntegrity,
+  OPENCODE_CONTROL_PLANE_DIRECTIVES,
+} from "./configuration-integrity.js";
+export type {
+  ConfigurationIntegrityOptions,
+  ConfigurationIntegrityProblem,
+  ConfigurationIntegrityReason,
+} from "./configuration-integrity.js";
+
 export { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES } from "./hard-rules.js";
 
 export {
