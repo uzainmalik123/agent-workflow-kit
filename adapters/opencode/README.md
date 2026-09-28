@@ -227,7 +227,7 @@ No session continuation, no `--attach`, no shared server. One stage run is one f
 opencode.json
 ```
 
-`renderOpenCodeProjectFiles()` returns these as `{ path, contents }` values and is byte-for-byte deterministic. `writeOpenCodeProjectFiles(root, { force })` writes them with the same symlink guards the persistence adapter uses, leaves identical files untouched, and reports a human-edited file as a `conflict` instead of silently reverting it. `opencode.json` is deliberately minimal — a schema reference and `share: "disabled"` — because the capability model lives in the agent files and model, temperature, and prompt defaults belong to the repository and the user.
+`renderOpenCodeProjectFiles()` returns these as `{ path, contents }` values and is byte-for-byte deterministic. `writeOpenCodeProjectFiles(root, { force })` writes them with the same symlink guards the persistence adapter uses, leaves identical files untouched, and reports a human-edited file as a `conflict` instead of silently reverting it. `opencode.json` is deliberately minimal — a schema reference, `share: "disabled"`, and the two plugin directives that disable every plugin and re-enable the `opencode.` namespace — because the capability model lives in the agent files and model, temperature, and prompt defaults belong to the repository and the user.
 
 ## What is customizable, and what is not
 
@@ -236,16 +236,53 @@ convention. Editing either kind is allowed; only one of them stops the workflow.
 
 **Framework-controlled, verified before every run.** The agent file's frontmatter, which is the ordered
 `permissions` rule list and the `mode` that keeps these agents out of the subagent graph. Every framework
-hard rule, which has to be present verbatim. And in `opencode.json`, the `plugins` list and the `share`
-setting.
+hard rule, which has to be present verbatim. In `opencode.json`, the `plugins` list and the `share`
+setting. The generated file's uniqueness as the only definition of the role's agent id. The absence of
+any other repository-local project config. And the root config fields in
+[`FRAMEWORK_SENSITIVE_CONFIG_FIELDS`](#configuration-integrity-checked-before-every-run), which have to
+be absent.
 
 **Project-owned, and yours to edit.** The prose under each role's instructions: what the role is for,
 house style, domain vocabulary, the way you want findings worded. `AGENTS.md`, read by
-`project-instructions.ts`, is entirely project guidance. Every other `opencode.json` field, including the
-model, temperature, and provider settings. The allowlist here is deliberately narrow rather than
-byte-for-byte, so a model preference is not treated as a security change — but the `plugins` list is
-compared element by element and in order, because V2 applies directives in sequence and a later entry
-re-enables what an earlier one disabled.
+`project-instructions.ts`, is entirely project guidance. Your own OpenCode agents, under ids of their
+own. And the `opencode.json` fields that choose what talks to the model or how a session looks:
+`model`, `small_model`, `provider`, `enabled_providers`, `disabled_providers`, `logLevel`, `layout`,
+`username`, `snapshot`, `autoupdate`, `tool_output`, `compaction`, `attachment`.
+
+The check is a narrow list rather than a byte comparison, so a model preference is never treated as a
+security change. Three things are compared rather than merely required to be present: the `plugins` list
+element by element and in order, because V2 applies directives in sequence and a later entry re-enables
+what an earlier one disabled; `share`, which has to stay disabled; and the set of files that resolve to
+the role's agent id, which has to be exactly one.
+
+### The framework-owned root config fields
+
+`FRAMEWORK_SENSITIVE_CONFIG_FIELDS` is a short, explicit list, and it is the set of `opencode.json`
+fields that can move the permission or instruction boundary a stage run depends on — the same boundary
+the generated agent file states in its frontmatter and hard rules:
+
+| Field | Why it is refused |
+| --- | --- |
+| `agent`, `agents`, `mode`, `default_agent` | Redefine a role's prompt, permissions, mode, or tool list, or choose which agent a run starts as. |
+| `permission`, `permissions`, `tools` | Override or re-grant the permission rules the generated agent file carries. |
+| `command`, `instructions`, `skills` | Add a prompt template, an instruction file, or a skill source the generated agent never agreed to read. |
+| `mcp`, `plugin` | Start MCP servers or name plugin directives, either of which contributes a tool to every agent. |
+| `references`, `reference` | Pull configuration in from a git or local directory reference, which is another config source. |
+| `experimental`, `lsp` | Carry policy effects and `primary_tools`, and start language servers — processes a stage run does not authorize. |
+| `autoshare` | Publishes new sessions, the deprecated spelling of `share`. |
+
+Each entry in the export carries the same explanation as a string, and the refusal quotes it, so the
+error says what the field would have done rather than only naming it. The list is a security policy, not
+a re-implementation of the OpenCode config schema, and it is not an allowlist of everything the framework
+happens not to write — the generated config is deliberately minimal, so an allowlist of it would refuse
+every legitimate project preference.
+
+One naming note, because it is load-bearing. The published V2 config schema
+(`https://opencode.ai/config.json`) defines the directive array as `plugin` and sets
+`additionalProperties: false`; it does not define `plugins`. The generated file has always written
+`plugins`, and the check verifies `plugins` by value while refusing `plugin` outright, so both spellings
+are covered and neither can be used to widen a run. Whether the generated key should be renamed to
+match the current schema is a separate decision from this boundary, and it is not made here.
 
 ## Configuration integrity, checked before every run
 
@@ -261,21 +298,40 @@ verification records a pass, because the command did pass. The next stage then l
 and runs with it, and nothing in the verification path ever looks at `.opencode/`, so the second stage
 consumes the first stage's edit without a trace.
 
-So each run, before the prompt is built, checks that:
+Rewriting the generated file is the obvious way in, and it is not the only one. OpenCode resolves an
+agent id and a project configuration from more than one place, so a repository does not have to edit the
+file that is checked in to decide what the run loads. A second definition of the same id, a
+`opencode.jsonc` beside the generated `opencode.json`, and an `agent` block in the root config are all
+precedence — and precedence decided by the repository is precedence the framework does not hold. So the
+check reads the sources, not only the file.
 
-- the agent file for the role about to run exists, is a regular file, and is not a symlink — a missing
-  file is a failure rather than an absent requirement, because OpenCode's own fallback carries none of
-  these permissions;
-- its frontmatter matches the generated frontmatter exactly;
-- every entry of `FRAMEWORK_HARD_RULES` is present verbatim;
-- `opencode.json` parses, its `plugins` list is exactly the generated list in order, and `share` is still
-  disabled.
+Each run, before the prompt is built:
 
-A failure raises `opencode_configuration_tampered` and names the file, the reason
-(`missing`, `unreadable`, `unsafe_path`, `frontmatter_changed`, `hard_rules_missing`,
-`project_config_changed`), and the expected value. **It never repairs.** Overwriting the file would
-destroy the evidence, and regenerating it would make a tampered repository look untouched while the
-tampered content is exactly what a reviewer needs to see. The message points at
+- resolves the id the CLI is about to pass to `--agent` and walks every definition OpenCode could load
+  from `.opencode/agent/**/*.md` and `.opencode/agents/**/*.md`, refusing unless **exactly one** file
+  resolves to that id and it is the generated one;
+- derives ids the way OpenCode does, from the path relative to the agent directory: `verifier.md` is
+  `verifier` and `team/reviewer.md` is `team/reviewer`, which is why a filename check is not enough;
+- requires the agent file for the role about to run to exist, be a regular file, and not be a symlink — a
+  missing file is a failure rather than an absent requirement, because OpenCode's own fallback carries
+  none of these permissions;
+- requires its frontmatter to match the generated frontmatter exactly, and every entry of
+  `FRAMEWORK_HARD_RULES` to be present verbatim;
+- requires `opencode.jsonc`, `.opencode/opencode.json`, and `.opencode/opencode.jsonc` to be absent or
+  empty, rather than guessing which of several project configs wins;
+- requires `opencode.json` to parse, to carry no `FRAMEWORK_SENSITIVE_CONFIG_FIELDS` field, to have its
+  `plugins` list exactly equal to the generated list in order, and to keep `share` disabled.
+
+The comparison against a sorted list of definitions rather than a traversal order, the refusal of a
+symlink anywhere in an agent source directory, and the refusal of a comment-only `opencode.jsonc` all
+go the same way: a scan of a repository directory can be wrong in ways that favour the repository, and
+being unable to prove the state is the generated state is not the same as proving it is.
+
+A failure raises `opencode_configuration_tampered` and names the file, the reason (`missing`,
+`unreadable`, `unsafe_path`, `frontmatter_changed`, `hard_rules_missing`, `project_config_changed`,
+`duplicate_agent_definition`, `alternate_project_config`), and the expected value. **It never repairs.**
+Overwriting the file would destroy the evidence, and regenerating it would make a tampered repository look
+untouched while the tampered content is exactly what a reviewer needs to see. The message points at
 `writeOpenCodeProjectFiles(root, { force: true })` and leaves the decision with the operator, because the
 tamper may well be theirs.
 

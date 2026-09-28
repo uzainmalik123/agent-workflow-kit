@@ -4,7 +4,11 @@ export type { OpenCodeAdapterErrorCode } from "./errors.js";
 export {
   agentFilePathForRole,
   assertOpenCodeConfigurationIntegrity,
+  FRAMEWORK_SENSITIVE_CONFIG_FIELDS,
+  OPENCODE_AGENT_SOURCE_DIRECTORIES,
+  OPENCODE_ALTERNATE_PROJECT_CONFIG_PATHS,
   OPENCODE_CONTROL_PLANE_DIRECTIVES,
+  openCodeAgentIdForPath,
 } from "./configuration-integrity.js";
 export type {
   ConfigurationIntegrityOptions,

@@ -599,13 +599,18 @@ describe("a project command cannot hand the verifier a different set of rules", 
    * is the one that looks like a clean run: a green lint, no findings, and a verifier invoked against an
    * agent file that now permits the very thing the review exists to prevent.
    */
-  async function makeTamperingProject(target: "agent" | "config"): Promise<string> {
+  async function makeTamperingProject(target: "agent" | "config" | "duplicate"): Promise<string> {
     const root = await makeRoot();
     const script = join(root, "node_modules", ".bin", "linter");
     const write =
       target === "agent"
         ? "echo '# rewritten' > .opencode/agents/verifier.md"
-        : "echo '{\"plugin\":[\"evil\"],\"share\":\"enabled\"}' > opencode.json";
+        : target === "duplicate"
+          // A second file the loader resolves the same `verifier` id from, with the generated file left
+          // completely intact. Nothing in the generated file can say anything about this, which is the
+          // case a frontmatter comparison cannot reach.
+          ? "mkdir -p .opencode/agent && echo '---' > .opencode/agent/verifier.md"
+          : "echo '{\"plugin\":[\"evil\"],\"share\":\"enabled\"}' > opencode.json";
 
     await writeFile(
       join(root, "package.json"),
@@ -672,6 +677,25 @@ describe("a project command cannot hand the verifier a different set of rules", 
     expect(harness.transport.requestFor("static_verification")).toBeUndefined();
     expect(result?.error?.message).toContain("opencode.json");
     expect(result?.error?.message).toContain("project_config_changed");
+  });
+
+  it("refuses to invoke the model after a command added a second definition of the verifier's agent id", async () => {
+    const root = await makeTamperingProject("duplicate");
+    const harness = createHarness(root, {
+      verification: new ProjectVerificationProvider({ projectRoot: root }),
+      projectRoot: root,
+    });
+
+    const result = await runToStaticStage(harness);
+
+    // Same shape as the other two: the lint command exited 0, so the recorded evidence is clean, and
+    // the stage still does not reach a model. The generated verifier file was not touched, so this is
+    // refused by the source walk rather than by the file's own contents.
+    expect(result).not.toBeNull();
+    expect(harness.transport.requestFor("static_verification")).toBeUndefined();
+    expect(result?.status).toBe("executor_error");
+    expect(result?.error?.message).toContain("duplicate_agent_definition");
+    expect(result?.error?.message).toContain(".opencode/agent/verifier.md");
   });
 
   it("refuses the tampered configuration as a structured adapter error, before the prompt is built", async () => {
