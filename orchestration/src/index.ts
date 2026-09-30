@@ -1,17 +1,23 @@
 export {
+  isWorkspaceBaseline,
+  validateWorkspaceBaseline,
   WorkflowStateMachine,
+  WORKSPACE_ACCESS_LEVELS,
   type FixReturnState,
   type ReviewFinding,
   type VerificationEvidence,
   type WorkflowEvent,
   type WorkflowMachineSnapshot,
   type WorkflowState,
+  type WorkspaceAccessLevel,
+  type WorkspaceBaseline,
 } from "@agent-workflow-kit/core";
 
 export {
   APPROVED_ARTIFACTS,
   APPROVAL_VERIFIED_STAGES,
   DEFERRED_WORK_STATES,
+  WRITE_CAPABLE_WORK_STAGES,
   fixTriggerArtifact,
   humanActionForState,
   HUMAN_ACTIONS,
@@ -52,6 +58,7 @@ export type {
   StageExecutor,
   StageFeatureContext,
   StageOutcome,
+  StageWorkspaceContext,
 } from "./executor.js";
 
 export { validateStageExecutionResult } from "./result-validation.js";
@@ -97,6 +104,45 @@ export type {
   WorkspaceIntegrity,
 } from "./verification.js";
 
+export {
+  approvedScopeFromPlan,
+  BASELINE_REFUSAL_CODES,
+  evaluateWorkspaceIntegrity,
+  evaluateWorkspaceScope,
+  isEmptyWorkspaceChanges,
+  isProtectedWorkspacePath,
+  matchesScopePattern,
+  normalizeScopePattern,
+  WORKSPACE_PROTECTED_PATTERNS,
+  WORKSPACE_REFUSAL_CODES,
+} from "./workspace.js";
+export type {
+  ApprovedScopeOutcome,
+  BaselineCapture,
+  BaselineCaptureOutcome,
+  BaselineRefusalCode,
+  EnforceScopeOutcome,
+  EnforceScopeRequest,
+  InspectWorkspaceOutcome,
+  InspectWorkspaceRequest,
+  OpenWorkspaceOutcome,
+  OpenWorkspaceRequest,
+  ProjectWorkspace,
+  ProjectWorkspaceProvider,
+  ScopeEnforcement,
+  WorkspaceAccess,
+  WorkspaceChanges,
+  WorkspaceGitState,
+  WorkspaceInspection,
+  WorkspaceIntegrityVerdict,
+  WorkspaceRename,
+  WorkspaceScopeEvidence,
+  WorkspaceScopePolicy,
+  WorkspaceScopeVerdict,
+  WorkspaceUnauthorizedPath,
+  WorkspaceRefusalCode,
+} from "./workspace.js";
+
 export { buildOrchestrationResult, ORCHESTRATION_STATUSES } from "./result.js";
 export type {
   OrchestrationResult,
@@ -111,7 +157,7 @@ export type {
   OrchestrationFailureClass,
 } from "./errors.js";
 
-export { createWorkflowOrchestrator, WorkflowOrchestrator } from "./orchestrator.js";
+export { createWorkflowOrchestrator, workspaceIdFor, WorkflowOrchestrator } from "./orchestrator.js";
 export type {
   CreateFeatureInput,
   WorkflowOrchestratorOptions,

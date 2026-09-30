@@ -19,6 +19,16 @@ export interface OpenCodeTransportRequest {
   readonly prompt: string;
   readonly workingDirectory: string;
   /**
+   * The framework-owned OpenCode configuration directory that defines {@link agent}.
+   *
+   * It is outside the target repository, so the run reads its permissions from here while the process
+   * working directory stays the project. A transport that spawns the CLI passes it as
+   * `OPENCODE_CONFIG_DIR`; the two are deliberately separate settings, because "where the code is" and
+   * "which configuration runs the agent" are different questions and V2 takes them from different
+   * places.
+   */
+  readonly runtimeConfigDirectory: string | null;
+  /**
    * Workflow identity of the run. This is metadata for the transport - for logging, rate limiting,
    * or labelling a run - and it is never part of the agent's message. Only `prompt` reaches the
    * model, and the adapter has already decided the stage before the transport is called.

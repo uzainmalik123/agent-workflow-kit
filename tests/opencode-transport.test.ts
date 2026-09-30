@@ -53,6 +53,7 @@ function requestFor(overrides: Partial<OpenCodeTransportRequest> = {}): OpenCode
     agent: "planner",
     prompt: "# Stage prompt\n\nReturn one fenced JSON block.",
     workingDirectory: process.cwd(),
+    runtimeConfigDirectory: null,
     featureId: "F-001",
     stage: "planning",
     role: "planner",

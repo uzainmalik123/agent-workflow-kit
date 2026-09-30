@@ -68,6 +68,17 @@ export interface ProjectVerificationProviderOptions {
    * another one to prove that discovery and planning run no process at all.
    */
   readonly run?: (request: ChildProcessRequest) => Promise<ChildProcessOutcome>;
+  /**
+   * Where a request's commands may run, when the framework opened an isolated worktree for it.
+   *
+   * The default is this provider's own `projectRoot`, which is what a pre-approval stage gets. A kit
+   * that opens isolated worktrees supplies a resolver, and it is trusted wiring rather than request
+   * data: it is chosen when the provider is constructed, and every request is still checked against
+   * its answer, so a request can only ever run in the directory the resolver named. That is the whole
+   * point of keeping the check per call -- the resolver says which tree is allowed, and this provider
+   * still refuses anything else.
+   */
+  readonly resolveRunRoot?: (request: VerificationRequest) => string;
 }
 
 function detectionFor(
@@ -194,11 +205,19 @@ export class ProjectVerificationProvider implements VerificationProvider {
   readonly #clock: () => number;
   readonly #timeoutMs: number;
   readonly #run: (request: ChildProcessRequest) => Promise<ChildProcessOutcome>;
-  #profile: ProjectProfile | null = null;
-  #config: ProjectVerificationConfig | null = null;
+  readonly #resolveRunRoot: (request: VerificationRequest) => string;
+  // Discovery and configuration are cached per root, not per provider. The same provider instance
+  // collects for an isolated worktree and for the repository it was configured with, and a profile
+  // read from one of those directories says nothing about the other.
+  #cache: {
+    readonly root: string;
+    readonly profile: ProjectProfile;
+    readonly config: ProjectVerificationConfig;
+  } | null = null;
 
   constructor(options: ProjectVerificationProviderOptions = {}) {
     this.#root = resolve(options.projectRoot ?? process.cwd());
+    this.#resolveRunRoot = options.resolveRunRoot ?? (() => this.#root);
     this.#clock = options.clock ?? Date.now;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.#run =
@@ -215,21 +234,24 @@ export class ProjectVerificationProvider implements VerificationProvider {
 
   /** The profile from the last collection, for a caller that wants to report it. */
   get profile(): ProjectProfile | null {
-    return this.#profile;
+    return this.#cache?.profile ?? null;
   }
 
   /** The configuration the last collection loaded, which is null when the project declared none. */
   get config(): ProjectVerificationConfig | null {
-    return this.#config;
+    return this.#cache?.config ?? null;
   }
 
   async collect(request: VerificationRequest): Promise<VerificationEvidenceBundle> {
-    // The request's root is data the orchestrator supplies; this provider verifies it agrees with
-    // its own configured root and otherwise refuses, so a request cannot redirect a command.
-    if (resolve(request.projectRoot) !== this.#root) {
+    // The request's root is data the orchestrator supplies; this provider verifies it agrees with the
+    // directory its wiring named for this request and otherwise refuses, so a request cannot redirect
+    // a command into a tree the kit did not open.
+    const root = resolve(this.#resolveRunRoot(request));
+
+    if (resolve(request.projectRoot) !== root) {
       throw new ProjectAdapterError(
         "command_invalid",
-        `The verification request asked for project root "${request.projectRoot}" but this provider is bound to "${this.#root}".`,
+        `The verification request asked for project root "${request.projectRoot}" but this provider runs in "${root}".`,
       );
     }
 
@@ -239,8 +261,9 @@ export class ProjectVerificationProvider implements VerificationProvider {
     let config: ProjectVerificationConfig;
 
     try {
-      profile = await discoverProject(this.#root);
-      config = await loadProjectVerificationConfig(this.#root);
+      profile = await discoverProject(root);
+      config = await loadProjectVerificationConfig(root);
+      this.#cache = { root, profile, config };
     } catch (error) {
       if (!isDiscoveryRefusal(error)) {
         throw error;
@@ -263,9 +286,10 @@ export class ProjectVerificationProvider implements VerificationProvider {
         controlPlaneBefore: UNMEASURED_FINGERPRINT,
         controlPlaneAfter: UNMEASURED_FINGERPRINT,
         collectedAt,
-        projectRoot: this.#root,
+        projectRoot: root,
+        workspaceId: request.workspaceId,
         project: {
-          root: this.#root,
+          root: root,
           commands: [],
           notes: [detail],
           ecosystem: "unknown",
@@ -293,35 +317,33 @@ export class ProjectVerificationProvider implements VerificationProvider {
             revision: request.revision,
             fingerprint: UNMEASURED_FINGERPRINT,
             collectedAt,
-            projectRoot: this.#root,
+            projectRoot: root,
           }),
         ],
       });
     }
 
-    this.#profile = profile;
-    this.#config = config;
-
     // The tree is measured on both sides of the run. A verification command is repository-defined
     // code and repository-defined code writes files, so a fingerprint taken only beforehand describes
     // a tree the run may itself have replaced. The second measurement is taken after the last command
     // has finished, and any difference is a failure the verifier cannot argue with.
-    const fingerprint = (await fingerprintImplementation(this.#root)).hash;
+    const fingerprint = (await fingerprintImplementation(root)).hash;
     // The control plane is bracketed the same way. `.agentflow/` and `.opencode/` are outside the
     // implementation fingerprint on purpose, so this is the only measurement that notices a command
     // rewriting the session it is running inside or the agent file the next stage is about to load.
-    const controlPlaneBefore = (await fingerprintControlPlane(this.#root)).hash;
+    const controlPlaneBefore = (await fingerprintControlPlane(root)).hash;
     const checks = await this.#runStage(
       request.verification,
       request.revision,
       fingerprint,
       collectedAt,
+      root,
       profile,
       config,
       request.signal ?? null,
     );
-    const workspaceAfter = (await fingerprintImplementation(this.#root)).hash;
-    const controlPlaneAfter = (await fingerprintControlPlane(this.#root)).hash;
+    const workspaceAfter = (await fingerprintImplementation(root)).hash;
+    const controlPlaneAfter = (await fingerprintControlPlane(root)).hash;
 
     return buildBundle({
       verification: request.verification,
@@ -331,7 +353,8 @@ export class ProjectVerificationProvider implements VerificationProvider {
       controlPlaneBefore,
       controlPlaneAfter,
       collectedAt,
-      projectRoot: this.#root,
+      projectRoot: root,
+      workspaceId: request.workspaceId,
       project: profile,
       checks,
     });
@@ -342,6 +365,7 @@ export class ProjectVerificationProvider implements VerificationProvider {
     revision: number,
     fingerprint: string,
     collectedAt: string,
+    root: string,
     profile: ProjectProfile,
     config: ProjectVerificationConfig,
     signal: AbortSignal | null,
@@ -368,7 +392,7 @@ export class ProjectVerificationProvider implements VerificationProvider {
             revision,
             fingerprint,
             collectedAt,
-            projectRoot: this.#root,
+            projectRoot: root,
             kind: stage,
           }),
         );
@@ -407,7 +431,7 @@ export class ProjectVerificationProvider implements VerificationProvider {
             revision,
             fingerprint,
             collectedAt,
-            projectRoot: this.#root,
+            projectRoot: root,
             kind: stage,
           }),
         );
@@ -447,7 +471,7 @@ export class ProjectVerificationProvider implements VerificationProvider {
           revision,
           fingerprint,
           collectedAt,
-          projectRoot: this.#root,
+          projectRoot: root,
         }),
       );
     }

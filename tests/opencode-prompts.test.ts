@@ -6,6 +6,7 @@ import {
 } from "@agent-workflow-kit/orchestration";
 import { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES, buildStagePrompt } from "@agent-workflow-kit/opencode";
 import { describe, expect, it } from "vitest";
+import { testWorkspaceContext } from "../fixtures/workspace.js";
 
 const created = "2026-04-05T06:07:08.000Z";
 
@@ -31,6 +32,7 @@ function requestFor(
     outputs: definition.outputs,
     fixReturnState: null,
     verification: null,
+    workspace: testWorkspaceContext(),
     ...overrides,
   };
 }
@@ -87,7 +89,9 @@ describe("prompt contents", () => {
     expect(prompt).toContain("slug: `google-oauth-api`");
     expect(prompt).toContain("stage: `planning`");
     expect(prompt).toContain("role: `planner`");
-    expect(prompt).toContain("OpenCode agent: `planner`");
+    // The prompt names the profile, not a role-named agent: `planner` is a job, `agentflow-read` is
+    // the capability set this stage was granted.
+    expect(prompt).toContain("OpenCode profile: `agentflow-read`");
   });
 
   it("carries the role's own instructions", () => {
@@ -209,6 +213,7 @@ describe("deterministic verification evidence in the prompt", () => {
       controlPlane: { before: "b".repeat(64), after: "b".repeat(64), changed: false },
       collectedAt: created,
       projectRoot: "/repo",
+      workspaceId: null,
       project: {
         ecosystem: "node",
         language: "typescript",

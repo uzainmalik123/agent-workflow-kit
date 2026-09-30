@@ -3,9 +3,10 @@ import type {
   WorkflowEvent,
   WorkflowMachineSnapshot,
   WorkflowState,
+  WorkspaceBaseline,
 } from "@agent-workflow-kit/core";
 
-export const FEATURE_SESSION_SCHEMA_VERSION = 2 as const;
+export const FEATURE_SESSION_SCHEMA_VERSION = 3 as const;
 export type FeatureSessionSchemaVersion = typeof FEATURE_SESSION_SCHEMA_VERSION;
 
 export const FEATURE_ARTIFACT_NAMES = [
@@ -59,6 +60,12 @@ export type FeatureArtifactReferences = {
  * Durable record of the human plan approval. The hashes are SHA-256 digests of the exact
  * persisted artifact bytes, so a reviewer can verify them with any standard tool. The record
  * carries no approval semantics: it is written, verified, and interpreted by the orchestrator.
+ *
+ * The baseline is captured at the moment of approval and is the only definition of "the code as the
+ * human approved it" that later stages get. It is optional in the type because the two are written by
+ * different actors — the approval hashes by the mutation that accepted the plan, the baseline by the
+ * workspace provider that read the repository — and a record with no baseline is a refusal at the next
+ * post-approval stage rather than a silent fallback to the working directory.
  */
 export interface PlanApprovalRecord {
   readonly approvedAt: string;
@@ -66,6 +73,7 @@ export interface PlanApprovalRecord {
   readonly specSha256: string;
   readonly planSha256: string;
   readonly planReviewSha256: string;
+  readonly baseline: WorkspaceBaseline | null;
 }
 
 export interface FeatureApprovals {

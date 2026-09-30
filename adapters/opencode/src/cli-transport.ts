@@ -1,3 +1,4 @@
+import { buildStageRunEnvironment } from "./environment.js";
 import { OpenCodeAdapterError } from "./errors.js";
 import {
   DEFAULT_KILL_GRACE_MS,
@@ -6,6 +7,7 @@ import {
   runProcess,
   type RunProcessResult,
 } from "./process.js";
+import { OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE } from "./runtime-config.js";
 import {
   type OpenCodeRawResult,
   type OpenCodeTransport,
@@ -46,7 +48,11 @@ export interface OpenCodeCliTransportOptions {
   readonly killGraceMs?: number;
   /** Inherit `process.env`. Defaults to true; a provider credential is needed for a real run. */
   readonly inheritEnv?: boolean;
-  /** Extra environment entries, merged over the inherited environment. Never logged. */
+  /**
+   * Extra environment entries, merged over the inherited environment and then scrubbed. Never logged.
+   * The scrub runs last, so an entry here cannot reintroduce a variable that can inject a different
+   * OpenCode configuration or permission policy.
+   */
   readonly env?: Readonly<Record<string, string>>;
   /**
    * `--auto` approves anything not explicitly denied. Off by default: it is dangerous. A generated
@@ -283,6 +289,20 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
     const stderrExcerptLimit = this.#options.stderrExcerptLimit ?? DEFAULT_STDERR_EXCERPT_LIMIT;
     const format = this.#options.responseFormat ?? "text";
     const label = `The OpenCode run for agent "${request.agent}"`;
+    // `OPENCODE_CONFIG_DIR` is scrubbed from the inherited and caller-supplied environment, because
+    // letting either choose which configuration directory runs the agent is exactly what the scrub
+    // exists to prevent. It is then forced to the framework's own runtime directory, after the scrub,
+    // so the value that survives is the one this run decided.
+    const forced =
+      request.runtimeConfigDirectory === null
+        ? {}
+        : { [OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE]: request.runtimeConfigDirectory };
+
+    const environment = buildStageRunEnvironment({
+      ...(this.#options.inheritEnv === false ? { base: {} } : {}),
+      ...(this.#options.env === undefined ? {} : { overrides: this.#options.env }),
+      forced,
+    });
 
     let result: RunProcessResult;
 
@@ -293,8 +313,10 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
         maxOutputBytes,
         stderrExcerptLimit,
         ...(this.#options.killGraceMs === undefined ? {} : { killGraceMs: this.#options.killGraceMs }),
-        ...(this.#options.inheritEnv === undefined ? {} : { inheritEnv: this.#options.inheritEnv }),
-        ...(this.#options.env === undefined ? {} : { env: this.#options.env }),
+        // The environment is fully materialized here and passed without inheritance, so the scrub is
+        // the last word on what the child sees rather than a step the spawn helper may undo.
+        inheritEnv: false,
+        env: environment.env,
         ...(request.signal == null ? {} : { signal: request.signal }),
         label,
       });

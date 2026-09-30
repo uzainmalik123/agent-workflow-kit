@@ -200,6 +200,7 @@ describe("approval metadata cannot be fabricated", () => {
             specSha256: "a".repeat(64),
             planSha256: "a".repeat(64),
             planReviewSha256: "a".repeat(64),
+            baseline: null,
           },
         },
       }),
@@ -211,6 +212,7 @@ describe("approval metadata cannot be fabricated", () => {
       specSha256: "a".repeat(64),
       planSha256: "a".repeat(64),
       planReviewSha256: "a".repeat(64),
+      baseline: null,
     });
     expect(approved.session.machine.state).toBe(WorkflowState.Implementing);
     expect(approved.session.revision).toBe(6);
@@ -230,6 +232,7 @@ describe("approval metadata cannot be fabricated", () => {
             specSha256: "a".repeat(64),
             planSha256: "a".repeat(64),
             planReviewSha256: "a".repeat(64),
+            baseline: null,
           },
         },
       }),

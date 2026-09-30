@@ -1,8 +1,12 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- this barrel re-exports the deprecated role-keyed names so they stay reachable; each one is marked deprecated at its definition */
 export { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
 export type { OpenCodeAdapterErrorCode } from "./errors.js";
 
 export {
+  agentFilePathForProfile,
   agentFilePathForRole,
+  assertNoProjectProfileShadow,
+  assertNoRepositoryConfigBoundaryCrossing,
   assertOpenCodeConfigurationIntegrity,
   FRAMEWORK_SENSITIVE_CONFIG_FIELDS,
   OPENCODE_AGENT_SOURCE_DIRECTORIES,
@@ -21,36 +25,47 @@ export { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES } from "./hard-rules.js";
 export {
   READ_ONLY_ROLES,
   WRITE_CAPABLE_ROLES,
+  AGENT_BY_STAGE,
+  OPENCODE_PROFILES,
   OPENCODE_ROLES,
+  PROFILE_BY_STAGE,
   accessForRole,
+  agentFileNameForProfile,
+  agentForProfile,
   agentForRole,
   agentForStage,
+  isOpenCodeProfile,
   isStageRole,
+  isWriteCapableProfile,
   isWriteCapableRole,
+  profileForAgent,
+  profileForRole,
+  profileForStage,
   roleDefinition,
-  roleForAgent,
   roleForStage,
+  rolesForProfile,
   stagesForRole,
-  AGENT_BY_STAGE,
 } from "./roles.js";
-export type { OpenCodeAccessLevel, OpenCodeRoleDefinition } from "./roles.js";
+export type { OpenCodeAccessLevel, OpenCodeProfile, OpenCodeRoleDefinition } from "./roles.js";
 
 export {
   DENY_ALL_RULE,
   effectFor,
+  isReadOnlyProfile,
   isReadOnlyRole,
   matchesResourcePattern,
   operationEffect,
+  permissionRulesForProfile,
   permissionRulesForRole,
+  readOnlyRoles,
+  writeCapableRoles,
   FRAMEWORK_OWNED_EDIT_PATTERNS,
   PROTECTED_PATH_PATTERNS,
-  readOnlyRoles,
   READ_ONLY_PERMISSION_RULES,
   SECRET_PATH_PATTERNS,
   UNIVERSAL_ALLOWED_ACTIONS,
   UNIVERSAL_DENIAL_ACTIONS,
   WRITE_CAPABLE_PERMISSION_RULES,
-  writeCapableRoles,
 } from "./permissions.js";
 export type {
   OpenCodePermissionEffect,
@@ -158,6 +173,17 @@ export {
 export type { OpenCodeCapabilities, ProbeOpenCodeCapabilitiesOptions } from "./capabilities.js";
 
 export {
+  buildStageRunEnvironment,
+  isScrubbedEnvironmentName,
+  OPENCODE_CONFIG_INJECTION_VARIABLES,
+  OPENCODE_CONFIG_SUPPRESSING_VARIABLES,
+  OPENCODE_SCRUBBED_PREFIXES,
+  OPENCODE_SCRUBBED_VARIABLES,
+  OPENCODE_SMOKE_TEST_FORCED_ENVIRONMENT,
+} from "./environment.js";
+export type { StageRunEnvironment, StageRunEnvironmentOptions } from "./environment.js";
+
+export {
   DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS,
   DEFAULT_AGENT_LISTING_TIMEOUT_MS,
   DEFAULT_SMOKE_TEST_TIMEOUT_MS,
@@ -187,3 +213,17 @@ export {
   VENDORED_FRAMEWORK_PATHS,
 } from "./install-policy.js";
 export type { ArtifactTrackingMode, InstallPolicyEntry } from "./install-policy.js";
+
+export {
+  createOpenCodeRuntimeConfig,
+  defaultRuntimeConfigDirectory,
+  isInsideRepository,
+  OPENCODE_RUNTIME_AGENT_DIRECTORY,
+  OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE,
+  OPENCODE_RUNTIME_DIRECTORY_NAME,
+  removeOpenCodeRuntimeConfig,
+  renderOpenCodeRuntimeConfigFiles,
+  runtimeAgentFileForProfile,
+  type CreateRuntimeConfigOptions,
+  type OpenCodeRuntimeConfig,
+} from "./runtime-config.js";

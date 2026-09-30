@@ -11,7 +11,7 @@ import {
 import { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES } from "./hard-rules.js";
 import type { ProjectInstructions } from "./project-instructions.js";
 import { WORKFLOW_CONTROL_FIELDS } from "./response-protocol.js";
-import { agentForRole, roleDefinition } from "./roles.js";
+import { profileForRole, roleDefinition } from "./roles.js";
 
 export interface BuildStagePromptInput {
   readonly request: StageExecutionRequest;
@@ -207,14 +207,14 @@ function renderFeature(request: StageExecutionRequest): string {
   ].join("\n");
 }
 
-function renderStage(request: StageExecutionRequest, agent: string): string {
+function renderStage(request: StageExecutionRequest, profile: string): string {
   const lines = [
     "## Stage",
     "",
     bulletList([
       `stage: \`${request.stage}\``,
       `role: \`${request.role}\``,
-      `OpenCode agent: \`${agent}\``,
+      `OpenCode profile: \`${profile}\``,
       `may request a fix: ${STAGE_DEFINITIONS[request.stage].fixable ? "yes" : "no"}`,
     ]),
   ];
@@ -439,7 +439,7 @@ function renderEvidence(bundle: VerificationEvidenceBundle): string {
 export function buildStagePrompt(input: BuildStagePromptInput): string {
   const { request, projectInstructions = null } = input;
   const definition = roleDefinition(request.role);
-  const agent = agentForRole(request.role);
+  const profile = profileForRole(request.role);
 
   const sections: string[] = [
     `# Agent Workflow Kit: ${definition.label} on stage \`${request.stage}\``,
@@ -460,7 +460,7 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
     "",
     bulletList(definition.deliverables),
     renderFeature(request),
-    renderStage(request, agent),
+    renderStage(request, profile),
     ["## Routed context", "", renderContext(request)].join("\n"),
     ["## Output slots you may fill", "", renderOutputs(request)].join("\n"),
     ...(request.verification === null || request.verification === undefined

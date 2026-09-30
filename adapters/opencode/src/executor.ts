@@ -1,9 +1,13 @@
+import { resolve } from "node:path";
 import {
   type StageExecutionRequest,
   type StageExecutionResult,
   type StageExecutor,
 } from "@agent-workflow-kit/orchestration";
-import { assertOpenCodeConfigurationIntegrity } from "./configuration-integrity.js";
+import {
+  assertNoProjectProfileShadow,
+  assertNoRepositoryConfigBoundaryCrossing,
+} from "./configuration-integrity.js";
 import { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
 import {
   assertNoProjectLocalPlugins,
@@ -16,13 +20,27 @@ import {
   type ProjectInstructions,
 } from "./project-instructions.js";
 import { parseStageResponse } from "./response-protocol.js";
-import { agentForRole, agentForStage } from "./roles.js";
+import { createOpenCodeRuntimeConfig, type OpenCodeRuntimeConfig } from "./runtime-config.js";
+import {
+  agentForProfile,
+  profileForRole,
+  profileForStage,
+  type OpenCodeProfile,
+} from "./roles.js";
 import { DEFAULT_TIMEOUT_MS, type OpenCodeTransport } from "./transport.js";
 
 export interface OpenCodeStageExecutorOptions {
   readonly transport: OpenCodeTransport;
-  /** The repository the agent runs in, and the only project the adapter knows about. */
-  readonly workingDirectory: string;
+  /**
+   * The repository this adapter is bound to, and the only project it knows about.
+   *
+   * It is deliberately not the directory a stage runs in. That comes from every request's
+   * `workspace`, which the framework fills from the workspace it opened, so an adapter constructed
+   * once can serve a pre-approval stage in the checkout and a post-approval stage in an isolated
+   * worktree of the same repository. The two are still checked against each other on every call, so a
+   * request that names a different repository is refused rather than run.
+   */
+  readonly projectRoot: string;
   readonly model?: string | null;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal | null;
@@ -49,6 +67,14 @@ export interface OpenCodeStageExecutorOptions {
    * that is not about plugin isolation does not have to create a filesystem.
    */
   readonly skipPluginPreflight?: boolean;
+  /**
+   * Where the framework-owned OpenCode configuration is written for each stage run.
+   *
+   * Defaults to a per-repository directory under the platform temporary directory, which is outside
+   * the target repository. Override it when the configuration has to live somewhere specific, such as
+   * a mounted volume. A path inside the repository is refused rather than used.
+   */
+  readonly runtimeConfigDirectory?: string;
 }
 
 /**
@@ -57,8 +83,9 @@ export interface OpenCodeStageExecutorOptions {
  * ```
  * StageExecutionRequest
  *   -> project-local plugin preflight   (refuse repository plugin code, before anything runs)
- *   -> configuration integrity          (refuse a tampered agent file or opencode.json)
- *   -> prompt and agent id            (deterministic, orchestrator-routed context only)
+ *   -> profile shadow check             (refuse a repository definition of a framework profile id)
+ *   -> prompt and profile             (deterministic, orchestrator-routed context only)
+ *   -> framework runtime configuration (the two profiles, written outside the repository)
  *   -> OpenCodeTransport              (substitutable; the real one spawns the CLI)
  *   -> structured response parsing     (a fenced JSON payload, never prose)
  *   -> StageExecutionResult
@@ -72,26 +99,44 @@ export interface OpenCodeStageExecutorOptions {
  * agent.
  *
  * The two preflight checks answer different questions and neither substitutes for the other. The plugin
- * preflight asks whether the repository ships OpenCode code at all. The configuration integrity check
- * asks whether the framework's own OpenCode configuration is still the framework's, which is the
- * question a repository answers by editing a generated file rather than by adding a plugin.
+ * preflight asks whether the repository ships OpenCode code at all. The profile shadow check asks
+ * whether the repository defines an agent id that the framework is about to hand to `--agent`, which
+ * is the question a repository answers by adding a definition rather than by adding a plugin.
+ *
+ * The framework's own configuration no longer lives in the repository, so there is no generated
+ * project file here to verify. `configuration-integrity.ts` still exists and still checks a
+ * project-local installation, because that installation is still valid for anyone who generated it;
+ * this milestone stops depending on it rather than removing it.
  */
 export class OpenCodeStageExecutor implements StageExecutor {
   readonly #transport: OpenCodeTransport;
   readonly #options: OpenCodeStageExecutorOptions;
+  readonly #projectRoot: string;
 
   constructor(options: OpenCodeStageExecutorOptions) {
     this.#transport = options.transport;
     this.#options = options;
+    this.#projectRoot = resolve(options.projectRoot);
+  }
+
+  /** The repository this adapter is bound to. */
+  get projectRoot(): string {
+    return this.#projectRoot;
   }
 
   async execute(request: StageExecutionRequest): Promise<StageExecutionResult> {
-    const agent = agentForStage(request.stage);
+    const profile = profileForStage(request.stage);
+    const agent = agentForProfile(profile);
+    const workingDirectory = this.#workingDirectoryFor(request);
 
-    if (agentForRole(request.role) !== agent) {
+    // The profile is decided by the stage table, never by the request, so a caller cannot ask a
+    // read-only stage to run with the write profile. The role is checked against the same table
+    // because it is what the prompt tells the model to be: a role that does not belong to this
+    // stage would mean the prompt and the granted capabilities disagree.
+    if (profileForRole(request.role) !== profile) {
       throw new OpenCodeAdapterError(
         "role_mismatch",
-        `Stage "${request.stage}" runs as agent "${agent}", but the request asked for role "${request.role}".`,
+        `Stage "${request.stage}" runs under the "${profile}" profile, but the request asked for role "${request.role}".`,
       );
     }
 
@@ -100,27 +145,26 @@ export class OpenCodeStageExecutor implements StageExecutor {
     // `plugins` configuration is not a substitute for this: it matches plugin ids, and a repository
     // picks the id of its own plugin.
     if (this.#options.skipPluginPreflight !== true) {
-      await assertNoProjectLocalPlugins(
-        this.#options.workingDirectory,
-        this.#options.pluginPreflightOptions,
-      );
+      await assertNoProjectLocalPlugins(workingDirectory, this.#options.pluginPreflightOptions);
     }
 
-    // Before the prompt is built and before the transport is touched. A generated agent file is not
-    // project implementation and is deliberately outside the implementation fingerprint, so the
-    // verification path has nothing to compare it against; this is the only place that does, and the
-    // only place where a file rewritten by a command that exited 0 is noticed before a model reads it.
-    await assertOpenCodeConfigurationIntegrity({
-      workingDirectory: this.#options.workingDirectory,
-      role: request.role,
-    });
+    // A repository may define an agent with a framework profile's id, and the framework passes that
+    // id to `--agent`. The profiles now live outside the repository, so this is no longer a check
+    // that a generated file is present; it is the check that the repository does not get to decide
+    // which definition that id resolves to.
+    await assertNoProjectProfileShadow(workingDirectory, profile);
+    // The repository is still the process working directory, so OpenCode still loads its
+    // configuration. Nothing is required of it any more, but a global permission, plugin, tool, or
+    // instruction source in it would still reach the run, so those are still refused.
+    await assertNoRepositoryConfigBoundaryCrossing(workingDirectory, profile);
 
     const prompt = buildStagePrompt({
       request,
-      projectInstructions: await this.#projectInstructions(),
+      projectInstructions: await this.#projectInstructions(workingDirectory),
     });
 
-    const raw = await this.#invoke(agent, prompt, request);
+    const runtimeConfig = await this.#runtimeConfigFor(workingDirectory);
+    const raw = await this.#invoke(agent, profile, prompt, request, workingDirectory, runtimeConfig);
 
     if (raw.agent !== agent) {
       throw new OpenCodeAdapterError(
@@ -146,7 +190,36 @@ export class OpenCodeStageExecutor implements StageExecutor {
     return parseStageResponse(raw.text, request);
   }
 
-  async #projectInstructions(): Promise<ProjectInstructions | null> {
+  /**
+   * The directory this run happens in, and the check that the request belongs to this repository.
+   *
+   * The workspace context is the framework's, not the agent's: it is filled in by the orchestrator from
+   * the isolated worktree it opened, and the repository it names is checked against the one this
+   * adapter was built for. An executor that read its directory from anywhere else would be running an
+   * agent in a tree the workflow never approved.
+   */
+  #workingDirectoryFor(request: StageExecutionRequest): string {
+    const workspace = request.workspace;
+
+    if (resolve(workspace.repositoryRoot) !== this.#projectRoot) {
+      throw new OpenCodeAdapterError(
+        "workspace_mismatch",
+        `The stage request names repository "${workspace.repositoryRoot}" but this executor is bound to "${this.#projectRoot}".`,
+      );
+    }
+
+    return resolve(workspace.workingDirectory);
+  }
+
+  async #runtimeConfigFor(workingDirectory: string): Promise<OpenCodeRuntimeConfig> {
+    return createOpenCodeRuntimeConfig(workingDirectory, {
+      ...(this.#options.runtimeConfigDirectory === undefined
+        ? {}
+        : { directory: this.#options.runtimeConfigDirectory }),
+    });
+  }
+
+  async #projectInstructions(workingDirectory: string): Promise<ProjectInstructions | null> {
     if (this.#options.projectInstructions !== undefined) {
       return this.#options.projectInstructions;
     }
@@ -155,22 +228,31 @@ export class OpenCodeStageExecutor implements StageExecutor {
       return null;
     }
 
-    return loadProjectInstructions(
-      this.#options.workingDirectory,
-      this.#options.projectInstructionsOptions,
-    );
+    return loadProjectInstructions(workingDirectory, this.#options.projectInstructionsOptions);
   }
 
+  /**
+   * Runs the transport under an explicit profile.
+   *
+   * The profile is the transport's `agent`, so the value passed to `--agent` is never derived
+   * from the request and never left to OpenCode's default. That matters beyond tidiness: the
+   * default agent in a repository can be anything, including one with a wildcard permission, so an
+   * invocation that omitted the flag would run with capabilities this framework never granted.
+   */
   async #invoke(
     agent: string,
+    profile: OpenCodeProfile,
     prompt: string,
     request: StageExecutionRequest,
+    workingDirectory: string,
+    runtimeConfig: OpenCodeRuntimeConfig,
   ): Promise<Awaited<ReturnType<OpenCodeTransport["run"]>>> {
     try {
       return await this.#transport.run({
-        agent,
+        agent: agentForProfile(profile),
         prompt,
-        workingDirectory: this.#options.workingDirectory,
+        workingDirectory,
+        runtimeConfigDirectory: runtimeConfig.directory,
         featureId: request.feature.featureId,
         stage: request.stage,
         role: request.role,

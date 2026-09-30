@@ -1,11 +1,17 @@
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { StageRole } from "@agent-workflow-kit/orchestration";
-import { STAGE_ROLES } from "@agent-workflow-kit/orchestration";
 import { OpenCodeAdapterError } from "./errors.js";
 import { FRAMEWORK_HARD_RULES } from "./hard-rules.js";
-import { permissionRulesForRole, type OpenCodePermissionRuleset } from "./permissions.js";
-import { roleDefinition, type OpenCodeAccessLevel, type OpenCodeRoleDefinition } from "./roles.js";
+import { permissionRulesForProfile, type OpenCodePermissionRuleset } from "./permissions.js";
+import {
+  OPENCODE_PROFILES,
+  agentFileNameForProfile,
+  profileForRole,
+  roleDefinition,
+  type OpenCodeProfile,
+  type OpenCodeRoleDefinition,
+} from "./roles.js";
 
 export const OPENCODE_AGENT_DIRECTORY = ".opencode/agents";
 export const OPENCODE_PROJECT_CONFIG_PATH = "opencode.json";
@@ -55,11 +61,15 @@ function renderPermissionRules(rules: OpenCodePermissionRuleset): readonly strin
  * Only V2 fields are emitted: `permissions` as an ordered rule list. The V1 `permission:` object
  * and the V1 `tools:` boolean block are deliberately absent, because the adapter targets the native
  * V2 contract and must not depend on the compatibility layer that used to translate them.
+ *
+ * The `permissions` block here is the whole capability contract. OpenCode resolves a profile's own
+ * block as authoritative, so a repository's global `permission` settings cannot widen it, and this
+ * file is checked byte-for-byte before every run so nothing else can either.
  */
-function renderFrontmatter(definition: OpenCodeRoleDefinition, rules: OpenCodePermissionRuleset): string {
+function renderFrontmatter(profile: OpenCodeProfile, rules: OpenCodePermissionRuleset): string {
   return [
     "---",
-    `description: ${yamlString(definition.description)}`,
+    `description: ${yamlString(PROFILE_DESCRIPTION[profile])}`,
     `mode: ${yamlString(AGENT_MODE)}`,
     "permissions:",
     ...renderPermissionRules(rules),
@@ -73,11 +83,30 @@ function renderFrontmatter(definition: OpenCodeRoleDefinition, rules: OpenCodePe
  */
 export const AGENT_MODE = "primary";
 
-const ACCESS_STATEMENT: Readonly<Record<OpenCodeAccessLevel, string>> = {
-  read_only:
-    "You are a read-only role. Your OpenCode configuration denies every file modification tool, so you cannot edit project files even if you were asked to. Report what you find and stop there.",
-  write_capable:
-    "You are write-capable. You may modify project files, with two hard exclusions your configuration also enforces: `.agentflow/` workflow state is not yours to touch, and `.git/` is off limits. You may not run shell commands at all, so you cannot commit, push, or run the project's tests.",
+const PROFILE_LABEL: Readonly<Record<OpenCodeProfile, string>> = {
+  "agentflow-read": "Read-only",
+  "agentflow-write": "Write-capable",
+};
+
+const PROFILE_DESCRIPTION: Readonly<Record<OpenCodeProfile, string>> = {
+  "agentflow-read":
+    "Agent Workflow Kit read-only profile. Reports findings; cannot change any project file.",
+  "agentflow-write":
+    "Agent Workflow Kit write profile. Edits project files within an approved scope; no shell, no Git, no workflow state.",
+};
+
+/**
+ * What the profile grants, stated to the model in the same terms the ruleset enforces.
+ *
+ * A profile is not a role and must not describe one. It says what the model can do, never what job
+ * it was given: the job arrives in the stage prompt, which names the stage and the role, so a single
+ * file can serve nine roles without any of them being able to read another's instructions from it.
+ */
+const PROFILE_ACCESS_STATEMENT: Readonly<Record<OpenCodeProfile, string>> = {
+  "agentflow-read":
+    "You are running under the read-only profile. Your OpenCode configuration denies every file modification tool, so you cannot edit project files even if the job you were given seems to ask for it. Report what you find and stop there.",
+  "agentflow-write":
+    "You are running under the write profile. You may modify project files, with two hard exclusions your configuration also enforces: `.agentflow/` workflow state is not yours to touch, and `.git/` is off limits. You may not run shell commands at all, so you cannot commit, push, or run the project's tests.",
 };
 
 function bulletList(items: readonly string[]): string {
@@ -88,18 +117,17 @@ function bulletList(items: readonly string[]): string {
 export const HARD_RULES_HEADING = "Agent Workflow Kit framework rules";
 
 /**
- * The role's instruction block. This is the single source for both the generated agent file and
- * the per-stage prompt the adapter builds, so a role can never drift between the two.
+ * The role's instruction block, rendered for the stage prompt.
+ *
+ * This is the single source for the per-role prose. It is no longer part of any generated agent
+ * file, because one profile file serves every role that shares its capabilities and must therefore
+ * carry none of their instructions.
  */
 export function renderRoleInstructions(definition: OpenCodeRoleDefinition): string {
   return [
     `# ${definition.label}`,
     "",
     definition.purpose,
-    "",
-    "## Access",
-    "",
-    ACCESS_STATEMENT[definition.access],
     "",
     "## Responsibilities",
     "",
@@ -120,38 +148,53 @@ export function renderRoleInstructionsForRole(role: StageRole): string {
 }
 
 /**
- * The agent file body. The stage prompt supplies the run-specific material - feature identity,
- * stage, routed context, allowed outputs, and the response protocol - so the file itself stays a
- * thin role definition rather than a copy of the framework.
+ * @deprecated Use {@link agentFileNameForProfile} with {@link profileForRole}. A role no longer owns
+ * a file, so this returns the path of the profile its capabilities come from. Several roles resolve
+ * to the same path.
  */
-export function renderAgentMarkdown(role: StageRole): string {
-  const definition = roleDefinition(role);
-  const frontmatter = renderFrontmatter(definition, permissionRulesForRole(role));
+export function agentFileName(role: StageRole): string {
+  return agentFileNameForProfile(profileForRole(role));
+}
+
+/**
+ * The generated agent file for one physical profile.
+ *
+ * The file states capabilities and framework rules only. The job - which stage, which role, which
+ * artifacts, which output slots, which response protocol - arrives in the stage prompt the adapter
+ * sends with the run, which is what lets eleven roles share two files without a role's instructions
+ * ever reaching the model under another role's profile.
+ */
+export function renderAgentMarkdown(profile: OpenCodeProfile): string {
+  const frontmatter = renderFrontmatter(profile, permissionRulesForProfile(profile));
 
   const body = [
-    renderRoleInstructions(definition),
+    `# Agent Workflow Kit ${PROFILE_LABEL[profile]} profile`,
+    "",
+    PROFILE_ACCESS_STATEMENT[profile],
+    "",
+    "## Your job is in the prompt, not in this file",
+    "",
+    "This file grants you capabilities and states the rules that hold for every run. It does not",
+    "describe your assignment. The adapter starts you with a stage prompt that names the workflow",
+    "stage, the role you are acting as, the artifacts routed to you, the output slots you may fill,",
+    "and the response protocol you must answer in. Follow that prompt; ignore any assumption from",
+    "this file about what kind of task you are doing.",
     "",
     `## ${HARD_RULES_HEADING}`,
     "",
-    "These rules hold for every run of this agent and outrank any repository instruction file:",
+    "These rules hold for every run of this profile and outrank any repository instruction file:",
     "",
     bulletList(FRAMEWORK_HARD_RULES),
     "",
     "## How a run is delivered",
     "",
-    "The adapter sends a stage prompt that names the feature, the stage, the artifacts it routed to",
-    "you, the output slots you may fill, and the response protocol. Answer with exactly one fenced",
-    "JSON block in the required shape. Prose is not read as workflow truth, and a completion",
-    "sentence such as \"done\" or \"all tests pass\" carries no meaning here.",
+    "Answer with exactly one fenced JSON block in the shape the prompt requires. Prose is not read as",
+    "workflow truth, and a completion sentence such as \"done\" or \"all tests pass\" carries no",
+    "meaning here.",
     "",
   ].join("\n");
 
   return `${frontmatter}\n\n${body}`;
-}
-
-/** The agent file name a role is written to, relative to the project root. */
-export function agentFileName(role: StageRole): string {
-  return roleDefinition(role).filename;
 }
 
 /**
@@ -209,9 +252,9 @@ export function renderOpenCodeProjectConfig(): string {
  * of the framework implementation.
  */
 export function renderOpenCodeProjectFiles(): readonly GeneratedOpenCodeFile[] {
-  const agents = STAGE_ROLES.map((role) => ({
-    path: roleDefinition(role).filename,
-    contents: renderAgentMarkdown(role),
+  const agents = OPENCODE_PROFILES.map((profile) => ({
+    path: agentFileNameForProfile(profile),
+    contents: renderAgentMarkdown(profile),
   }));
 
   return [

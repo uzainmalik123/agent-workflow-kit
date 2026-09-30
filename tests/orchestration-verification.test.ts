@@ -13,6 +13,10 @@ import {
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore, type FeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
+import {
+  createFakeWorkspaceProvider,
+  type FakeWorkspaceProvider,
+} from "../fixtures/workspace-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
@@ -21,6 +25,7 @@ const roots: string[] = [];
 interface Harness {
   readonly store: FeatureSessionStore;
   readonly executor: FakeStageExecutor;
+  readonly workspace: FakeWorkspaceProvider;
   readonly orchestrator: ReturnType<typeof createWorkflowOrchestrator>;
 }
 
@@ -103,6 +108,7 @@ function evidenceFor(
     controlPlane: { before: FINGERPRINT, after: FINGERPRINT, changed: false },
     collectedAt: fixedTimestamp,
     projectRoot: request.projectRoot,
+    workspaceId: request.workspaceId,
     project: profileSummary(),
     checks: [],
     ...overrides,
@@ -172,14 +178,16 @@ function makeHarness(
   executor = new FakeStageExecutor(),
 ): Harness {
   const store = createFeatureSessionStore(root, { clock: () => fixedTimestamp });
+  const workspace = createFakeWorkspaceProvider({ workingDirectory: join(root, "workspace") });
   const orchestrator = createWorkflowOrchestrator({
     store,
     executor,
+    workspace,
     ...(provider === null ? {} : { verification: provider }),
     projectRoot: root,
   });
 
-  return { store, executor, orchestrator };
+  return { store, executor, workspace, orchestrator };
 }
 
 async function makeRoot(): Promise<string> {
@@ -844,7 +852,7 @@ describe("stage coverage", () => {
 });
 
 describe("the provider interface is what the framework requires", () => {
-  it("states the stage, the revision, and the root in the request it hands over", async () => {
+  it("states the stage, the revision, and the isolated tree in the request it hands over", async () => {
     const root = await makeRoot();
     const provider = passingProvider();
     const harness = makeHarness(root, provider);
@@ -852,13 +860,41 @@ describe("the provider interface is what the framework requires", () => {
     await runToStaticVerification(harness);
     await harness.orchestrator.runNext("F-001");
 
+    // The project command runs in the workspace the framework opened, not in the user's checkout, so
+    // the root in the request is the one the approval captured a baseline for.
+    const approved = (await harness.store.readContext("F-001")).session.approvals.plan;
+
     expect(provider.requests[0]).toMatchObject({
       featureId: "F-001",
       stage: "static_verification",
       verification: "static",
-      projectRoot: root,
+      projectRoot: join(root, "workspace"),
+      workspaceId: approved?.baseline?.workspaceId,
     });
     expect(typeof provider.requests[0]?.revision).toBe("number");
+  });
+
+  it("collects for a verification stage only after approval, and names the worktree it ran in", async () => {
+    const root = await makeRoot();
+    const provider = passingProvider();
+    const harness = makeHarness(root, provider);
+
+    // Every draft stage runs in the checkout, so the first collection can only happen once a
+    // baseline has been captured and a workspace opened.
+    await driveToPlanGate(harness);
+
+    expect(provider.requests).toEqual([]);
+    expect(harness.workspace.opens).toEqual([]);
+
+    // implementation, code review, scope review, and then the first deterministic collection.
+    for (let stage = 0; stage < 4; stage += 1) {
+      await harness.orchestrator.runNext("F-001");
+    }
+
+    const approved = (await harness.store.readContext("F-001")).session.approvals.plan?.baseline;
+
+    expect(harness.workspace.opens[0]?.baseline.workspaceId).toBe(approved?.workspaceId);
+    expect(provider.requests[0]?.workspaceId).toBe(approved?.workspaceId);
   });
 
   it("hands the collected bundle to the verifier, workspace measurement included", async () => {

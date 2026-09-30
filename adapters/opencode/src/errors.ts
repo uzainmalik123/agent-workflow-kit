@@ -11,7 +11,8 @@ export type OpenCodeAdapterErrorCode =
   | "invalid_result"
   | "unsafe_output_path"
   | "project_plugin_detected"
-  | "opencode_configuration_tampered";
+  | "opencode_configuration_tampered"
+  | "workspace_mismatch";
 
 export interface OpenCodeAdapterErrorOptions {
   readonly cause?: unknown;

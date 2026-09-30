@@ -197,7 +197,15 @@ export interface VerificationEvidenceBundle {
    */
   readonly controlPlane: ControlPlaneIntegrity;
   readonly collectedAt: string;
+  /**
+   * The directory the commands ran in.
+   *
+   * Post-approval this is an isolated worktree, not the user's checkout, so the field is the
+   * evidence's answer to "which tree did this pass describe" rather than a synonym for the repository.
+   */
   readonly projectRoot: string;
+  /** The isolated workspace the commands ran in, or `null` for a pre-approval stage. */
+  readonly workspaceId: string | null;
   readonly project: ProjectProfileSummary;
   readonly checks: readonly VerificationCommandEvidence[];
 }
@@ -209,8 +217,13 @@ export interface VerificationRequest {
   readonly verification: VerificationStage;
   /** The session revision the evidence will belong to, recorded with the evidence. */
   readonly revision: number;
-  /** The project the commands may run in. Never chosen by an agent. */
+  /**
+   * The directory the commands may run in. Never chosen by an agent: it is the framework's workspace
+   * for this stage, which is the user's checkout before approval and an isolated worktree after it.
+   */
   readonly projectRoot: string;
+  /** The workspace identity the request was opened against, when the stage has one. */
+  readonly workspaceId: string | null;
   readonly signal?: AbortSignal | null;
 }
 
@@ -559,6 +572,10 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
     return invalid("Verification evidence bundle must carry the project root it ran in.");
   }
 
+  if (!optionalString(raw["workspaceId"])) {
+    return invalid("Verification evidence bundle must carry the workspace it ran in, or null.");
+  }
+
   const project = raw["project"];
 
   if (!isRecord(project)) {
@@ -690,6 +707,7 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
       controlPlane: controlPlane.integrity,
       collectedAt: raw["collectedAt"],
       projectRoot: raw["projectRoot"],
+      workspaceId: raw["workspaceId"],
       project: {
         ecosystem: project["ecosystem"],
         language: project["language"],
@@ -749,6 +767,15 @@ export function bindVerificationEvidenceToRequest(
   if (resolve(bundle.projectRoot) !== resolve(request.projectRoot)) {
     return mismatched(
       `The verification provider returned evidence for project root "${bundle.projectRoot}", but this stage may only verify "${request.projectRoot}".`,
+    );
+  }
+
+  // The same rule for the workspace. Evidence collected in one isolated worktree cannot describe
+  // another one, and a provider that is asked twice in a row with two different trees has to say which
+  // of them the checks ran against rather than reusing the first answer.
+  if (bundle.workspaceId !== request.workspaceId) {
+    return mismatched(
+      `The verification provider returned evidence for workspace ${bundle.workspaceId === null ? "none" : `"${bundle.workspaceId}"`}, but this stage may only verify ${request.workspaceId === null ? "the repository" : `workspace "${request.workspaceId}"`}.`,
     );
   }
 

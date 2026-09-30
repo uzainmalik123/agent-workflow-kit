@@ -222,6 +222,9 @@ importers:
       '@agent-workflow-kit/project':
         specifier: workspace:*
         version: link:adapters/project
+      '@agent-workflow-kit/workspace':
+        specifier: workspace:*
+        version: link:adapters/workspace
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.11.0)
@@ -263,6 +266,15 @@ importers:
         version: link:../../core
 
   adapters/project:
+    dependencies:
+      '@agent-workflow-kit/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@agent-workflow-kit/orchestration':
+        specifier: workspace:*
+        version: link:../../orchestration
+
+  adapters/workspace:
     dependencies:
       '@agent-workflow-kit/core':
         specifier: workspace:*

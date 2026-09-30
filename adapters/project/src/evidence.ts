@@ -216,6 +216,8 @@ export function buildBundle(input: {
   readonly controlPlaneAfter: string;
   readonly collectedAt: string;
   readonly projectRoot: string;
+  /** The isolated workspace the commands ran in, when the framework opened one. */
+  readonly workspaceId?: string | null;
   readonly project: ProjectProfile;
   readonly checks: readonly VerificationCommandEvidence[];
 }): VerificationEvidenceBundle {
@@ -238,6 +240,9 @@ export function buildBundle(input: {
     },
     collectedAt: input.collectedAt,
     projectRoot: input.projectRoot,
+    // The bundle records which isolated tree produced it, so evidence collected in one worktree
+    // cannot be bound to a request about another.
+    workspaceId: input.workspaceId ?? null,
     project: profileSummary(input.project),
     checks: input.checks,
   };

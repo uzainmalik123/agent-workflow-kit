@@ -11,15 +11,21 @@ import {
 import {
   FRAMEWORK_SENSITIVE_CONFIG_FIELDS,
   OPENCODE_ALTERNATE_PROJECT_CONFIG_PATHS,
+  OPENCODE_PROFILES,
   OPENCODE_PROJECT_CONFIG_PATH,
   OPENCODE_ROLES,
+  agentFilePathForProfile,
   agentFilePathForRole,
+  assertOpenCodeConfigurationIntegrity,
+  type OpenCodeProfile,
   createOpenCodeStageExecutor,
   isOpenCodeAdapterError,
   openCodeAgentIdForPath,
+  profileForRole,
   renderOpenCodeProjectFiles,
 } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
+import { testWorkspaceContext } from "../fixtures/workspace.js";
 import { createFakeOpenCodeTransport } from "../fixtures/opencode-transport.js";
 
 /**
@@ -111,7 +117,10 @@ interface Attempt {
   readonly outcome: string | null;
 }
 
-function requestFor(target: StageUnderTest): StageExecutionRequest {
+function requestFor(
+  target: StageUnderTest,
+  root: string,
+): StageExecutionRequest {
   return {
     feature: {
       featureId: "F-001",
@@ -127,21 +136,50 @@ function requestFor(target: StageUnderTest): StageExecutionRequest {
     context: [],
     outputs: STAGE_DEFINITIONS[target.stage].outputs,
     fixReturnState: target.fixReturnState,
+    // The repository the adapter is bound to, and the directory it is asked to run in: these tests are
+    // about the control plane in a checkout, so the request names the checkout for both.
+    workspace: testWorkspaceContext({ repositoryRoot: root, workingDirectory: root }),
   };
 }
 
 /** Runs one stage to completion or refusal, and always reports whether the transport was reached. */
 async function attempt(root: string, target: StageUnderTest = VERIFIER): Promise<Attempt> {
   const transport = createFakeOpenCodeTransport();
-  const executor = createOpenCodeStageExecutor({ transport, workingDirectory: root });
+  const executor = createOpenCodeStageExecutor({ transport, projectRoot: root });
 
   try {
-    const result = await executor.execute(requestFor(target));
+    const result = await executor.execute(requestFor(target, root));
 
     return { transport, error: undefined, outcome: result.outcome };
   } catch (error) {
     return { transport, error, outcome: null };
   }
+}
+
+/**
+ * Calls the configuration-integrity check directly.
+ *
+ * The framework's generated files now live in a framework-owned runtime directory, so a stage run no
+ * longer requires a project-local installation and the executor no longer calls this check. The
+ * check itself is unchanged and still meaningful for a repository that does carry a generated
+ * installation, so its own behaviour is asserted here against the function rather than through a
+ * stage.
+ */
+async function checkIntegrity(root: string, profile: OpenCodeProfile): Promise<unknown> {
+  try {
+    await assertOpenCodeConfigurationIntegrity({ workingDirectory: root, profile });
+
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+/** The refusal a test is asserting on when the check is called directly. */
+function expectIntegrityRefusal(error: unknown, reason: string): void {
+  expect(isOpenCodeAdapterError(error)).toBe(true);
+  expect(isOpenCodeAdapterError(error) && error.code).toBe("opencode_configuration_tampered");
+  expect(error instanceof Error ? error.message : "").toContain(reason);
 }
 
 /**
@@ -160,13 +198,47 @@ function expectRefusal(attempted: Attempt, reason: string): void {
 function expectAllowed(attempted: Attempt): void {
   expect(attempted.error).toBeUndefined();
   expect(attempted.transport.callCount).toBe(1);
-  expect(attempted.transport.lastRequest()?.agent).toBe("verifier");
+  // The verifier stage runs under the read profile, and the id passed to `--agent` is that profile,
+  // never the role. This is the assertion that a role is not an OpenCode agent any more.
+  expect(attempted.transport.lastRequest()?.agent).toBe("agentflow-read");
 }
+
+/* eslint-disable @typescript-eslint/no-deprecated -- this block exists to prove the deprecated aliases still resolve to the profile API */
+describe("the deprecated role-keyed integrity surface", () => {
+  it("resolves a role to the same agent file as the profile it runs as", () => {
+    for (const role of OPENCODE_ROLES) {
+      expect(agentFilePathForRole(role)).toBe(agentFilePathForProfile(profileForRole(role)));
+    }
+  });
+
+  it("checks the same file whether the caller names the profile or the role", async () => {
+    const root = await makeRoot();
+
+    await expect(
+      assertOpenCodeConfigurationIntegrity({ workingDirectory: root, profile: "agentflow-read" }),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      assertOpenCodeConfigurationIntegrity({ workingDirectory: root, role: "griller" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still refuses a role whose profile file was tampered with", async () => {
+    const root = await makeRoot();
+
+    await writeProjectFile(root, agentFilePathForProfile("agentflow-read"), "---\ndescription: mine\n---\n");
+
+    await expect(
+      assertOpenCodeConfigurationIntegrity({ workingDirectory: root, role: "verifier" }),
+    ).rejects.toThrow(/frontmatter_changed|configuration/i);
+  });
+});
+/* eslint-enable @typescript-eslint/no-deprecated */
 
 describe("agent id resolution from a definition path", () => {
   it("takes the id from the path relative to either source directory, not the basename", () => {
-    // The generated file resolves to the flat role id the CLI passes to `--agent`.
-    expect(openCodeAgentIdForPath(".opencode/agents/verifier.md")).toBe("verifier");
+    // The generated file resolves to the flat profile id the CLI passes to `--agent`.
+    expect(openCodeAgentIdForPath(".opencode/agents/agentflow-read.md")).toBe("agentflow-read");
     // A nested file resolves to a nested id, which is the whole reason a filename check is not enough:
     // `team/reviewer.md` is the agent `team/reviewer`, not `reviewer`.
     expect(openCodeAgentIdForPath(".opencode/agent/team/reviewer.md")).toBe("team/reviewer");
@@ -174,66 +246,85 @@ describe("agent id resolution from a definition path", () => {
   });
 
   it("resolves the same id from a generated path in either spelling", () => {
-    expect(openCodeAgentIdForPath(agentFilePathForRole("verifier"))).toBe("verifier");
-    expect(openCodeAgentIdForPath(".opencode/agent/verifier.md")).toBe("verifier");
+    expect(openCodeAgentIdForPath(agentFilePathForProfile("agentflow-read"))).toBe("agentflow-read");
+    expect(openCodeAgentIdForPath(".opencode/agent/agentflow-read.md")).toBe("agentflow-read");
   });
 
   it("returns no id for a path that cannot become one", () => {
     for (const path of [
       "opencode.json",
-      ".opencode/agent/verifier.txt",
-      ".opencode/agents/verifier",
+      ".opencode/agent/agentflow-read.txt",
+      ".opencode/agents/agentflow-read",
       ".opencode/agent/.md",
-      ".opencode/agent/../agents/verifier.md",
-      ".opencode/agentsx/verifier.md",
-      ".opencode/agents//verifier.md",
+      ".opencode/agent/../agents/agentflow-read.md",
+      ".opencode/agentsx/agentflow-read.md",
+      ".opencode/agents//agentflow-read.md",
     ]) {
       expect(openCodeAgentIdForPath(path), path).toBeNull();
     }
   });
 
-  it("resolves every generated role to a distinct id", () => {
-    const ids = OPENCODE_ROLES.map((role) => openCodeAgentIdForPath(agentFilePathForRole(role)));
+  it("resolves the two generated profiles to two distinct ids, and no role to one", () => {
+    const ids = OPENCODE_PROFILES.map((profile) =>
+      openCodeAgentIdForPath(agentFilePathForProfile(profile)),
+    );
 
-    expect(new Set(ids).size).toBe(OPENCODE_ROLES.length);
-    expect(ids.every((id) => id !== null)).toBe(true);
+    expect(ids).toEqual(["agentflow-read", "agentflow-write"]);
+    expect(new Set(ids).size).toBe(OPENCODE_PROFILES.length);
+
+    // Eleven roles share two files, so uniqueness is now a property of the profiles alone.
+    expect(new Set(OPENCODE_ROLES.map((role) => profileForRole(role))).size).toBe(
+      OPENCODE_PROFILES.length,
+    );
   });
 });
 
 describe("duplicate agent definitions", () => {
-  it("refuses a second definition of the implementer in the other source directory", async () => {
+  it("refuses a second definition of the write profile in the other source directory", async () => {
     const root = await makeRoot();
 
-    await writeProjectFile(root, ".opencode/agent/implementer.md", "---\ndescription: mine\n---\n");
+    await writeProjectFile(
+      root,
+      ".opencode/agent/agentflow-write.md",
+      "---\ndescription: mine\n---\n",
+    );
 
-    const attempted = await attempt(root, IMPLEMENTER);
+    const error = await checkIntegrity(root, "agentflow-write");
 
-    expectRefusal(attempted, "duplicate_agent_definition");
-    expect(attempted.error instanceof Error ? attempted.error.message : "").toContain(
-      ".opencode/agent/implementer.md",
+    expectIntegrityRefusal(error, "duplicate_agent_definition");
+    expect(error instanceof Error ? error.message : "").toContain(
+      ".opencode/agent/agentflow-write.md",
     );
   });
 
-  it("refuses a second definition of the fixer, the role that runs with a fix return state", async () => {
+  it("refuses a second definition of the write profile, which the fixing stage runs under", async () => {
     const root = await makeRoot();
 
     // The generated file stays intact here on purpose: this is not a rewritten file, it is a second
     // file the loader would resolve the same id from, which the generated file's own contents cannot
     // say anything about.
-    await writeProjectFile(root, ".opencode/agent/fixer.md", "---\ndescription: mine\n---\n");
+    await writeProjectFile(
+      root,
+      ".opencode/agent/agentflow-write.md",
+      "---\ndescription: mine\n---\n",
+    );
 
-    const attempted = await attempt(root, FIXER);
+    const error = await checkIntegrity(root, "agentflow-write");
 
-    expectRefusal(attempted, "duplicate_agent_definition");
-    expect(attempted.error instanceof Error ? attempted.error.message : "").toContain(
-      ".opencode/agent/fixer.md",
+    expectIntegrityRefusal(error, "duplicate_agent_definition");
+    expect(error instanceof Error ? error.message : "").toContain(
+      ".opencode/agent/agentflow-write.md",
     );
   });
 
-  it("names the role's agent id in the refusal, because the id is what the CLI asks for", async () => {
+  it("names the profile's agent id in the refusal, because the id is what the CLI asks for", async () => {
     const root = await makeRoot();
 
-    await writeProjectFile(root, ".opencode/agent/planner.md", "---\ndescription: mine\n---\n");
+    await writeProjectFile(
+      root,
+      ".opencode/agent/agentflow-read.md",
+      "---\ndescription: mine\n---\n",
+    );
 
     const attempted = await attempt(root, {
       stage: "planning",
@@ -242,16 +333,20 @@ describe("duplicate agent definitions", () => {
       fixReturnState: null,
     });
 
-    expectRefusal(attempted, '"planner"');
+    // The refusal names the id the run needed, not the role that happened to need it.
+    expectRefusal(attempted, '"agentflow-read"');
   });
 
   it("refuses a symlinked definition, which would decide the id from outside the repository", async () => {
     const root = await makeRoot();
     const outside = await makeRoot();
 
-    await writeFile(join(outside, "verifier.md"), "---\ndescription: elsewhere\n---\n", "utf8");
+    await writeFile(join(outside, "agentflow-read.md"), "---\ndescription: elsewhere\n---\n", "utf8");
     await mkdir(join(root, ".opencode", "agent"), { recursive: true });
-    await symlink(join(outside, "verifier.md"), join(root, ".opencode", "agent", "verifier.md"));
+    await symlink(
+      join(outside, "agentflow-read.md"),
+      join(root, ".opencode", "agent", "agentflow-read.md"),
+    );
 
     // The generated file is untouched, so the only thing that makes this repository unsafe is the
     // link, and the only thing that catches it is the source walk.
@@ -273,11 +368,11 @@ describe("duplicate agent definitions", () => {
       ".opencode/agent/team/reviewer.md",
       "---\ndescription: mine\n---\n",
     );
-    // And a nested path that merely contains a role name is not that role: this is the agent
-    // `verifier/verifier`, not a second `verifier`.
+    // And a nested path that merely contains a profile name is not that profile: this is the agent
+    // `agentflow-read/agentflow-read`, not a second `agentflow-read`.
     await writeProjectFile(
       root,
-      ".opencode/agent/verifier/verifier.md",
+      ".opencode/agent/agentflow-read/agentflow-read.md",
       "---\ndescription: mine\n---\n",
     );
 
@@ -292,10 +387,10 @@ describe("alternate project configuration sources", () => {
 
       await writeProjectFile(root, path, JSON.stringify({ share: "share" }, null, 2));
 
-      const attempted = await attempt(root);
+      const error = await checkIntegrity(root, "agentflow-read");
 
-      expectRefusal(attempted, "alternate_project_config");
-      expect(attempted.error instanceof Error ? attempted.error.message : "").toContain(path);
+      expectIntegrityRefusal(error, "alternate_project_config");
+      expect(error instanceof Error ? error.message : "").toContain(path);
     }
   });
 
@@ -304,7 +399,7 @@ describe("alternate project configuration sources", () => {
 
     await writeProjectFile(root, "opencode.jsonc", '// "share": "share"\n');
 
-    expectRefusal(await attempt(root), "alternate_project_config");
+    expectIntegrityRefusal(await checkIntegrity(root, "agentflow-read"), "alternate_project_config");
   });
 
   it("allows an absent or empty alternate config", async () => {
@@ -324,15 +419,18 @@ describe("alternate project configuration sources", () => {
     await writeFile(join(outside, "config.json"), "{}\n", "utf8");
     await symlink(join(outside, "config.json"), join(root, "opencode.jsonc"));
 
-    expectRefusal(await attempt(root), "unsafe_path");
+    expectIntegrityRefusal(await checkIntegrity(root, "agentflow-read"), "unsafe_path");
   });
 });
 
 describe("framework-owned fields in the root project config", () => {
-  it("refuses a root config that replaces a role's prompt, permission, or mode", async () => {
+  it("refuses a root config that replaces a profile's prompt, permission, or mode", async () => {
     const cases: ReadonlyArray<readonly [string, unknown]> = [
-      ["agent", { verifier: { prompt: "You are a helpful assistant.", permission: { edit: "allow" } } }],
-      ["agents", { verifier: { prompt: "You are a helpful assistant." } }],
+      [
+        "agent",
+        { "agentflow-read": { prompt: "You are a helpful assistant.", permission: { edit: "allow" } } },
+      ],
+      ["agents", { "agentflow-read": { prompt: "You are a helpful assistant." } }],
       ["mode", { build: { prompt: "You are a helpful assistant." } }],
       ["default_agent", "helper"],
       ["permission", { edit: "allow" }],
@@ -346,10 +444,10 @@ describe("framework-owned fields in the root project config", () => {
 
       await writeProjectConfig(root, { [field]: value });
 
-      const attempted = await attempt(root);
+      const error = await checkIntegrity(root, "agentflow-read");
 
-      expectRefusal(attempted, "project_config_changed");
-      expect(attempted.error instanceof Error ? attempted.error.message : "").toContain(`"${field}"`);
+      expectIntegrityRefusal(error, "project_config_changed");
+      expect(error instanceof Error ? error.message : "").toContain(`"${field}"`);
     }
   });
 
@@ -371,10 +469,10 @@ describe("framework-owned fields in the root project config", () => {
 
       await writeProjectConfig(root, { [field]: value });
 
-      const attempted = await attempt(root);
+      const error = await checkIntegrity(root, "agentflow-read");
 
-      expectRefusal(attempted, "project_config_changed");
-      expect(attempted.error instanceof Error ? attempted.error.message : "").toContain(`"${field}"`);
+      expectIntegrityRefusal(error, "project_config_changed");
+      expect(error instanceof Error ? error.message : "").toContain(`"${field}"`);
     }
   });
 
@@ -383,8 +481,8 @@ describe("framework-owned fields in the root project config", () => {
 
     await writeProjectConfig(root, { mcp: {}, skills: {} });
 
-    const attempted = await attempt(root);
-    const message = attempted.error instanceof Error ? attempted.error.message : "";
+    const error = await checkIntegrity(root, "agentflow-read");
+    const message = error instanceof Error ? error.message : "";
 
     // A bare field name tells the operator nothing about whether the field is actually dangerous, so
     // the refusal carries what it would have done to the run.
@@ -397,10 +495,10 @@ describe("framework-owned fields in the root project config", () => {
 
     await writeProjectConfig(root, { mcp: {}, tools: {}, instructions: [] });
 
-    const attempted = await attempt(root);
-    const message = attempted.error instanceof Error ? attempted.error.message : "";
+    const error = await checkIntegrity(root, "agentflow-read");
+    const message = error instanceof Error ? error.message : "";
 
-    expectRefusal(attempted, "project_config_changed");
+    expectIntegrityRefusal(error, "project_config_changed");
     expect(message).toContain('"instructions"');
     expect(message).toContain('"mcp"');
     expect(message).toContain('"tools"');
@@ -462,9 +560,9 @@ describe("project-owned configuration that has to keep working", () => {
     expect(attempted.transport.lastRequest()?.prompt).toContain("Prefer small commits");
   });
 
-  it("allows every generated role in a correctly generated repository", async () => {
-    // The check is per role, so a project that satisfies it for the verifier still has to satisfy it
-    // for the rest. This is the case that keeps the refusal from being the only thing that works.
+  it("allows all eleven roles in a correctly generated repository", async () => {
+    // The check is per profile, so a project that satisfies it for the verifier still has to satisfy
+    // it for the rest. This is the case that keeps the refusal from being the only thing that works.
     const stages: Readonly<Record<StageRole, StageUnderTest>> = {
       griller: { stage: "grill", role: "griller", state: WorkflowState.Grilling, fixReturnState: null },
       planner: { stage: "planning", role: "planner", state: WorkflowState.Planning, fixReturnState: null },
@@ -515,7 +613,7 @@ describe("project-owned configuration that has to keep working", () => {
       expect(attempted.error, role).toBeUndefined();
       expect(attempted.transport.callCount, role).toBe(1);
       expect(attempted.transport.lastRequest()?.agent, role).toBe(
-        openCodeAgentIdForPath(agentFilePathForRole(role)),
+        openCodeAgentIdForPath(agentFilePathForProfile(profileForRole(role))),
       );
     }
   });

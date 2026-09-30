@@ -438,9 +438,19 @@ describe("FeatureSessionStore corruption and safety", () => {
     await writeFile(sessionPath, "{broken", "utf8");
     await expectPersistenceError(() => store.load("F-001"), "MALFORMED_SESSION");
 
+    // The current version is 3, so 3 is exactly the version this store writes and cannot be the
+    // unknown one; 4 is the next version, and a document claiming it must be refused rather than
+    // half-read.
     await writeFile(
       sessionPath,
-      JSON.stringify({ ...document, schemaVersion: 3 }),
+      JSON.stringify({ ...document, schemaVersion: FEATURE_SESSION_SCHEMA_VERSION + 1 }),
+      "utf8",
+    );
+    await expectPersistenceError(() => store.load("F-001"), "UNSUPPORTED_SCHEMA_VERSION");
+
+    await writeFile(
+      sessionPath,
+      JSON.stringify({ ...document, schemaVersion: FEATURE_SESSION_SCHEMA_VERSION - 1 }),
       "utf8",
     );
     await expectPersistenceError(() => store.load("F-001"), "UNSUPPORTED_SCHEMA_VERSION");

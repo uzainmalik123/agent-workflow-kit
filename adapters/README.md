@@ -1,11 +1,23 @@
 # Adapters
 
-This boundary contains project adapters and agent adapters. The `persistence/` project adapter depends on the workflow core and owns repository-local sessions, artifacts, and event logs; the `opencode/` agent adapter depends on the core, the persistence adapter, and the orchestrator. The workflow core must never depend on an adapter, and the orchestrator must never import one. Other agent adapters and external integrations remain deferred.
+This boundary contains project adapters and agent adapters. The `persistence/` project adapter depends on the workflow core and owns repository-local sessions, artifacts, and event logs; the `workspace/` project adapter depends on the core and the orchestrator and owns isolated Git worktree execution; the `opencode/` agent adapter depends on the core, the persistence adapter, and the orchestrator. The workflow core must never depend on an adapter, and the orchestrator must never import one. Other agent adapters and external integrations remain deferred.
 
 | Adapter | Kind | Depends on | Owns |
 | --- | --- | --- | --- |
 | `persistence/` | project adapter | core | sessions, controlled artifacts, event logs, locks, path safety |
+| `project/` | project adapter | core, orchestration | discovery, capability classification, command plan, deterministic verification evidence |
+| `workspace/` | project adapter | core, orchestration | baseline capture, detached worktrees, sidecars, leases, change inspection, scope restoration |
 | `opencode/` | agent adapter | core, persistence, orchestration | roles, V2 permissions, prompt boundary, response protocol, transport, capability probe |
+
+## workspace
+
+`@agent-workflow-kit/workspace` is the only package that puts a stage's writes somewhere other than a
+human's working tree. A plan is approved against a commit, every stage after that gate runs in a
+detached worktree at that commit, and the change set is read back with `git status --porcelain -z` so
+the orchestrator's own scope policy can decide what was allowed. The worktree's identity lives in a
+sidecar beside it, a lease keeps two stages out of one worktree, and a path outside the approved scope
+is restored from the approved commit or deleted. The trust model is described in
+`workspace/README.md`.
 
 ## persistence
 

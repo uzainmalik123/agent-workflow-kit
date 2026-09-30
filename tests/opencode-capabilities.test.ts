@@ -344,21 +344,10 @@ function resolvedWriteCapableRules(): Rule[] {
   return out;
 }
 
-const WRITE_CAPABLE_AGENTS = new Set(["implementer", "fixer"]);
+const WRITE_CAPABLE_AGENTS = new Set(["agentflow-write"]);
 
-const ALL_AGENTS = [
-  "griller",
-  "planner",
-  "plan-reviewer",
-  "implementer",
-  "code-reviewer",
-  "scope-reviewer",
-  "verifier",
-  "fixer",
-  "security-reviewer",
-  "final-gate-reviewer",
-  "summarizer",
-] as const;
+/** The two physical agents the adapter generates, and the only ids a stage ever asks for. */
+const ALL_AGENTS = ["agentflow-read", "agentflow-write"] as const;
 
 /** A `debug agents` payload in the shape OpenCode 2.0.18 really prints. */
 function listing(options?: { readonly resolved: boolean }): string {
@@ -740,33 +729,51 @@ describe("the configuration smoke test", () => {
     expect(report.directory).toBeNull();
   });
 
-  it("keeps its temporary project when asked, and removes it otherwise", async () => {
+  it("writes nothing into the directory it runs in, and keeps or removes both directories", async () => {
     const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing() });
     const kept = await runOpenCodeConfigSmokeTest({ command, keepDirectory: true, timeoutMs: 20_000 });
 
     expect(kept.directory).not.toBeNull();
-    await expect(readFile(join(kept.directory ?? "", "opencode.json"), "utf8")).resolves.toContain("$schema");
+
+    // The framework's configuration is written outside the directory the binary runs in, so the
+    // directory it runs in is expected to be empty of anything the framework wrote. This is the
+    // assertion that a run configures OpenCode without writing to the target.
+    await expect(readFile(join(kept.directory ?? "", "opencode.json"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(kept.directory ?? "", ".opencode"), "utf8")).rejects.toThrow();
+
+    // And the profiles are in the separate runtime directory the run was pointed at.
+    expect(kept.runtimeConfigDirectory).not.toBeNull();
+    await expect(
+      readFile(join(kept.runtimeConfigDirectory ?? "", "agent", "agentflow-read.md"), "utf8"),
+    ).resolves.toContain("permissions:");
+    await expect(
+      readFile(join(kept.runtimeConfigDirectory ?? "", "opencode.json"), "utf8"),
+    ).resolves.toContain("$schema");
+
     await rm(kept.directory ?? "", { recursive: true, force: true });
+    await rm(kept.runtimeConfigDirectory ?? "", { recursive: true, force: true });
 
     const discarded = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
 
     expect(discarded.directory).toBeNull();
+    expect(discarded.runtimeConfigDirectory).toBeNull();
   });
 
-  it("passes when the binary resolves every generated role as written", async () => {
+  it("passes when the binary resolves both generated profiles as written", async () => {
     const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing() });
     const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
 
     expect(report.failures).toEqual([]);
     expect(report.agents).toHaveLength(ALL_AGENTS.length);
+    expect(report.agents.map((agent) => agent.profile)).toEqual([...ALL_AGENTS]);
     expect(report.agents.every((agent) => agent.discovered)).toBe(true);
     expect(report.agents.every((agent) => agent.verified)).toBe(true);
     expect(report.status).toBe("passed");
   });
 
-  it("fails when the binary reports every role with its untouched default capabilities", async () => {
+  it("fails when the binary reports a profile with its untouched default capabilities", async () => {
     // This is what OpenCode 2.0.18 actually reports for an agent whose `permissions:` frontmatter it
-    // did not read: the base allow-everything ruleset and nothing else. Every role then has full
+    // did not read: the base allow-everything ruleset and nothing else. Both profiles then have full
     // access, so the report has to say so rather than pass on a listing that parsed cleanly.
     const command = await fakeBinary({ ...V2_REPLIES, "debug agents": listing({ resolved: false }) });
     const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
@@ -777,11 +784,11 @@ describe("the configuration smoke test", () => {
     expect(report.failures.join(" ")).toContain("edit .agentflow/session.json resolved to allow instead of deny");
   });
 
-  it("leaves a role unverified rather than passing it when its permissions cannot be read", async () => {
+  it("leaves a profile unverified rather than passing it when its permissions cannot be read", async () => {
     const payload = JSON.parse(listing()) as { id: string; permissions?: unknown }[];
 
     for (const agent of payload) {
-      if (agent.id === "planner") {
+      if (agent.id === "agentflow-read") {
         delete agent.permissions;
       }
     }
@@ -789,27 +796,29 @@ describe("the configuration smoke test", () => {
     const command = await fakeBinary({ ...V2_REPLIES, "debug agents": JSON.stringify(payload) });
     const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
 
-    const planner = report.agents.find((agent) => agent.agent === "planner");
+    const read = report.agents.find((agent) => agent.agent === "agentflow-read");
 
-    expect(planner?.discovered).toBe(true);
-    expect(planner?.verified).toBeNull();
-    expect(planner?.failures.join(" ")).toContain("no readable permissions array");
+    expect(read?.discovered).toBe(true);
+    expect(read?.verified).toBeNull();
+    expect(read?.failures.join(" ")).toContain("no readable permissions array");
   });
 
-  it("fails when the binary does not discover a generated role", async () => {
-    const payload = (JSON.parse(listing()) as { id: string }[]).filter((agent) => agent.id !== "verifier");
+  it("fails when the binary does not discover a generated profile", async () => {
+    const payload = (JSON.parse(listing()) as { id: string }[]).filter(
+      (agent) => agent.id !== "agentflow-write",
+    );
     const command = await fakeBinary({ ...V2_REPLIES, "debug agents": JSON.stringify(payload) });
     const report = await runOpenCodeConfigSmokeTest({ command, timeoutMs: 20_000 });
 
-    const verifier = report.agents.find((agent) => agent.agent === "verifier");
+    const write = report.agents.find((agent) => agent.agent === "agentflow-write");
 
     expect(report.status).toBe("failed");
-    expect(verifier?.discovered).toBe(false);
-    expect(verifier?.failures.join(" ")).toContain('did not list the agent "verifier"');
+    expect(write?.discovered).toBe(false);
+    expect(write?.failures.join(" ")).toContain('did not list the agent "agentflow-write"');
   });
 
   it("fails, and never passes, when the listing is not the array the parser reads", async () => {
-    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": "griller (primary)\n" });
+    const command = await fakeBinary({ ...V2_REPLIES, "debug agents": "agentflow-read (primary)\n" });
     const report = await runOpenCodeConfigSmokeTest({
       command,
       timeoutMs: 20_000,
@@ -855,7 +864,7 @@ describe("the configuration smoke test", () => {
   it("waits for a listing that accounts for the generated agents before judging it", async () => {
     // A real V2 binary answers its first `debug agents` with an empty array while the background
     // service it just started is still loading the directory, and answers the next one properly.
-    // Believing the first answer would report all eleven roles as missing.
+    // Believing the first answer would report both profiles as missing.
     const root = await makeRoot();
     const state = join(root, "calls.txt");
     const command = await fakeBinaryThatWarmsUp(V2_REPLIES, listing(), state);
@@ -892,7 +901,7 @@ describe("the configuration smoke test", () => {
 
     expect(report.status).toBe("failed");
     expect(report.agents.every((agent) => !agent.discovered)).toBe(true);
-    expect(report.failures.join(" ")).toContain('did not list the agent "griller"');
+    expect(report.failures.join(" ")).toContain('did not list the agent "agentflow-read"');
   });
 
   it("skips rather than fails when debug agents support cannot be determined", async () => {

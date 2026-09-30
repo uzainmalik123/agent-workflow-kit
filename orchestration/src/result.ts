@@ -9,6 +9,7 @@ import type { FeatureArtifactName } from "@agent-workflow-kit/persistence";
 import type { OrchestrationError, OrchestrationFailureClass } from "./errors.js";
 import type { HumanAction, StageRole, WorkStage } from "./stages.js";
 import type { VerificationEvidenceBundle } from "./verification.js";
+import type { WorkspaceScopeEvidence } from "./workspace.js";
 
 export const ORCHESTRATION_STATUSES = [
   "created",
@@ -22,6 +23,7 @@ export const ORCHESTRATION_STATUSES = [
   "stage_failed",
   "inconclusive",
   "executor_error",
+  "scope_violation",
   "rejected",
   "conflict",
   "persistence_error",
@@ -51,6 +53,11 @@ export interface OrchestrationResult {
    * and the stage was a verification stage. Bounded: excerpts only, never a raw transcript.
    */
   readonly verification: VerificationEvidenceBundle | null;
+  /**
+   * The deterministic scope record for this run, when the stage ran in an isolated workspace. Path
+   * names only, so it is safe to persist, print, and pass to a reviewer as context.
+   */
+  readonly scope: WorkspaceScopeEvidence | null;
   readonly error: OrchestrationError | null;
 }
 
@@ -70,6 +77,7 @@ export interface OrchestrationResultInput {
   readonly findings?: readonly ReviewFinding[];
   readonly evidence?: readonly VerificationEvidence[];
   readonly verification?: VerificationEvidenceBundle | null;
+  readonly scope?: WorkspaceScopeEvidence | null;
   readonly error?: OrchestrationError | null;
 }
 
@@ -93,6 +101,7 @@ export function buildOrchestrationResult(input: OrchestrationResultInput): Orche
     findings: input.findings ?? [],
     evidence: input.evidence ?? [],
     verification: input.verification ?? null,
+    scope: input.scope ?? null,
     error,
   };
 }

@@ -1,10 +1,14 @@
-import type { StageRole } from "@agent-workflow-kit/orchestration";
-import { STAGE_ROLES } from "@agent-workflow-kit/orchestration";
 import { PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/project";
-import { accessForRole } from "./roles.js";
+import type { StageRole } from "@agent-workflow-kit/orchestration";
+import { isWriteCapableProfile, profileForRole, rolesForProfile, type OpenCodeProfile } from "./roles.js";
 
 /**
  * OpenCode V2 permissions.
+ *
+ * There are exactly two rulesets, one per physical agent: `agentflow-read` and `agentflow-write`.
+ * A logical role does not have its own ruleset, because a profile's `permission:` block is
+ * authoritative in OpenCode and cannot be widened by anything the repository declares. The role
+ * chooses which of the two it runs as; it never adds to it.
  *
  * V2 configuration uses `permissions`: an ordered array of `{ action, resource, effect }` rules.
  * The V1 object syntax is not used anywhere in this adapter. In particular `permission:`, the
@@ -154,7 +158,8 @@ function protectedEditDenials(): readonly OpenCodePermissionRule[] {
 }
 
 /**
- * Read-only roles: deny everything, then allow the three discovery actions and nothing else.
+ * The `agentflow-read` ruleset: deny everything, then allow the three discovery actions and nothing
+ * else.
  *
  * `edit` is named explicitly even though the leading deny already covers it. The explicit rule is
  * what an auditor reads first, and it is what OpenCode's own `debug` output shows as the deciding
@@ -169,9 +174,9 @@ export const READ_ONLY_PERMISSION_RULES: OpenCodePermissionRuleset = [
 ];
 
 /**
- * Write-capable roles: the same surface, plus an `edit` allowance that is immediately narrowed to
- * deny the workflow and Git paths. The `edit *` allow comes after the universal denials and before
- * the protected-path denials, which is the order the last-match-wins rule requires.
+ * The `agentflow-write` ruleset: the same surface, plus an `edit` allowance that is immediately
+ * narrowed to deny the workflow and Git paths. The `edit *` allow comes after the universal denials
+ * and before the protected-path denials, which is the order the last-match-wins rule requires.
  */
 export const WRITE_CAPABLE_PERMISSION_RULES: OpenCodePermissionRuleset = [
   DENY_ALL_RULE,
@@ -182,8 +187,9 @@ export const WRITE_CAPABLE_PERMISSION_RULES: OpenCodePermissionRuleset = [
   ...protectedReadDenials(),
 ];
 
-export function permissionRulesForRole(role: StageRole): OpenCodePermissionRuleset {
-  return accessForRole(role) === "read_only" ? READ_ONLY_PERMISSION_RULES : WRITE_CAPABLE_PERMISSION_RULES;
+/** The ruleset a physical agent carries. There are two, and a profile names one of them. */
+export function permissionRulesForProfile(profile: OpenCodeProfile): OpenCodePermissionRuleset {
+  return isWriteCapableProfile(profile) ? WRITE_CAPABLE_PERMISSION_RULES : READ_ONLY_PERMISSION_RULES;
 }
 
 /**
@@ -247,14 +253,38 @@ export function operationEffect(
   return effects.includes("ask") ? "ask" : "allow";
 }
 
+export function isReadOnlyProfile(profile: OpenCodeProfile): boolean {
+  return !isWriteCapableProfile(profile);
+}
+
+/**
+ * @deprecated Use {@link permissionRulesForProfile} with {@link profileForRole}. A role no longer
+ * owns a ruleset, so this resolves the role's shared profile and returns that profile's rules.
+ */
+export function permissionRulesForRole(role: StageRole): OpenCodePermissionRuleset {
+  return permissionRulesForProfile(profileForRole(role));
+}
+
+/**
+ * @deprecated Use {@link isReadOnlyProfile} with {@link profileForRole}. Several roles now share
+ * one read-only profile, so this reports the access of the role's profile.
+ */
 export function isReadOnlyRole(role: StageRole): boolean {
-  return accessForRole(role) === "read_only";
+  return isReadOnlyProfile(profileForRole(role));
 }
 
+/**
+ * @deprecated Use {@link rolesForProfile} with `OPENCODE_PROFILES`. This lists the roles behind the
+ * read-only profile, in the orchestrator's own role order.
+ */
 export function readOnlyRoles(): readonly StageRole[] {
-  return STAGE_ROLES.filter((role) => accessForRole(role) === "read_only");
+  return rolesForProfile("agentflow-read");
 }
 
+/**
+ * @deprecated Use {@link rolesForProfile} with `OPENCODE_PROFILES`. This lists the roles behind the
+ * write profile, in the orchestrator's own role order.
+ */
 export function writeCapableRoles(): readonly StageRole[] {
-  return STAGE_ROLES.filter((role) => accessForRole(role) === "write_capable");
+  return rolesForProfile("agentflow-write");
 }

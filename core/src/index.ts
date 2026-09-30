@@ -19,3 +19,13 @@ export type {
   VerificationEvidenceKind,
   VerificationResult,
 } from "./types.js";
+export {
+  isWorkspaceBaseline,
+  validateWorkspaceBaseline,
+  WORKSPACE_ACCESS_LEVELS,
+} from "./workspace-baseline.js";
+export type {
+  WorkspaceAccessLevel,
+  WorkspaceBaseline,
+  WorkspaceBaselineValidation,
+} from "./workspace-baseline.js";

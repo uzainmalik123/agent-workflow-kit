@@ -2,6 +2,7 @@ import {
   WorkflowState,
   type FixReturnState,
   type WorkflowEvent,
+  type WorkspaceAccessLevel,
 } from "@agent-workflow-kit/core";
 import type { FeatureArtifactName } from "@agent-workflow-kit/persistence";
 
@@ -69,6 +70,20 @@ export interface StageDefinition {
   readonly context: StageContextPlan;
   readonly successEvent: WorkflowEvent;
   readonly fixable: boolean;
+  /**
+   * What the stage is allowed to do to the files in its working directory.
+   *
+   * This is a framework decision, not a role's self-description, and it is the same fact the OpenCode
+   * adapter encodes as a read-only or write-capable role. It is duplicated here on purpose: the
+   * orchestration layer has to choose a directory and an enforcement policy before any adapter is
+   * involved, and a stage that is refused write access must be refused it even if the adapter that
+   * would have run it were misconfigured to allow writes.
+   *
+   * A stage marked `read_only` is still scope-checked after it runs. A reviewer that rewrote a file
+   * is a violation of the same approved-scope rule an implementer would violate, and the difference
+   * is which report says so.
+   */
+  readonly access: WorkspaceAccessLevel;
 }
 
 function document(name: FeatureArtifactName): StageArtifactOutputSpec {
@@ -86,6 +101,7 @@ function history(name: FeatureArtifactName): StageArtifactOutputSpec {
 export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   grill: {
     stage: "grill",
+    access: "read_only",
     state: WorkflowState.Grilling,
     role: "griller",
     outputs: [document("grill"), document("spec")],
@@ -95,6 +111,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   planning: {
     stage: "planning",
+    access: "read_only",
     state: WorkflowState.Planning,
     role: "planner",
     outputs: [document("plan")],
@@ -104,6 +121,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   plan_review: {
     stage: "plan_review",
+    access: "read_only",
     state: WorkflowState.PlanReview,
     role: "plan_reviewer",
     outputs: [document("plan_review")],
@@ -113,6 +131,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   implementation: {
     stage: "implementation",
+    access: "read_write",
     state: WorkflowState.Implementing,
     role: "implementer",
     outputs: [document("implementation")],
@@ -122,6 +141,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   code_review: {
     stage: "code_review",
+    access: "read_only",
     state: WorkflowState.CodeReview,
     role: "code_reviewer",
     outputs: [document("code_review")],
@@ -131,6 +151,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   scope_review: {
     stage: "scope_review",
+    access: "read_only",
     state: WorkflowState.ScopeReview,
     role: "scope_reviewer",
     outputs: [document("scope_review")],
@@ -140,6 +161,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   static_verification: {
     stage: "static_verification",
+    access: "read_only",
     state: WorkflowState.StaticVerification,
     role: "verifier",
     outputs: [section("verification", "static_verification")],
@@ -152,6 +174,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   test_verification: {
     stage: "test_verification",
+    access: "read_only",
     state: WorkflowState.TestVerification,
     role: "verifier",
     outputs: [section("verification", "test_verification")],
@@ -164,6 +187,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   runtime_verification: {
     stage: "runtime_verification",
+    access: "read_only",
     state: WorkflowState.RuntimeVerification,
     role: "verifier",
     outputs: [section("verification", "runtime_verification")],
@@ -176,6 +200,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   fixing: {
     stage: "fixing",
+    access: "read_write",
     state: WorkflowState.Fixing,
     role: "fixer",
     outputs: [history("fixes")],
@@ -185,6 +210,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   security_review: {
     stage: "security_review",
+    access: "read_only",
     state: WorkflowState.SecurityReview,
     role: "security_reviewer",
     outputs: [document("security_review")],
@@ -197,6 +223,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   final_gate: {
     stage: "final_gate",
+    access: "read_only",
     state: WorkflowState.FinalGate,
     role: "final_gate_reviewer",
     outputs: [],
@@ -218,6 +245,7 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
   },
   final_summary: {
     stage: "final_summary",
+    access: "read_only",
     state: WorkflowState.FinalSummary,
     role: "summarizer",
     outputs: [document("final_summary")],
@@ -302,6 +330,19 @@ export const APPROVAL_VERIFIED_STAGES: ReadonlySet<WorkStage> = new Set<WorkStag
   "final_gate",
   "final_summary",
 ]);
+
+/**
+ * Stages that are allowed to change files.
+ *
+ * Every other stage runs with read-only access to its working directory. The set exists so the
+ * framework can state the whole write surface of a workflow in one place instead of inferring it
+ * from role names in three different layers.
+ */
+export const WRITE_CAPABLE_WORK_STAGES: ReadonlySet<WorkStage> = new Set<WorkStage>(
+  (Object.keys(STAGE_DEFINITIONS) as WorkStage[]).filter(
+    (stage) => STAGE_DEFINITIONS[stage].access === "read_write",
+  ),
+);
 
 /** The artifacts a plan approval freezes. */
 export const APPROVED_ARTIFACTS = [

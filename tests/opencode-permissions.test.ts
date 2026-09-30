@@ -1,22 +1,27 @@
 import {
   DENY_ALL_RULE,
+  OPENCODE_PROFILES,
   OPENCODE_ROLES,
   PROTECTED_PATH_PATTERNS,
   READ_ONLY_PERMISSION_RULES,
-  READ_ONLY_ROLES,
   SECRET_PATH_PATTERNS,
   UNIVERSAL_ALLOWED_ACTIONS,
   UNIVERSAL_DENIAL_ACTIONS,
   WRITE_CAPABLE_PERMISSION_RULES,
-  WRITE_CAPABLE_ROLES,
   effectFor,
+  isReadOnlyProfile,
   isReadOnlyRole,
+  isWriteCapableProfile,
   matchesResourcePattern,
   operationEffect,
+  permissionRulesForProfile,
   permissionRulesForRole,
+  profileForRole,
   readOnlyRoles,
   writeCapableRoles,
   type OpenCodePermissionEffect,
+  type OpenCodePermissionRuleset,
+  type OpenCodeProfile,
 } from "@agent-workflow-kit/opencode";
 import { describe, expect, it } from "vitest";
 
@@ -28,12 +33,12 @@ const NESTED_GIT_PATH = "packages/app/.git/HEAD";
 const PROJECT_GITIGNORE = "packages/app.gitignore";
 const SECRET_FILE = ".env";
 
-function editEffect(role: (typeof OPENCODE_ROLES)[number], path: string): OpenCodePermissionEffect {
-  return effectFor(permissionRulesForRole(role), "edit", path);
+function editEffect(profile: OpenCodeProfile, path: string): OpenCodePermissionEffect {
+  return effectFor(permissionRulesForProfile(profile), "edit", path);
 }
 
-function readEffect(role: (typeof OPENCODE_ROLES)[number], path: string): OpenCodePermissionEffect {
-  return effectFor(permissionRulesForRole(role), "read", path);
+function readEffect(profile: OpenCodeProfile, path: string): OpenCodePermissionEffect {
+  return effectFor(permissionRulesForProfile(profile), "read", path);
 }
 
 function ruleIndex(rules: readonly { action: string; resource: string }[], action: string, resource: string): number {
@@ -41,24 +46,49 @@ function ruleIndex(rules: readonly { action: string; resource: string }[], actio
 }
 
 describe("least-privilege access levels", () => {
-  it("splits the roles into nine read-only and two write-capable", () => {
-    expect(readOnlyRoles()).toEqual([...READ_ONLY_ROLES]);
-    expect(readOnlyRoles()).toHaveLength(9);
-    expect(writeCapableRoles()).toEqual([...WRITE_CAPABLE_ROLES]);
-    expect(writeCapableRoles()).toEqual(["implementer", "fixer"]);
+  it("defines exactly two profiles, and they are the only rulesets that exist", () => {
+    expect(OPENCODE_PROFILES).toEqual(["agentflow-read", "agentflow-write"]);
+    expect(permissionRulesForProfile("agentflow-read")).toEqual(READ_ONLY_PERMISSION_RULES);
+    expect(permissionRulesForProfile("agentflow-write")).toEqual(WRITE_CAPABLE_PERMISSION_RULES);
   });
 
-  it("classifies every role as read-only or write-capable", () => {
-    for (const role of OPENCODE_ROLES) {
-      expect(isReadOnlyRole(role)).toBe(!WRITE_CAPABLE_ROLES.includes(role));
-    }
+  it("classifies every profile as read-only or write-capable", () => {
+    expect(isReadOnlyProfile("agentflow-read")).toBe(true);
+    expect(isReadOnlyProfile("agentflow-write")).toBe(false);
+    expect(isWriteCapableProfile("agentflow-read")).toBe(false);
+    expect(isWriteCapableProfile("agentflow-write")).toBe(true);
   });
+
+  it("routes all eleven roles to one of the two profiles, and no role has rules of its own", () => {
+    const rulesets = new Set<OpenCodePermissionRuleset>();
+
+    for (const role of OPENCODE_ROLES) {
+      rulesets.add(permissionRulesForProfile(profileForRole(role)));
+    }
+
+    expect(rulesets.size).toBe(2);
+    expect(OPENCODE_ROLES).toHaveLength(11);
+  });
+
+  /* eslint-disable @typescript-eslint/no-deprecated -- this block exists to prove the deprecated aliases still resolve to the profile API */
+  it("resolves every deprecated role-keyed permission alias to the same rules as its replacement", () => {
+    for (const role of OPENCODE_ROLES) {
+      const profile = profileForRole(role);
+
+      expect(permissionRulesForRole(role)).toEqual(permissionRulesForProfile(profile));
+      expect(isReadOnlyRole(role)).toBe(isReadOnlyProfile(profile));
+    }
+
+    expect([...readOnlyRoles()].sort()).toEqual([...OPENCODE_ROLES].filter((role) => isReadOnlyProfile(profileForRole(role))).sort());
+    expect([...writeCapableRoles()].sort()).toEqual([...OPENCODE_ROLES].filter((role) => !isReadOnlyProfile(profileForRole(role))).sort());
+  });
+  /* eslint-enable @typescript-eslint/no-deprecated */
 });
 
 describe("the V2 rule shape", () => {
   it("uses ordered action/resource/effect rules and nothing else", () => {
-    for (const role of OPENCODE_ROLES) {
-      for (const entry of permissionRulesForRole(role)) {
+    for (const profile of OPENCODE_PROFILES) {
+      for (const entry of permissionRulesForProfile(profile)) {
         expect(Object.keys(entry).sort()).toEqual(["action", "effect", "resource"]);
         expect(typeof entry.action).toBe("string");
         expect(typeof entry.resource).toBe("string");
@@ -68,8 +98,8 @@ describe("the V2 rule shape", () => {
   });
 
   it("opens every ruleset with deny-all so nothing is allowed by accident", () => {
-    for (const role of OPENCODE_ROLES) {
-      expect(permissionRulesForRole(role)[0]).toEqual(DENY_ALL_RULE);
+    for (const profile of OPENCODE_PROFILES) {
+      expect(permissionRulesForProfile(profile)[0]).toEqual(DENY_ALL_RULE);
       expect(DENY_ALL_RULE).toEqual({ action: "*", resource: "*", effect: "deny" });
     }
   });
@@ -105,8 +135,8 @@ describe("the V2 rule shape", () => {
     ];
     const resources = ["*", PROJECT_FILE, WORKFLOW_ARTIFACT, GIT_PATH, "git push origin main"];
 
-    for (const role of OPENCODE_ROLES) {
-      const rules = permissionRulesForRole(role);
+    for (const profile of OPENCODE_PROFILES) {
+      const rules = permissionRulesForProfile(profile);
 
       for (const action of actions) {
         for (const resource of resources) {
@@ -117,98 +147,86 @@ describe("the V2 rule shape", () => {
   });
 
   it("denies a plugin action it has never heard of", () => {
-    for (const role of OPENCODE_ROLES) {
-      expect(effectFor(permissionRulesForRole(role), "some_plugin_invented_action", "*")).toBe("deny");
+    for (const profile of OPENCODE_PROFILES) {
+      expect(effectFor(permissionRulesForProfile(profile), "some_plugin_invented_action", "*")).toBe(
+        "deny",
+      );
     }
   });
 });
 
-describe("read-only role permissions", () => {
-  it("denies every edit to every read-only role", () => {
-    for (const role of READ_ONLY_ROLES) {
-      expect(editEffect(role, PROJECT_FILE)).toBe("deny");
-      expect(editEffect(role, "README.md")).toBe("deny");
-      expect(permissionRulesForRole(role)).toEqual(READ_ONLY_PERMISSION_RULES);
+describe("the agentflow-read profile", () => {
+  it("denies every edit, for all nine roles that run under it", () => {
+    expect(editEffect("agentflow-read", PROJECT_FILE)).toBe("deny");
+    expect(editEffect("agentflow-read", "README.md")).toBe("deny");
+
+    for (const role of OPENCODE_ROLES.filter((entry) => profileForRole(entry) === "agentflow-read")) {
+      expect(permissionRulesForProfile(profileForRole(role))).toEqual(READ_ONLY_PERMISSION_RULES);
     }
   });
 
   it("allows reading project files", () => {
-    for (const role of READ_ONLY_ROLES) {
-      expect(readEffect(role, PROJECT_FILE)).toBe("allow");
-      expect(readEffect(role, "package.json")).toBe("allow");
-    }
+    expect(readEffect("agentflow-read", PROJECT_FILE)).toBe("allow");
+    expect(readEffect("agentflow-read", "package.json")).toBe("allow");
   });
 
-  it("denies reading workflow state and Git even for a read-only role", () => {
-    for (const role of READ_ONLY_ROLES) {
-      expect(readEffect(role, WORKFLOW_ARTIFACT)).toBe("deny");
-      expect(readEffect(role, GIT_PATH)).toBe("deny");
-    }
+  it("denies reading workflow state and Git", () => {
+    expect(readEffect("agentflow-read", WORKFLOW_ARTIFACT)).toBe("deny");
+    expect(readEffect("agentflow-read", GIT_PATH)).toBe("deny");
   });
 });
 
-describe("write-capable role permissions", () => {
-  it("allows editing project files", () => {
-    for (const role of WRITE_CAPABLE_ROLES) {
-      expect(editEffect(role, PROJECT_FILE)).toBe("allow");
-      expect(editEffect(role, "packages/app/src/new-file.ts")).toBe("allow");
-    }
+describe("the agentflow-write profile", () => {
+  it("allows editing project files, for both roles that run under it", () => {
+    expect(editEffect("agentflow-write", PROJECT_FILE)).toBe("allow");
+    expect(editEffect("agentflow-write", "packages/app/src/new-file.ts")).toBe("allow");
+    expect(
+      OPENCODE_ROLES.filter((role) => profileForRole(role) === "agentflow-write"),
+    ).toEqual(["implementer", "fixer"]);
   });
 
   it("denies editing workflow artifacts, whatever their location", () => {
-    for (const role of WRITE_CAPABLE_ROLES) {
-      expect(editEffect(role, WORKFLOW_ARTIFACT)).toBe("deny");
-      expect(editEffect(role, ".agentflow/events/2026-01-01.jsonl")).toBe("deny");
-      expect(editEffect(role, "packages/app/.agentflow/plan.json")).toBe("deny");
-      expect(editEffect(role, WORKFLOW_DOCUMENT)).toBe("deny");
-      expect(editEffect(role, ".agentflow")).toBe("deny");
-    }
+    expect(editEffect("agentflow-write", WORKFLOW_ARTIFACT)).toBe("deny");
+    expect(editEffect("agentflow-write", ".agentflow/events/2026-01-01.jsonl")).toBe("deny");
+    expect(editEffect("agentflow-write", "packages/app/.agentflow/plan.json")).toBe("deny");
+    expect(editEffect("agentflow-write", WORKFLOW_DOCUMENT)).toBe("deny");
+    expect(editEffect("agentflow-write", ".agentflow")).toBe("deny");
   });
 
   it("denies editing Git state, whatever its location", () => {
-    for (const role of WRITE_CAPABLE_ROLES) {
-      expect(editEffect(role, GIT_PATH)).toBe("deny");
-      expect(editEffect(role, NESTED_GIT_PATH)).toBe("deny");
-      expect(editEffect(role, ".git/refs/heads/main")).toBe("deny");
-      expect(editEffect(role, ".git")).toBe("deny");
-    }
+    expect(editEffect("agentflow-write", GIT_PATH)).toBe("deny");
+    expect(editEffect("agentflow-write", NESTED_GIT_PATH)).toBe("deny");
+    expect(editEffect("agentflow-write", ".git/refs/heads/main")).toBe("deny");
+    expect(editEffect("agentflow-write", ".git")).toBe("deny");
   });
 
   it("still allows a project .gitignore, which is not version-control state", () => {
-    for (const role of WRITE_CAPABLE_ROLES) {
-      expect(editEffect(role, PROJECT_GITIGNORE)).toBe("allow");
-      expect(editEffect(role, ".gitignore")).toBe("allow");
-    }
+    expect(editEffect("agentflow-write", PROJECT_GITIGNORE)).toBe("allow");
+    expect(editEffect("agentflow-write", ".gitignore")).toBe("allow");
   });
 
-  it("denies reading workflow artifacts so a role cannot rewrite the record of its own run", () => {
-    for (const role of WRITE_CAPABLE_ROLES) {
-      expect(readEffect(role, WORKFLOW_ARTIFACT)).toBe("deny");
-      expect(readEffect(role, GIT_PATH)).toBe("deny");
-    }
+  it("denies reading workflow artifacts so a run cannot rewrite the record of its own stage", () => {
+    expect(readEffect("agentflow-write", WORKFLOW_ARTIFACT)).toBe("deny");
+    expect(readEffect("agentflow-write", GIT_PATH)).toBe("deny");
   });
 
-  it("does not deny a write-capable role the ability to read its own changes", () => {
-    expect(editEffect("implementer", "src/app.ts")).toBe("allow");
-    expect(readEffect("implementer", "src/app.ts")).toBe("allow");
+  it("does not deny the write profile the ability to read its own changes", () => {
+    expect(editEffect("agentflow-write", "src/app.ts")).toBe("allow");
+    expect(readEffect("agentflow-write", "src/app.ts")).toBe("allow");
   });
 
   it("denies a patch that spans a project file and workflow state", () => {
-    for (const role of WRITE_CAPABLE_ROLES) {
-      expect(operationEffect(permissionRulesForRole(role), "edit", [PROJECT_FILE, WORKFLOW_ARTIFACT])).toBe(
-        "deny",
-      );
-      expect(operationEffect(permissionRulesForRole(role), "edit", [PROJECT_FILE, "src/other.ts"])).toBe(
-        "allow",
-      );
-    }
+    const rules = permissionRulesForProfile("agentflow-write");
+
+    expect(operationEffect(rules, "edit", [PROJECT_FILE, WORKFLOW_ARTIFACT])).toBe("deny");
+    expect(operationEffect(rules, "edit", [PROJECT_FILE, "src/other.ts"])).toBe("allow");
   });
 });
 
-describe("capability denials shared by every role", () => {
-  it("denies command execution, delegation, skills, and the network for every role", () => {
-    for (const role of OPENCODE_ROLES) {
-      const rules = permissionRulesForRole(role);
+describe("capability denials shared by every profile", () => {
+  it("denies command execution, delegation, skills, and the network for every profile", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      const rules = permissionRulesForProfile(profile);
 
       for (const action of UNIVERSAL_DENIAL_ACTIONS) {
         expect(effectFor(rules, action, "*")).toBe("deny");
@@ -216,9 +234,9 @@ describe("capability denials shared by every role", () => {
     }
   });
 
-  it("denies the shell outright, so no role can commit or push", () => {
-    for (const role of OPENCODE_ROLES) {
-      const rules = permissionRulesForRole(role);
+  it("denies the shell outright, so nothing can commit or push", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      const rules = permissionRulesForProfile(profile);
 
       for (const command of ["git status", "git commit -m x", "git push origin main", "npm test", "ls"]) {
         expect(effectFor(rules, "shell", command)).toBe("deny");
@@ -226,15 +244,15 @@ describe("capability denials shared by every role", () => {
     }
   });
 
-  it("denies subagent delegation for every role, under the V2 action name", () => {
-    for (const role of OPENCODE_ROLES) {
-      expect(effectFor(permissionRulesForRole(role), "subagent", "implementer")).toBe("deny");
+  it("denies subagent delegation for every profile, under the V2 action name", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      expect(effectFor(permissionRulesForProfile(profile), "subagent", "agentflow-write")).toBe("deny");
     }
   });
 
   it("never uses the V1 action names", () => {
-    for (const role of OPENCODE_ROLES) {
-      const actions = permissionRulesForRole(role).map((entry) => entry.action);
+    for (const profile of OPENCODE_PROFILES) {
+      const actions = permissionRulesForProfile(profile).map((entry) => entry.action);
 
       expect(actions).not.toContain("bash");
       expect(actions).not.toContain("task");
@@ -243,24 +261,24 @@ describe("capability denials shared by every role", () => {
     }
   });
 
-  it("denies skill loading for every role until skill integration exists", () => {
-    for (const role of OPENCODE_ROLES) {
-      const rules = permissionRulesForRole(role);
+  it("denies skill loading for every profile until skill integration exists", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      const rules = permissionRulesForProfile(profile);
 
       expect(effectFor(rules, "skill", "*")).toBe("deny");
       expect(effectFor(rules, "skill", "anything")).toBe("deny");
     }
   });
 
-  it("denies external directory access for every role", () => {
-    for (const role of OPENCODE_ROLES) {
-      expect(effectFor(permissionRulesForRole(role), "external_directory", "/etc")).toBe("deny");
+  it("denies external directory access for every profile", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      expect(effectFor(permissionRulesForProfile(profile), "external_directory", "/etc")).toBe("deny");
     }
   });
 
   it("denies the actions a non-interactive run cannot satisfy", () => {
-    for (const role of OPENCODE_ROLES) {
-      const rules = permissionRulesForRole(role);
+    for (const profile of OPENCODE_PROFILES) {
+      const rules = permissionRulesForProfile(profile);
 
       for (const action of ["question", "plan_enter", "plan_exit", "execute"]) {
         expect(effectFor(rules, action, "*")).toBe("deny");
@@ -287,9 +305,9 @@ describe("protected path rules", () => {
   it("denies a secret file outright instead of leaving it to an ask", () => {
     expect(SECRET_PATH_PATTERNS).toEqual(["*.env", "*.env.*"]);
 
-    for (const role of OPENCODE_ROLES) {
-      expect(readEffect(role, SECRET_FILE)).toBe("deny");
-      expect(readEffect(role, "packages/app/.env.local")).toBe("deny");
+    for (const profile of OPENCODE_PROFILES) {
+      expect(readEffect(profile, SECRET_FILE)).toBe("deny");
+      expect(readEffect(profile, "packages/app/.env.local")).toBe("deny");
     }
   });
 

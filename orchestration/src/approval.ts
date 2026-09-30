@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { FeatureMutationReader, FeatureReadContext, PlanApprovalRecord } from "@agent-workflow-kit/persistence";
-import type { WorkflowState } from "@agent-workflow-kit/core";
+import type { WorkflowState, WorkspaceBaseline } from "@agent-workflow-kit/core";
 import type { OrchestrationError } from "./errors.js";
 import { orchestrationError } from "./errors.js";
 import {
@@ -73,6 +73,7 @@ async function readApprovedArtifact(
  */
 export async function buildPlanApproval(
   reader: FeatureMutationReader,
+  baseline: WorkspaceBaseline | null = null,
 ): Promise<ApprovalOutcome> {
   const digests: Partial<Record<ApprovedArtifactName, string>> = {};
 
@@ -94,6 +95,7 @@ export async function buildPlanApproval(
       specSha256: digests["spec"] ?? "",
       planSha256: digests["plan"] ?? "",
       planReviewSha256: digests["plan_review"] ?? "",
+      baseline,
     },
   };
 }

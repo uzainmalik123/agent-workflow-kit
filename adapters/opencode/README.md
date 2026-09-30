@@ -20,7 +20,7 @@ Dependencies point one way: `core -> persistence -> orchestration -> opencode`. 
 
 | Module | Responsibility |
 | --- | --- |
-| `roles.ts` | The eleven role definitions, their access level, and the stage-to-agent map. |
+| `roles.ts` | The eleven role definitions, their access level, and the stage-to-profile map. |
 | `permissions.ts` | The V2 `permissions` rulesets: ordered `{ action, resource, effect }` rules and the wildcard evaluator. |
 | `process.ts` | The one `spawn` call: no shell, a timeout, cancellation, output caps, and a bounded stderr excerpt. |
 | `hard-rules.ts` | Framework rules that are re-sent to every run, and the `AGENTS.md` precedence statement. |
@@ -31,32 +31,39 @@ Dependencies point one way: `core -> persistence -> orchestration -> opencode`. 
 | `transport.ts` | The `OpenCodeTransport` port every executor depends on. |
 | `cli-transport.ts` | The real transport: `opencode run` as a child process, with no shell, and the V2 event-stream reader. |
 | `capabilities.ts` | A safe local probe of the installed binary. No model, no network. |
-| `smoke-test.ts` | Optional generated-configuration validation against a real binary. Skips when there is none. |
-| `configuration-integrity.ts` | The pre-run check on the generated files this run depends on. |
+| `smoke-test.ts` | Optional runtime-configuration validation against a real binary. Skips when there is none. |
+| `runtime-config.ts` | The framework-owned configuration directory, written outside the repository. |
+| `configuration-integrity.ts` | The shadow and repository-boundary checks a run depends on, plus verification of a project-local installation. |
 | `executor.ts` | The `StageExecutor` implementation that wires the two together. |
 | `install-policy.ts` | The recorded installer decision. No installer exists. |
 
 ## Roles
 
-Eleven roles cover the thirteen workflow stages. The three verification stages deliberately share one `verifier` agent: static, test, and runtime verification are the same judgement over different evidence, and the stage in the prompt is what distinguishes them.
+Eleven roles cover the thirteen workflow stages. The three verification stages deliberately share one `verifier` role: static, test, and runtime verification are the same judgement over different evidence, and the stage in the prompt is what distinguishes them.
 
-| Stage | Role | Agent | Access |
+A role and an agent are not the same thing, and this adapter keeps them apart. **A role decides what job a stage run does. A profile decides what capabilities that run is given.** A role is rendered into the stage prompt, which names the stage, the role, the routed context, and the output slots. A profile is the physical OpenCode agent, and its `permissions:` block is the capability contract.
+
+There are exactly two profiles, because the only capability difference between the eleven roles is whether project files may be edited. Nine roles need the same thing and share `agentflow-read`; `implementer` and `fixer` share `agentflow-write`. Nothing is lost: the prompt carries the job, and it is generated from the role definition, so no role can receive another role's instructions.
+
+| Stage | Role | Profile | Access |
 | --- | --- | --- | --- |
-| `grill` | `griller` | `griller` | read only |
-| `planning` | `planner` | `planner` | read only |
-| `plan_review` | `plan_reviewer` | `plan-reviewer` | read only |
-| `implementation` | `implementer` | `implementer` | writes project files |
-| `code_review` | `code_reviewer` | `code-reviewer` | read only |
-| `scope_review` | `scope_reviewer` | `scope-reviewer` | read only |
-| `static_verification`, `test_verification`, `runtime_verification` | `verifier` | `verifier` | read only |
-| `fixing` | `fixer` | `fixer` | writes project files |
-| `security_review` | `security_reviewer` | `security-reviewer` | read only |
-| `final_gate` | `final_gate_reviewer` | `final-gate-reviewer` | read only |
-| `final_summary` | `summarizer` | `summarizer` | read only |
+| `grill` | `griller` | `agentflow-read` | read only |
+| `planning` | `planner` | `agentflow-read` | read only |
+| `plan_review` | `plan_reviewer` | `agentflow-read` | read only |
+| `implementation` | `implementer` | `agentflow-write` | writes project files |
+| `code_review` | `code_reviewer` | `agentflow-read` | read only |
+| `scope_review` | `scope_reviewer` | `agentflow-read` | read only |
+| `static_verification`, `test_verification`, `runtime_verification` | `verifier` | `agentflow-read` | read only |
+| `fixing` | `fixer` | `agentflow-write` | writes project files |
+| `security_review` | `security_reviewer` | `agentflow-read` | read only |
+| `final_gate` | `final_gate_reviewer` | `agentflow-read` | read only |
+| `final_summary` | `summarizer` | `agentflow-read` | read only |
 
 Nine roles are read only. Only the `implementer` and the `fixer` may change a project file, and the `fixer` is the only role that repairs a reported finding.
 
-Each role has its own purpose, responsibilities, prohibitions, and deliverables. The definitions in `roles.ts` are the single source: the generated agent file and the per-stage prompt are both rendered from them, so a role cannot drift between the file OpenCode loads and the prompt the adapter sends.
+Each role has its own purpose, responsibilities, prohibitions, and deliverables. The definitions in `roles.ts` are the single source, and the per-stage prompt is rendered from them.
+
+The stage table is the authority for the mapping. `PROFILE_BY_STAGE` is written out explicitly rather than derived, and a test asserts it agrees with the orchestrator's own stage definitions and with the role's access level, so a drift is a failing test rather than a silent mismatch. The profile is decided from the stage, never from the request, so a caller cannot ask a read-only stage to run with the write profile.
 
 ## Permissions
 
@@ -65,9 +72,9 @@ Permissions are generated, not requested in prose. A generated agent file carrie
 - the **last matching rule wins**, so a broad rule must come before the exception that narrows it;
 - an action that matches **no** rule resolves to `ask`, and a non-interactive `opencode run` auto-rejects a `permission.asked` request, which would break the stage run.
 
-Every ruleset therefore opens with `{"*", "*", "deny"}` and re-allows only the actions a role needs. That makes an `ask` outcome unreachable, and it denies any action a plugin might introduce, because nothing is allowed that was not asked for by name.
+Every ruleset therefore opens with `{"*", "*", "deny"}` and re-allows only the actions a profile needs. That makes an `ask` outcome unreachable, and it denies any action a plugin might introduce, because nothing is allowed that was not asked for by name.
 
-| Action | Read-only roles | `implementer`, `fixer` |
+| Action | `agentflow-read` | `agentflow-write` |
 | --- | --- | --- |
 | `read`, `glob`, `grep` on a project file | `allow` | `allow` |
 | `edit` on a project file | `deny` | `allow` |
@@ -90,10 +97,10 @@ The `permissions` list is emitted as YAML in the agent frontmatter, and it has t
 block sequence: every rule is its own list item, with its own `action`, `resource`, and `effect`. The
 emitter once wrote the `- ` marker only before the first rule, which folded every later rule's keys
 into that first mapping as repeats. YAML answers duplicate keys in a mapping with an error, OpenCode
-rejected the whole frontmatter, and every role silently fell back to its untouched default
+rejected the whole frontmatter, and every profile silently fell back to its untouched default
 capability set - a malformed emitter that handed every stage full access. The regression tests parse
 the emitted frontmatter as YAML and count list items, so a folded rule fails a unit test instead of
-appearing as eleven unrestricted agents in a live smoke test.
+appearing as two unrestricted agents in a live smoke test.
 
 `mode: primary` is set for every agent. A plugin is arbitrary code that can rewrite a system
 prompt, replace a tool, or register a new one, so a plugin is a way to change what a verifier,
@@ -209,25 +216,93 @@ The executor depends on the `OpenCodeTransport` port, not on a process, so tests
 The invocation is exactly this, and nothing else:
 
 ```text
-opencode run --standalone --agent <agent> --format <default|json> [--model <id>] [prompt]
+opencode run --standalone --agent <profile> --format <default|json> [--model <id>] [prompt]
 ```
 
 No session continuation, no `--attach`, no shared server. One stage run is one fresh session, and nothing about the previous stage's session is reused. The adapter's own name for the formatted output, `text`, maps to the CLI's `default`; the CLI has never accepted `text` as a format value.
 
+`--agent` is always passed, and its value is always one of the two generated profiles. That is not tidiness. A real 2.0.18 binary loads agents a repository contributes, and the built-in `build` agent carries a wildcard `allow`, so an invocation that omitted the flag would run the repository's default agent with capabilities this framework never granted. Explicit selection is the control.
+
 `--format json` returns an NDJSON event stream: one JSON object per line, each carrying `type`, `timestamp`, `sessionID`, and a payload. `parseEventStream` is the only place that knows this shape. It reads completed `text` parts — the current runner emits one only once the part is complete, and an answer can span several, so the parts are joined rather than the last one taken — and it reports an `error` event. An event type it does not recognize contributes nothing and is never read as output, and a stream that yields no text part is a failure rather than a raw-output fallback. Nothing in the pipeline reads an unfamiliar stream as a stage result.
 
-## Generated project files
+## The framework-owned runtime directory
+
+The framework's OpenCode configuration does not live in the target repository. It is written to a
+directory the framework owns, outside the checkout, and handed to the CLI through `OPENCODE_CONFIG_DIR`:
+
+```text
+<tempdir>/agent-workflow-kit/opencode-<hash of the repository path>/
+  agent/
+    agentflow-read.md
+    agentflow-write.md
+  opencode.json
+```
+
+The target repository stays the process working directory, so OpenCode reads and edits project code
+there, and the run still passes exactly one explicit `--agent`. What changed is that configuring
+OpenCode is no longer a write to somebody's project: a repository needs no preparation, nothing
+Agent Workflow Kit wrote appears in its diff or its version control, and a read-only checkout can be
+inspected by a workflow.
+
+`createOpenCodeRuntimeConfig(repositoryRoot, { directory, fresh })` writes the directory and refuses a
+path inside the repository, so the coupling this exists to remove cannot be reintroduced by a
+misconfigured call. `defaultRuntimeConfigDirectory` derives the path from the repository's absolute
+path, so the location is stable across runs of the same repository and distinct per repository. The
+agent files live under `agent/`, not the `.opencode/agents/` used for a project-local installation,
+because those are two different discovery roots and only the first is read from a configuration
+directory.
+
+`runtimeConfigDirectory` on `OpenCodeStageExecutorOptions` overrides the location. `OPENCODE_CONFIG_DIR`
+is set by the transport *after* the environment scrub, because the scrub's whole job is to stop an
+inherited or caller-supplied value from choosing which configuration runs — and this is the one value
+the framework itself has to set. See [Environment](#transport).
+
+### What the runtime directory does not do
+
+It does not make the repository's own configuration disappear. V2 still loads the target repository's
+`opencode.json` and its `.opencode/` directory, on top of the runtime directory, and the repository's
+rules do reach the resolved ruleset — measured, not assumed: with a repository config that globally
+allows `edit` and `shell`, both allowances appear in what `opencode debug agents` reports.
+
+What holds is the ordering. The profile's own `permission:` block comes after them, and V2 applies the
+last matching rule, so the profile still decides:
+
+```text
+read:  edit=deny   shell=deny
+write: edit=allow  shell=deny
+```
+
+That is the guarantee, and it is narrower than isolation. Two mechanisms back it up rather than one:
+the ordering above, and `assertNoRepositoryConfigBoundaryCrossing`, which refuses a repository config
+that sets a global `permission`, `tools`, `plugin`, `instructions`, `command`, `mcp`, or `lsp` field
+before a run starts. The second is why a hostile repository configuration is refused rather than
+merely outranked.
+
+A repository can still define its own agents, and OpenCode still discovers them. A repository that
+defines an agent with a framework profile's id is refused by `assertNoProjectProfileShadow`, because
+the run passes that id to `--agent` and which definition wins is OpenCode's precedence rule rather than
+something a repository gets to decide. A repository that still carries this framework's own generated
+profile from an earlier version is allowed, and only because its bytes are compared against what the
+framework writes — a file that merely shares the name is still refused.
+
+## Project-local generated files
+
+Still generated, still supported, and no longer required by a run:
 
 ```text
 .opencode/agents/
-  griller.md            planner.md             plan-reviewer.md
-  implementer.md        code-reviewer.md        scope-reviewer.md
-  verifier.md           fixer.md                security-reviewer.md
-  final-gate-reviewer.md summarizer.md
+  agentflow-read.md
+  agentflow-write.md
 opencode.json
 ```
 
+Each generated file states the profile's capabilities, the framework hard rules, and the response protocol, and points at the stage prompt for the job. It carries no role's instructions, which is what lets one file serve nine roles.
+
 `renderOpenCodeProjectFiles()` returns these as `{ path, contents }` values and is byte-for-byte deterministic. `writeOpenCodeProjectFiles(root, { force })` writes them with the same symlink guards the persistence adapter uses, leaves identical files untouched, and reports a human-edited file as a `conflict` instead of silently reverting it. `opencode.json` is deliberately minimal — a schema reference, `share: "disabled"`, and the two plugin directives that disable every plugin and re-enable the `opencode.` namespace — because the capability model lives in the agent files and model, temperature, and prompt defaults belong to the repository and the user.
+
+A run does not require them. `configuration-integrity.ts` still verifies an installation that is
+present, which keeps an existing checkout honest, and the repository boundary and shadow checks above
+are what a run actually depends on.
 
 ## What is customizable, and what is not
 
@@ -237,23 +312,27 @@ convention. Editing either kind is allowed; only one of them stops the workflow.
 **Framework-controlled, verified before every run.** The agent file's frontmatter, which is the ordered
 `permissions` rule list and the `mode` that keeps these agents out of the subagent graph. Every framework
 hard rule, which has to be present verbatim. In `opencode.json`, the `plugins` list and the `share`
-setting. The generated file's uniqueness as the only definition of the role's agent id. The absence of
+setting. The generated file's uniqueness as the only definition of the profile's agent id. The absence of
 any other repository-local project config. And the root config fields in
 [`FRAMEWORK_SENSITIVE_CONFIG_FIELDS`](#configuration-integrity-checked-before-every-run), which have to
 be absent.
 
-**Project-owned, and yours to edit.** The prose under each role's instructions: what the role is for,
-house style, domain vocabulary, the way you want findings worded. `AGENTS.md`, read by
-`project-instructions.ts`, is entirely project guidance. Your own OpenCode agents, under ids of their
-own. And the `opencode.json` fields that choose what talks to the model or how a session looks:
-`model`, `small_model`, `provider`, `enabled_providers`, `disabled_providers`, `logLevel`, `layout`,
-`username`, `snapshot`, `autoupdate`, `tool_output`, `compaction`, `attachment`.
+**Project-owned, and yours to edit.** `AGENTS.md`, read by `project-instructions.ts`, is entirely
+project guidance. Your own OpenCode agents, under ids of their own. And the `opencode.json` fields that
+choose what talks to the model or how a session looks: `model`, `small_model`, `provider`,
+`enabled_providers`, `disabled_providers`, `logLevel`, `layout`, `username`, `snapshot`,
+`autoupdate`, `tool_output`, `compaction`, `attachment`.
+
+Role prose is not in this list because it is not in a generated file at all. A role's purpose,
+responsibilities, prohibitions, and deliverables are rendered into the stage prompt, which the adapter
+builds from its own request. There is no agent file a repository could edit to change what a role is
+told to do.
 
 The check is a narrow list rather than a byte comparison, so a model preference is never treated as a
 security change. Three things are compared rather than merely required to be present: the `plugins` list
 element by element and in order, because V2 applies directives in sequence and a later entry re-enables
 what an earlier one disabled; `share`, which has to stay disabled; and the set of files that resolve to
-the role's agent id, which has to be exactly one.
+the profile's agent id, which has to be exactly one.
 
 ### The framework-owned root config fields
 
@@ -284,7 +363,22 @@ One naming note, because it is load-bearing. The published V2 config schema
 are covered and neither can be used to widen a run. Whether the generated key should be renamed to
 match the current schema is a separate decision from this boundary, and it is not made here.
 
-## Configuration integrity, checked before every run
+## Checks before every run
+
+A run makes three checks against the repository before the prompt is built, and none of them requires the
+repository to contain anything:
+
+| Check | Question |
+| --- | --- |
+| `assertNoProjectProfileShadow` | Does the repository define an agent id the framework is about to pass to `--agent`? |
+| `assertNoRepositoryConfigBoundaryCrossing` | Does the repository's configuration set a field that can move the permission or instruction boundary? |
+| `assertNoAlternateProjectConfig` | Does the repository ship a second configuration file, so which one wins would be a precedence question? |
+
+A repository with no `.opencode/` directory and no `opencode.json` passes all three, which is the normal
+case now. The first two are the guarantees the runtime directory depends on; without them, moving the
+configuration out of the repository would have been only a relocation.
+
+### Configuration integrity of a project-local installation
 
 A verification command is repository-defined code, and repository-defined code writes files. The project
 adapter fingerprints the implementation, and `.opencode/` is excluded from that measurement on purpose: a
@@ -312,7 +406,7 @@ Each run, before the prompt is built:
   resolves to that id and it is the generated one;
 - derives ids the way OpenCode does, from the path relative to the agent directory: `verifier.md` is
   `verifier` and `team/reviewer.md` is `team/reviewer`, which is why a filename check is not enough;
-- requires the agent file for the role about to run to exist, be a regular file, and not be a symlink — a
+- requires the agent file for the profile about to run to exist, be a regular file, and not be a symlink — a
   missing file is a failure rather than an absent requirement, because OpenCode's own fallback carries
   none of these permissions;
 - requires its frontmatter to match the generated frontmatter exactly, and every entry of
@@ -331,9 +425,8 @@ A failure raises `opencode_configuration_tampered` and names the file, the reaso
 `unreadable`, `unsafe_path`, `frontmatter_changed`, `hard_rules_missing`, `project_config_changed`,
 `duplicate_agent_definition`, `alternate_project_config`), and the expected value. **It never repairs.**
 Overwriting the file would destroy the evidence, and regenerating it would make a tampered repository look
-untouched while the tampered content is exactly what a reviewer needs to see. The message points at
-`writeOpenCodeProjectFiles(root, { force: true })` and leaves the decision with the operator, because the
-tamper may well be theirs.
+untouched while the tampered content is exactly what a reviewer needs to see. The message names the
+file and leaves the decision with the operator, because the tamper may well be theirs.
 
 The project adapter's control-plane measurement is the other half of this and runs first: it fails the
 stage outright when a command changed `.opencode/` at all, which the adapter then never has to diagnose.
@@ -348,11 +441,15 @@ import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import {
   createOpenCodeCliTransport,
   createOpenCodeStageExecutor,
-  writeOpenCodeProjectFiles,
 } from "@agent-workflow-kit/opencode";
 
-// Thin, version-controlled configuration; no framework code is copied into the project.
-await writeOpenCodeProjectFiles("/path/to/repository");
+const executor = createOpenCodeStageExecutor({
+  transport: createOpenCodeCliTransport({ model: "anthropic/claude-sonnet-4-5" }),
+  projectRoot: "/path/to/repository",
+});
+
+// No preparation step: the framework's configuration is written outside the repository.
+await orchestrator.runNext("F-001");
 
 const store = createFeatureSessionStore("/path/to/repository");
 
@@ -367,11 +464,16 @@ await orchestrator.createFeature({ featureId: "F-001", title: "Google OAuth / AP
 await orchestrator.runNext("F-001");
 ```
 
-`assertOpenCodeConfigurationIntegrity({ workingDirectory, role })` is exported for a caller that wants to
-check a repository without running a stage, and `agentFilePathForRole(role)` names the file a role would
-load.
+`assertOpenCodeConfigurationIntegrity({ workingDirectory, profile })` is exported for a caller that wants to
+check a project-local installation without running a stage, and `agentFilePathForProfile(profile)` names the file a profile loads.
+The deprecated `role` option and `agentFilePathForRole(role)` still work and resolve the role's profile.
 
-In tests, `createFakeOpenCodeTransport` from the repository's `fixtures/opencode-transport.ts` replaces the CLI transport and never spawns a process or calls a model. The configuration integrity check is not among the things it replaces: a test root that wants to reach a stage has to write the real generated files, because a repository this framework would refuse to run in is not a fixture worth having.
+`createOpenCodeRuntimeConfig`, `defaultRuntimeConfigDirectory`, `isInsideRepository`, and
+`removeOpenCodeRuntimeConfig` are exported for a caller that owns the location or the lifecycle, and
+`assertNoProjectProfileShadow` and `assertNoRepositoryConfigBoundaryCrossing` for a caller that wants the
+same two checks a run makes without running one.
+
+In tests, `createFakeOpenCodeTransport` from the repository's `fixtures/opencode-transport.ts` replaces the CLI transport and never spawns a process or calls a model. The two checks a run depends on are not among the things it replaces: the shadow check and the repository boundary check run against the test root, because a repository this framework would refuse to run in is not a fixture worth having. Neither requires the root to contain anything — an empty directory is a valid fixture now — so a test asserts the refusal by writing the one file that causes it.
 
 ### Checking the installed binary
 
@@ -397,11 +499,11 @@ The probe reads the real CLIs, not an idealised one, and the two differ in ways 
 
 Flags alone cannot tell V1 from V2. A real OpenCode 1.18.18 binary advertises `--agent`, `--format`, `--model`, and `--auto` just as V2 does. What a V1 binary does instead is silently ignore a `permissions:` list and leave every role with the default capability set, which is exactly the failure this milestone exists to prevent. The probe therefore reads the version separately and reports `versionSupportsV2`; the smoke test skips on a binary that predates V2 instead of reporting the ignored rules as a failure.
 
-`runOpenCodeConfigSmokeTest` writes the generated files to a temporary directory, asks the binary to report the agents it discovered there with `opencode debug agents`, and replays the policy against the rulesets it reported. V2 answers that command from a background service and prints a JSON array of agent objects sorted by id, each carrying `id`, `name`, `mode`, `hidden`, and the `permissions` array it resolved. `parseAgentListing` reads exactly that shape and returns `null` for anything else — a payload it cannot recognise is never treated as an empty listing, because "the binary found nothing" and "the payload was not readable" are different facts.
+`runOpenCodeConfigSmokeTest` writes the framework's configuration to a runtime directory outside the target directory, runs the binary with the target as its working directory, asks it to report the agents it discovered with `opencode debug agents`, and replays the policy against the rulesets it reported. Running in the target directory with the configuration elsewhere is the arrangement a stage run has, so it is the arrangement worth validating; the report names both directories, and the target is expected to contain nothing the framework wrote. V2 answers that command from a background service and prints a JSON array of agent objects sorted by id, each carrying `id`, `name`, `mode`, `hidden`, and the `permissions` array it resolved. `parseAgentListing` reads exactly that shape and returns `null` for anything else — a payload it cannot recognise is never treated as an empty listing, because "the binary found nothing" and "the payload was not readable" are different facts.
 
-The listing is polled rather than taken once, because on a real 2.0.18 binary the first answer is not authoritative. When no service is running yet, the CLI starts one, reports it healthy, and asks it for the agent list before that service has finished loading the directory: the first call returned an empty array and an immediate second call returned only the seven built-in agents, with the generated ones appearing about two seconds later. Believing the first answer reports all eleven roles as missing, which is a fact about start-up rather than about the generated files. So the test keeps asking until the listing accounts for every generated agent, within `DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS`. That condition is one a correctly generated project satisfies and a genuinely wrong one never does, so the wait cannot turn a defect into a pass — the loop simply runs out of time and the last real answer is reported as the failure it is.
+The listing is polled rather than taken once, because on a real 2.0.18 binary the first answer is not authoritative. When no service is running yet, the CLI starts one, reports it healthy, and asks it for the agent list before that service has finished loading the directory: the first call returned an empty array and an immediate second call returned only the seven built-in agents, with the generated ones appearing about two seconds later. Believing the first answer reports both profiles as missing, which is a fact about start-up rather than about the generated files. So the test keeps asking until the listing accounts for every generated agent, within `DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS`. That condition is one a correctly generated project satisfies and a genuinely wrong one never does, so the wait cannot turn a defect into a pass — the loop simply runs out of time and the last real answer is reported as the failure it is.
 
-The report fails closed at every step. A generated role the binary did not list fails. A role whose listing carries no readable `permissions` array is left unverified (`null`), never passed. A listing that could not be produced at all is a failure rather than an empty discovery. And a binary that reports every role with OpenCode's untouched base ruleset — `{action: "*", resource: "*", effect: "allow"}` plus the `external_directory` and `.env` entries — is reported as a failure for all eleven roles, because that is the exact shape of a generated policy the binary did not read.
+The report fails closed at every step. A generated profile the binary did not list fails. A profile whose listing carries no readable `permissions` array is left unverified (`null`), never passed. A listing that could not be produced at all is a failure rather than an empty discovery. And a binary that reports every profile with OpenCode's untouched base ruleset — `{action: "*", resource: "*", effect: "allow"}` plus the `external_directory` and `.env` entries — is reported as a failure for both profiles, because that is the exact shape of a generated policy the binary did not read.
 
 The smoke test is the one place the standing isolation is not available. `run` is always invoked
 `--standalone`, but `opencode debug agents --standalone` is rejected: a real 2.0.18 binary advertises

@@ -1,6 +1,6 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   createWorkflowOrchestrator,
   DETERMINISTIC_EVIDENCE_KEY,
@@ -8,6 +8,7 @@ import {
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
+import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 import {
   describeOutcome,
   PROJECT_CONFIG_FILENAME,
@@ -268,6 +269,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 3,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.outcome).toBe("passed");
@@ -298,6 +300,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.outcome).toBe("failed");
@@ -315,6 +318,7 @@ describe("verification provider", () => {
       verification: "test",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.outcome).toBe("deferred");
@@ -332,6 +336,7 @@ describe("verification provider", () => {
       verification: "runtime",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.outcome).toBe("deferred");
@@ -351,6 +356,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.outcome).toBe("blocked");
@@ -371,6 +377,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.outcome).toBe("blocked");
@@ -396,6 +403,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.outcome).toBe("blocked");
@@ -439,6 +447,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(staticBundle.outcome).toBe("passed");
@@ -452,6 +461,7 @@ describe("verification provider", () => {
       verification: "test",
       revision: 2,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(testBundle.outcome).toBe("failed");
@@ -477,6 +487,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     const lintChecks = bundle.checks.filter((check) => check.capability === "lint");
@@ -497,6 +508,7 @@ describe("verification provider", () => {
         verification: "static",
         revision: 1,
         projectRoot: "/somewhere/else",
+        workspaceId: null,
       }),
     ).rejects.toMatchObject({ code: "command_invalid" });
   });
@@ -510,6 +522,7 @@ describe("verification provider", () => {
       verification: "static" as const,
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     };
 
     const before = await provider.collect(request);
@@ -548,6 +561,7 @@ describe("verification provider", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(bundle.collectedAt).toBe(new Date(1_800_000_000_000).toISOString());
@@ -569,6 +583,7 @@ describe("verification provider", () => {
         verification,
         revision: 1,
         projectRoot: project.root,
+        workspaceId: null,
       });
 
       expect(bundle.outcome).toMatch(/passed|failed|blocked|deferred/u);
@@ -592,6 +607,7 @@ describe("verification evidence records", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     const check = checkFor(bundle, "lint") as VerificationCommandEvidence;
@@ -612,6 +628,7 @@ describe("workspace mutation during verification", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
   it("refuses a stage whose command rewrote the source it was checking, however it exited", async () => {
@@ -729,6 +746,7 @@ describe("control plane mutation during verification", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
   /**
@@ -863,6 +881,7 @@ describe("implicit pre and post script hooks", () => {
       verification: "static",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
   it("blocks a lint command whose manifest defines prelint, rather than running it too", async () => {
@@ -914,6 +933,7 @@ describe("implicit pre and post script hooks", () => {
       verification: "test",
       revision: 1,
       projectRoot: project.root,
+      workspaceId: null,
     });
 
     expect(checkFor(bundle, "test")?.detail).toContain("pretest");
@@ -1093,15 +1113,27 @@ describe("freshness through the orchestrator, against a real project", () => {
       { lint: "runner" },
     );
 
+    // The project is copied rather than reused, because a post-approval stage runs in an isolated
+    // tree: the linter has to see the repair the fixer makes in the worktree, and a provider bound to
+    // the user's checkout would be measuring a different directory from the one the stage edited.
+    const workspaceRoot = join(dirname(project.root), `${basename(project.root)}-workspace`);
+
+    await cp(project.root, workspaceRoot, { recursive: true });
+    roots.push(workspaceRoot);
+
     const store = createFeatureSessionStore(project.root, { clock: () => fixedTimestamp });
-    const provider = new ProjectVerificationProvider({ projectRoot: project.root });
+    const provider = new ProjectVerificationProvider({
+      projectRoot: project.root,
+      resolveRunRoot: () => workspaceRoot,
+    });
     const executor = new FakeStageExecutor().configure("fixing", {
       after: async () => {
-        await mkdir(project.path("src"), { recursive: true });
-        await writeFile(project.path("src/app.js"), "export const repaired = true;\n", "utf8");
+        await mkdir(join(workspaceRoot, "src"), { recursive: true });
+        await writeFile(join(workspaceRoot, "src/app.js"), "export const repaired = true;\n", "utf8");
       },
     });
     const orchestrator = createWorkflowOrchestrator({
+      workspace: createFakeWorkspaceProvider({ workingDirectory: workspaceRoot }),
       store,
       executor,
       verification: provider,

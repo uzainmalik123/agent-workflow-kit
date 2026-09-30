@@ -1,6 +1,6 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   STAGE_DEFINITIONS,
@@ -19,14 +19,26 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakeOpenCodeTransport, renderFencedJson } from "../fixtures/opencode-transport.js";
 import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
+import { testWorkspaceContext } from "../fixtures/workspace.js";
+import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
 const roots: string[] = [];
 
 interface Harness {
   readonly root: string;
+  /**
+   * The isolated tree post-approval stages run in.
+   *
+   * It is a second real directory with the same generated control-plane files rather than a path
+   * string, because these tests run the real OpenCode adapter: the plugin preflight and the
+   * configuration integrity check read the filesystem, and a test that pointed them at a directory
+   * that does not exist would be testing a refusal it thinks is the point.
+   */
+  readonly workspaceRoot: string;
   readonly store: FeatureSessionStore;
   readonly transport: ReturnType<typeof createFakeOpenCodeTransport>;
+  readonly workspace: ReturnType<typeof createFakeWorkspaceProvider>;
   readonly orchestrator: ReturnType<typeof createWorkflowOrchestrator>;
 }
 
@@ -63,16 +75,35 @@ async function makeRoot(): Promise<string> {
  * verification stage. `verification: null` is the way to ask for the refusal on purpose, and an
  * explicit provider replaces the default so a test can drive the real project adapter end to end.
  */
-function createHarness(
+/**
+ * A second real directory for the isolated worktree, with the same contents as the repository.
+ *
+ * It is a copy rather than a path string because the adapter under test reads the filesystem before it
+ * prompts anything, and because the tests that assert on a project command's own output have to be
+ * looking at a tree that has that project in it.
+ */
+async function makeWorkspaceRoot(root: string): Promise<string> {
+  const workspaceRoot = join(dirname(root), `${basename(root)}-workspace`);
+
+  await cp(root, workspaceRoot, { recursive: true });
+  roots.push(workspaceRoot);
+
+  return workspaceRoot;
+}
+
+async function createHarness(
   root: string,
   options: {
     readonly verification?: ProjectVerificationProvider | VerificationProvider | null;
     readonly projectRoot?: string;
+    readonly workspaceRoot?: string;
   } = {},
-): Harness {
+): Promise<Harness> {
+  const workspaceRoot = options.workspaceRoot ?? (await makeWorkspaceRoot(root));
   const store = createFeatureSessionStore(root, { clock: fixedClock });
   const transport = createFakeOpenCodeTransport();
-  const executor = createOpenCodeStageExecutor({ transport, workingDirectory: root });
+  const executor = createOpenCodeStageExecutor({ transport, projectRoot: root });
+  const workspace = createFakeWorkspaceProvider({ workingDirectory: workspaceRoot });
   const orchestrator = createWorkflowOrchestrator({
     store,
     executor,
@@ -81,9 +112,10 @@ function createHarness(
         ? null
         : (options.verification ?? createFakeVerificationProvider()),
     projectRoot: root,
+    workspace,
   });
 
-  return { root, store, transport, orchestrator };
+  return { root, workspaceRoot, store, transport, workspace, orchestrator };
 }
 
 async function createFeature(harness: Harness): Promise<OrchestrationResult> {
@@ -126,7 +158,7 @@ afterEach(async () => {
 
 describe("fake OpenCode through the orchestrator", () => {
   it("runs the three pre-approval stages and stops at the plan human gate", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
     const observed = await runToPlanGate(harness);
 
     expect(harness.transport.stages).toEqual(["grill", "planning", "plan_review"]);
@@ -141,7 +173,7 @@ describe("fake OpenCode through the orchestrator", () => {
   });
 
   it("persists what each stage returned", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
 
@@ -159,16 +191,44 @@ describe("fake OpenCode through the orchestrator", () => {
     });
   });
 
-  it("invokes the agent that owns each stage", async () => {
-    const harness = createHarness(await makeRoot());
+  it("invokes an explicit profile for each stage, never a default agent", async () => {
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
 
-    expect(harness.transport.agents).toEqual(["griller", "planner", "plan-reviewer"]);
+    // Three stages, three role-named agents before this change, one id now. The value is still
+    // recorded per call so the fact that it is passed explicitly stays observable.
+    expect(harness.transport.agents).toEqual([
+      "agentflow-read",
+      "agentflow-read",
+      "agentflow-read",
+    ]);
+
+    for (const call of harness.transport.calls) {
+      expect(call.agent).toBe("agentflow-read");
+    }
+  });
+
+  it("switches to the write profile for the stages that may edit files", async () => {
+    const harness = await createHarness(await makeRoot());
+
+    await runToPlanGate(harness);
+    await harness.orchestrator.approvePlan("F-001");
+
+    for (let step = 0; step < 6; step += 1) {
+      await harness.orchestrator.runNext("F-001");
+    }
+
+    // Implementation and fixing are the only stages that may change project files, and they are the
+    // only ones that run with an edit allowance.
+    const implementation = harness.transport.requestFor("implementation");
+
+    expect(implementation?.agent).toBe("agentflow-write");
+    expect(harness.transport.calls.every((call) => call.agent !== "")).toBe(true);
   });
 
   it("runs in the configured project directory", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
 
@@ -178,7 +238,7 @@ describe("fake OpenCode through the orchestrator", () => {
   });
 
   it("stays at the human gate until a human approves", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
 
@@ -196,7 +256,7 @@ describe("fake OpenCode through the orchestrator", () => {
   });
 
   it("runs the whole feature and stops at the push human gate", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
     await harness.orchestrator.approvePlan("F-001");
@@ -226,7 +286,7 @@ describe("fake OpenCode through the orchestrator", () => {
 
 describe("fix history reaches the summarizer", () => {
   it("routes the fixes artifact to the final summarizer when one exists", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
     await harness.orchestrator.approvePlan("F-001");
@@ -301,7 +361,7 @@ describe("fix history reaches the summarizer", () => {
   });
 
   it("omits the fixes section when no fix was needed", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
     await harness.orchestrator.approvePlan("F-001");
@@ -316,7 +376,7 @@ describe("fix history reaches the summarizer", () => {
 
 describe("an agent cannot drive the workflow", () => {
   it("refuses a response that carries a transition field", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
@@ -349,7 +409,7 @@ describe("an agent cannot drive the workflow", () => {
   });
 
   it("refuses a response for another feature", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
@@ -376,7 +436,7 @@ describe("an agent cannot drive the workflow", () => {
   });
 
   it("refuses a prose-only completion claim", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
@@ -390,7 +450,7 @@ describe("an agent cannot drive the workflow", () => {
   });
 
   it("refuses an artifact the stage does not own", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
@@ -413,7 +473,7 @@ describe("an agent cannot drive the workflow", () => {
   });
 
   it("keeps the workflow recoverable after a transport failure", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
@@ -440,12 +500,14 @@ describe("an agent cannot drive the workflow", () => {
   });
 
   it("refuses a response that arrived under the wrong agent", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
 
-    harness.transport.configure("grill", { agent: "implementer" });
+    // The transport answers for a different agent than the one it was asked to run, which is what a
+    // misconfigured CLI or a rogue wrapper would look like from here.
+    harness.transport.configure("grill", { agent: "agentflow-write" });
 
     const result = await harness.orchestrator.runNext("F-001");
 
@@ -453,7 +515,7 @@ describe("an agent cannot drive the workflow", () => {
   });
 
   it("surfaces an adapter error as an executor failure without committing", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
@@ -471,7 +533,7 @@ describe("an agent cannot drive the workflow", () => {
 
 describe("prompt context in a real run", () => {
   it("sends only the artifacts each stage's context plan allows", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
 
@@ -489,7 +551,7 @@ describe("prompt context in a real run", () => {
 
   it("includes the project's AGENTS.md under the framework rules", async () => {
     const root = await makeRoot();
-    const harness = createHarness(root);
+    const harness = await createHarness(root);
 
     await writeFile(
       join(root, "AGENTS.md"),
@@ -511,7 +573,7 @@ describe("prompt context in a real run", () => {
   });
 
   it("sends no repository instructions when the project has no AGENTS.md", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
 
@@ -521,7 +583,7 @@ describe("prompt context in a real run", () => {
   });
 
   it("never sends one stage the artifacts of another", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await runToPlanGate(harness);
 
@@ -557,8 +619,13 @@ describe("the verifier receives the recorded evidence", () => {
 
   it("sends the evidence to the verifier and refuses to let a success stand", async () => {
     const root = await makeFailingNodeProject();
-    const harness = createHarness(root, {
-      verification: new ProjectVerificationProvider({ projectRoot: root }),
+    const harness = await createHarness(root, {
+      verification: new ProjectVerificationProvider({
+        projectRoot: root,
+        // The framework's own request is the only thing that may say where a command runs, and the
+        // provider still checks every request against the directory its wiring names.
+        resolveRunRoot: (request) => request.projectRoot,
+      }),
       projectRoot: root,
     });
 
@@ -604,12 +671,12 @@ describe("a project command cannot hand the verifier a different set of rules", 
     const script = join(root, "node_modules", ".bin", "linter");
     const write =
       target === "agent"
-        ? "echo '# rewritten' > .opencode/agents/verifier.md"
+        ? "echo '# rewritten' > .opencode/agents/agentflow-read.md"
         : target === "duplicate"
-          // A second file the loader resolves the same `verifier` id from, with the generated file left
-          // completely intact. Nothing in the generated file can say anything about this, which is the
-          // case a frontmatter comparison cannot reach.
-          ? "mkdir -p .opencode/agent && echo '---' > .opencode/agent/verifier.md"
+          // A second file the loader resolves the same `agentflow-read` id from, with the generated file
+          // left completely intact. Nothing in the generated file can say anything about this, which is
+          // the case a frontmatter comparison cannot reach.
+          ? "mkdir -p .opencode/agent && echo '---' > .opencode/agent/agentflow-read.md"
           : "echo '{\"plugin\":[\"evil\"],\"share\":\"enabled\"}' > opencode.json";
 
     await writeFile(
@@ -644,10 +711,15 @@ describe("a project command cannot hand the verifier a different set of rules", 
     return null;
   }
 
-  it("refuses to invoke the model after a command rewrote the agent file for the role about to run", async () => {
+  it("refuses to invoke the model after a command rewrote the agent file for the profile about to run", async () => {
     const root = await makeTamperingProject("agent");
-    const harness = createHarness(root, {
-      verification: new ProjectVerificationProvider({ projectRoot: root }),
+    const harness = await createHarness(root, {
+      verification: new ProjectVerificationProvider({
+        projectRoot: root,
+        // The framework's own request is the only thing that may say where a command runs, and the
+        // provider still checks every request against the directory its wiring names.
+        resolveRunRoot: (request) => request.projectRoot,
+      }),
       projectRoot: root,
     });
 
@@ -660,14 +732,22 @@ describe("a project command cannot hand the verifier a different set of rules", 
     expect(result).not.toBeNull();
     expect(harness.transport.requestFor("static_verification")).toBeUndefined();
     expect(result?.status).toBe("executor_error");
-    expect(result?.error?.message).toContain(".opencode/agents/verifier.md");
-    expect(result?.error?.message).toContain("frontmatter_changed");
+    expect(result?.error?.message).toContain(".opencode/agents/agentflow-read.md");
+    // The framework's own configuration lives in the runtime directory now, so a rewritten project
+    // copy is caught as a definition that differs from the framework's rather than as a damaged
+    // generated file. Either way the refusal is that this file must not define the id the run needs.
+    expect(result?.error?.message).toContain("differ from Agent Workflow Kit's own");
   });
 
   it("refuses to invoke the model after a command rewrote the plugin isolation configuration", async () => {
     const root = await makeTamperingProject("config");
-    const harness = createHarness(root, {
-      verification: new ProjectVerificationProvider({ projectRoot: root }),
+    const harness = await createHarness(root, {
+      verification: new ProjectVerificationProvider({
+        projectRoot: root,
+        // The framework's own request is the only thing that may say where a command runs, and the
+        // provider still checks every request against the directory its wiring names.
+        resolveRunRoot: (request) => request.projectRoot,
+      }),
       projectRoot: root,
     });
 
@@ -679,34 +759,46 @@ describe("a project command cannot hand the verifier a different set of rules", 
     expect(result?.error?.message).toContain("project_config_changed");
   });
 
-  it("refuses to invoke the model after a command added a second definition of the verifier's agent id", async () => {
+  it("refuses to invoke the model after a command added a second definition of the read profile's agent id", async () => {
     const root = await makeTamperingProject("duplicate");
-    const harness = createHarness(root, {
-      verification: new ProjectVerificationProvider({ projectRoot: root }),
+    const harness = await createHarness(root, {
+      verification: new ProjectVerificationProvider({
+        projectRoot: root,
+        // The framework's own request is the only thing that may say where a command runs, and the
+        // provider still checks every request against the directory its wiring names.
+        resolveRunRoot: (request) => request.projectRoot,
+      }),
       projectRoot: root,
     });
 
     const result = await runToStaticStage(harness);
 
     // Same shape as the other two: the lint command exited 0, so the recorded evidence is clean, and
-    // the stage still does not reach a model. The generated verifier file was not touched, so this is
-    // refused by the source walk rather than by the file's own contents.
+    // the stage still does not reach a model. The generated file was not touched, so this is refused
+    // by the source walk rather than by the file's own contents.
     expect(result).not.toBeNull();
     expect(harness.transport.requestFor("static_verification")).toBeUndefined();
     expect(result?.status).toBe("executor_error");
-    expect(result?.error?.message).toContain("duplicate_agent_definition");
-    expect(result?.error?.message).toContain(".opencode/agent/verifier.md");
+    // The framework's own copy is no longer expected in the project, so a second definition of the
+    // id is caught by the shadow check, which compares what the repository defines against the
+    // framework's own rather than counting definitions against a generated path.
+    expect(result?.error?.message).toContain("differ from Agent Workflow Kit's own");
+    expect(result?.error?.message).toContain(".opencode/agent/agentflow-read.md");
   });
 
   it("refuses the tampered configuration as a structured adapter error, before the prompt is built", async () => {
     const root = await makeRoot();
 
     // No command runs here, so the rewrite is the test's own: this is the adapter's contract on its own.
-    await writeFile(join(root, ".opencode", "agents", "verifier.md"), "# rewritten\n", "utf8");
+    await writeFile(
+      join(root, ".opencode", "agents", "agentflow-read.md"),
+      "# rewritten\n",
+      "utf8",
+    );
 
     const executor = createOpenCodeStageExecutor({
       transport: createFakeOpenCodeTransport(),
-      workingDirectory: root,
+      projectRoot: root,
     });
 
     const refusal = await executor
@@ -725,6 +817,7 @@ describe("a project command cannot hand the verifier a different set of rules", 
         context: [],
         outputs: STAGE_DEFINITIONS.static_verification.outputs,
         fixReturnState: null,
+        workspace: testWorkspaceContext({ repositoryRoot: root, workingDirectory: root }),
       } satisfies StageExecutionRequest)
       .catch((error: unknown) => error);
 
@@ -748,8 +841,13 @@ describe("a project command cannot hand the verifier a different set of rules", 
     await writeFile(script, "#!/bin/sh\necho 'no findings'\nexit 0\n", "utf8");
     await chmod(script, 0o755);
 
-    const harness = createHarness(root, {
-      verification: new ProjectVerificationProvider({ projectRoot: root }),
+    const harness = await createHarness(root, {
+      verification: new ProjectVerificationProvider({
+        projectRoot: root,
+        // The framework's own request is the only thing that may say where a command runs, and the
+        // provider still checks every request against the directory its wiring names.
+        resolveRunRoot: (request) => request.projectRoot,
+      }),
       projectRoot: root,
     });
 
@@ -766,8 +864,8 @@ describe("a project command cannot hand the verifier a different set of rules", 
 
 describe("deterministic runs", () => {
   it("produces identical prompts for identical requests", async () => {
-    const first = createHarness(await makeRoot());
-    const second = createHarness(await makeRoot());
+    const first = await createHarness(await makeRoot());
+    const second = await createHarness(await makeRoot());
 
     await runToPlanGate(first);
     await runToPlanGate(second);
@@ -782,7 +880,7 @@ describe("adapter error identity", () => {
   it("keeps the adapter's own error type for a direct executor call", async () => {
     const root = await makeRoot();
     const transport = createFakeOpenCodeTransport({ exitCode: 2, text: "" });
-    const executor = createOpenCodeStageExecutor({ transport, workingDirectory: root });
+    const executor = createOpenCodeStageExecutor({ transport, projectRoot: root });
     const request = {
       feature: {
         featureId: "F-001",
@@ -798,6 +896,7 @@ describe("adapter error identity", () => {
       context: [],
       outputs: STAGE_DEFINITIONS.grill.outputs,
       fixReturnState: null,
+      workspace: testWorkspaceContext({ repositoryRoot: root, workingDirectory: root }),
     } satisfies StageExecutionRequest;
 
     const failure = await executor.execute(request).catch((error: unknown) => error);
@@ -808,7 +907,7 @@ describe("adapter error identity", () => {
 
 describe("structured results only", () => {
   it("stores what the agent returned rather than what it said in prose", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");
@@ -839,7 +938,7 @@ describe("structured results only", () => {
   });
 
   it("refuses a payload whose JSON is not a single object", async () => {
-    const harness = createHarness(await makeRoot());
+    const harness = await createHarness(await makeRoot());
 
     await createFeature(harness);
     await harness.orchestrator.runNext("F-001");

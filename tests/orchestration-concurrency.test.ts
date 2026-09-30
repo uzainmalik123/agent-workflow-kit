@@ -14,6 +14,7 @@ import {
   type FeatureSessionStore,
 } from "@agent-workflow-kit/persistence";
 import { writeSessionDocument } from "../fixtures/session-documents.js";
+import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -69,7 +70,7 @@ function createHarness(root: string): Harness {
 
 async function createAtPlanning(harness: Harness): Promise<void> {
   const executor = new FakeStageExecutor();
-  const orchestrator = createWorkflowOrchestrator({ store: harness.store, executor });
+  const orchestrator = createWorkflowOrchestrator({ store: harness.store, executor, workspace: createFakeWorkspaceProvider() });
 
   await orchestrator.createFeature({
     featureId: "F-001",
@@ -89,7 +90,7 @@ async function driveToState(
   target: WorkflowState,
   executor: FakeStageExecutor = new FakeStageExecutor(),
 ): Promise<WorkflowOrchestrator> {
-  const orchestrator = createWorkflowOrchestrator({ store: harness.store, executor });
+  const orchestrator = createWorkflowOrchestrator({ store: harness.store, executor, workspace: createFakeWorkspaceProvider() });
 
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const session = await harness.store.load("F-001");
@@ -143,7 +144,7 @@ describe("optimistic concurrency", () => {
     const releaseStale = createGate();
 
     const staleExecutor = new FakeStageExecutor();
-    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor });
+    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor , workspace: createFakeWorkspaceProvider() });
 
     staleExecutor.configure("planning", {
       artifacts: [{ name: "plan", content: planContent("F-001", "stale plan") }],
@@ -154,7 +155,7 @@ describe("optimistic concurrency", () => {
     });
 
     const winnerExecutor = new FakeStageExecutor();
-    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor });
+    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor , workspace: createFakeWorkspaceProvider() });
 
     winnerExecutor.configure("planning", {
       artifacts: [{ name: "plan", content: planContent("F-001", "winning plan") }],
@@ -214,7 +215,7 @@ describe("optimistic concurrency", () => {
     const started = createGate();
     const releaseStale = createGate();
     const staleExecutor = new FakeStageExecutor();
-    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor });
+    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor , workspace: createFakeWorkspaceProvider() });
 
     staleExecutor.configure("planning", {
       artifacts: [{ name: "plan", content: planContent("F-001", "stale plan") }],
@@ -225,7 +226,7 @@ describe("optimistic concurrency", () => {
     });
 
     const winnerExecutor = new FakeStageExecutor();
-    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor });
+    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor , workspace: createFakeWorkspaceProvider() });
 
     winnerExecutor.configure("planning", {
       after: async () => {
@@ -260,7 +261,7 @@ describe("optimistic concurrency", () => {
     const started = createGate();
     const releaseStale = createGate();
     const staleExecutor = new FakeStageExecutor();
-    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor });
+    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor , workspace: createFakeWorkspaceProvider() });
 
     staleExecutor.configure("planning", {
       artifacts: [{ name: "plan", content: planContent("F-001", "stale plan") }],
@@ -271,7 +272,7 @@ describe("optimistic concurrency", () => {
     });
 
     const winnerExecutor = new FakeStageExecutor();
-    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor });
+    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor , workspace: createFakeWorkspaceProvider() });
 
     winnerExecutor.configure("planning", {
       artifacts: [{ name: "plan", content: planContent("F-001", "winning plan") }],
@@ -317,7 +318,7 @@ describe("optimistic concurrency", () => {
     const started = createGate();
     const releaseStale = createGate();
     const staleExecutor = new FakeStageExecutor();
-    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor });
+    const stale = createWorkflowOrchestrator({ store: harness.store, executor: staleExecutor , workspace: createFakeWorkspaceProvider() });
 
     staleExecutor.configure("planning", {
       artifacts: [{ name: "plan", content: planContent("F-001", "stale plan") }],
@@ -328,7 +329,7 @@ describe("optimistic concurrency", () => {
     });
 
     const winnerExecutor = new FakeStageExecutor();
-    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor });
+    const winner = createWorkflowOrchestrator({ store: harness.store, executor: winnerExecutor , workspace: createFakeWorkspaceProvider() });
 
     winnerExecutor.configure("planning", {
       artifacts: [{ name: "plan", content: planContent("F-001", "winning plan") }],
@@ -389,6 +390,7 @@ describe("session revisions", () => {
   it("starts at a deterministic revision and increments once per authoritative mutation", async () => {
     const harness = createHarness(await makeRoot());
     const orchestrator = createWorkflowOrchestrator({
+      workspace: createFakeWorkspaceProvider(),
       store: harness.store,
       executor: new FakeStageExecutor(),
     });
@@ -417,7 +419,7 @@ describe("session revisions", () => {
   it("survives a process restart", async () => {
     const harness = createHarness(await makeRoot());
     const executor = new FakeStageExecutor();
-    const orchestrator = createWorkflowOrchestrator({ store: harness.store, executor });
+    const orchestrator = createWorkflowOrchestrator({ store: harness.store, executor, workspace: createFakeWorkspaceProvider() });
 
     await orchestrator.createFeature({ featureId: "F-001", title: "Revisions" });
     await driveToState(harness, WorkflowState.Planning);
@@ -425,6 +427,7 @@ describe("session revisions", () => {
     const before = await harness.store.load("F-001");
     const restartedStore = createFeatureSessionStore(harness.root, { clock: fixedClock });
     const restarted = createWorkflowOrchestrator({
+      workspace: createFakeWorkspaceProvider(),
       store: restartedStore,
       executor: new FakeStageExecutor(),
     });
@@ -442,6 +445,7 @@ describe("session revisions", () => {
   it("reports a rejected mutation when the expected revision is stale", async () => {
     const harness = createHarness(await makeRoot());
     const orchestrator = createWorkflowOrchestrator({
+      workspace: createFakeWorkspaceProvider(),
       store: harness.store,
       executor: new FakeStageExecutor(),
     });
@@ -470,7 +474,7 @@ describe("human plan approval checkpoint", () => {
   }> {
     const harness = createHarness(await makeRoot());
     const store = harness.store;
-    const orchestrator = createWorkflowOrchestrator({ store, executor: new FakeStageExecutor() });
+    const orchestrator = createWorkflowOrchestrator({ store, executor: new FakeStageExecutor() , workspace: createFakeWorkspaceProvider() });
 
     await orchestrator.createFeature({ featureId: "F-001", title });
     await driveToState(harness, WorkflowState.AwaitingPlanApproval);
@@ -522,7 +526,7 @@ describe("human plan approval checkpoint", () => {
     const { store } = await approveInFreshFeature("Approval proceeds");
     const restarted = createFeatureSessionStore(store.repositoryRoot, { clock: fixedClock });
     const executor = new FakeStageExecutor();
-    const orchestrator = createWorkflowOrchestrator({ store: restarted, executor });
+    const orchestrator = createWorkflowOrchestrator({ store: restarted, executor, workspace: createFakeWorkspaceProvider() });
 
     const result = await orchestrator.runNext("F-001");
 
@@ -546,7 +550,7 @@ describe("human plan approval checkpoint", () => {
     it(`refuses to implement when the approved ${label} changed after approval`, async () => {
       const { harness, store } = await approveInFreshFeature(`Approval invalid ${label}`);
       const executor = new FakeStageExecutor();
-      const orchestrator = createWorkflowOrchestrator({ store, executor });
+      const orchestrator = createWorkflowOrchestrator({ store, executor, workspace: createFakeWorkspaceProvider() });
 
       await writeFile(await harness.path(filename), '{"tampered":true}\n', "utf8");
 
@@ -582,6 +586,7 @@ describe("human plan approval checkpoint", () => {
 
     const harness = createHarness(store.repositoryRoot);
     const orchestrator = createWorkflowOrchestrator({
+      workspace: createFakeWorkspaceProvider(),
       store: createFeatureSessionStore(harness.root, { clock: fixedClock }),
       executor: new FakeStageExecutor(),
     });

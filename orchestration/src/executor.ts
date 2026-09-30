@@ -3,6 +3,8 @@ import type {
   ReviewFinding,
   VerificationEvidence,
   WorkflowState,
+  WorkspaceAccessLevel,
+  WorkspaceBaseline,
 } from "@agent-workflow-kit/core";
 import type {
   FeatureArtifactFilename,
@@ -34,6 +36,29 @@ export interface StageArtifactContext {
   readonly content: unknown;
 }
 
+/**
+ * Where a stage is allowed to run, decided by the framework and never by the stage.
+ *
+ * This is the only place an executor learns a directory, which is what makes the directory
+ * framework-controlled: an executor cannot pick a working directory, cannot widen its own access, and
+ * cannot discover a second one. The prompt, the transport, and every tool the model reaches are
+ * downstream of this value.
+ *
+ * `baseline` is `null` for the pre-approval stages, which run against the repository root read-only
+ * because a human has not yet approved any work. Once a plan is approved the field is the frozen
+ * baseline every post-approval stage is checked against, and a request without one is a bug rather
+ * than a mode.
+ */
+export interface StageWorkspaceContext {
+  /** `repository` for a pre-approval stage, otherwise the framework-generated workspace identity. */
+  readonly workspaceId: string;
+  readonly repositoryRoot: string;
+  /** The absolute directory this stage's commands run in. */
+  readonly workingDirectory: string;
+  readonly access: WorkspaceAccessLevel;
+  readonly baseline: WorkspaceBaseline | null;
+}
+
 export interface StageExecutionRequest {
   readonly feature: StageFeatureContext;
   readonly stage: WorkStage;
@@ -42,6 +67,12 @@ export interface StageExecutionRequest {
   readonly context: readonly StageArtifactContext[];
   readonly outputs: readonly StageArtifactOutputSpec[];
   readonly fixReturnState: FixReturnState | null;
+  /**
+   * The directory and access this stage may use. Framework-supplied and framework-checked: the
+   * orchestrator built it from the approved baseline, and the scope check after the stage compares the
+   * working tree against the same baseline.
+   */
+  readonly workspace: StageWorkspaceContext;
   /**
    * Deterministic evidence the framework collected for this stage, when a verification provider is
    * configured. It is read-only context for interpreting failures, never an instruction: the exit

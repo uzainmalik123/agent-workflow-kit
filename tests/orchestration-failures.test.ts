@@ -15,6 +15,7 @@ import {
   type FeatureSession,
 } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
+import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -75,7 +76,7 @@ interface Harness {
 function createHarness(root: string): Harness {
   const store = createFeatureSessionStore(root, { clock: fixedClock });
   const executor = new FakeStageExecutor();
-  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() }) };
+  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() , workspace: createFakeWorkspaceProvider() }) };
 }
 
 async function planStateHarness(): Promise<{ root: string } & Harness> {
@@ -519,7 +520,7 @@ describe("orchestrator persistence recovery", () => {
   it("keeps the stage retryable when the artifact write fails", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
-    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() });
+    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider(), workspace: createFakeWorkspaceProvider() });
 
     await healthy.createFeature({
       featureId: "F-001",
@@ -534,7 +535,7 @@ describe("orchestrator persistence recovery", () => {
     const revisionBefore = (await store.load("F-001")).revision;
     const failingStore = new CountingAllWritesStore(root, { clock: fixedClock });
     failingStore.failAfterWrites = 0;
-    const failing = createWorkflowOrchestrator({ store: failingStore, executor });
+    const failing = createWorkflowOrchestrator({ store: failingStore, executor, workspace: createFakeWorkspaceProvider() });
 
     const blocked = await failing.runNext("F-001");
 
@@ -563,7 +564,7 @@ describe("orchestrator persistence recovery", () => {
   it("rolls the artifact back when the session write of a finalize fails", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
-    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() });
+    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider(), workspace: createFakeWorkspaceProvider() });
 
     await healthy.createFeature({
       featureId: "F-001",
@@ -579,7 +580,7 @@ describe("orchestrator persistence recovery", () => {
     // Write 1 is plan.json, write 2 is the session the mutation would commit at.
     const failingStore = new CountingAllWritesStore(root, { clock: fixedClock });
     failingStore.failAfterWrites = 1;
-    const failing = createWorkflowOrchestrator({ store: failingStore, executor });
+    const failing = createWorkflowOrchestrator({ store: failingStore, executor, workspace: createFakeWorkspaceProvider() });
 
     const blocked = await failing.runNext("F-001");
 
@@ -609,7 +610,7 @@ describe("orchestrator persistence recovery", () => {
   it("reports a finalize whose event log append failed after committing", async () => {
     const root = await makeRoot();
     const { store, executor } = createHarness(root);
-    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() });
+    const healthy = createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider(), workspace: createFakeWorkspaceProvider() });
 
     await healthy.createFeature({
       featureId: "F-001",
@@ -734,6 +735,7 @@ describe("orchestrator session independence", () => {
     expect(serialised).not.toContain("executor");
 
     const detached = createWorkflowOrchestrator({
+      workspace: createFakeWorkspaceProvider(),
       store: createFeatureSessionStore(root, { clock: fixedClock }),
       executor: new FakeStageExecutor(),
     });

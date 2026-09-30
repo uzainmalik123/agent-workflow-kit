@@ -11,8 +11,8 @@ import {
   type PlanApprovalRecord,
 } from "./contracts.js";
 import { isFeatureId, isCanonicalFeatureSlug } from "./names.js";
-import { WorkflowStateMachine } from "@agent-workflow-kit/core";
-import type { WorkflowMachineSnapshot } from "@agent-workflow-kit/core";
+import { WorkflowStateMachine, validateWorkspaceBaseline } from "@agent-workflow-kit/core";
+import type { WorkflowMachineSnapshot, WorkspaceBaseline } from "@agent-workflow-kit/core";
 
 export interface FeatureSessionValidationContext {
   readonly expectedFeatureId?: string;
@@ -146,12 +146,23 @@ function validatePlanApproval(value: unknown): PlanApprovalRecord {
     );
   }
 
+  const baseline = value["baseline"];
+
+  if (baseline !== undefined && baseline !== null) {
+    const validated = validateWorkspaceBaseline(baseline);
+
+    if (!validated.ok) {
+      throw new PersistenceError("INVALID_SESSION", `Session plan approval baseline: ${validated.message}`);
+    }
+  }
+
   return {
     approvedAt,
     approvedRevision,
     specSha256: validateSha256(value["specSha256"], "plan approval specSha256"),
     planSha256: validateSha256(value["planSha256"], "plan approval planSha256"),
     planReviewSha256: validateSha256(value["planReviewSha256"], "plan approval planReviewSha256"),
+    baseline: baseline === undefined || baseline === null ? null : (baseline as WorkspaceBaseline),
   };
 }
 

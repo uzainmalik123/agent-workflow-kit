@@ -1,18 +1,26 @@
 import {
-  AGENT_BY_STAGE,
   FRAMEWORK_HARD_RULES,
   HARD_RULES_HEADING,
+  OPENCODE_PROFILES,
   OPENCODE_ROLES,
+  PROFILE_BY_STAGE,
   READ_ONLY_ROLES,
   UNIVERSAL_DENIAL_ACTIONS,
   WRITE_CAPABLE_ROLES,
   accessForRole,
-  agentFileName,
+  agentFileNameForProfile,
+  AGENT_BY_STAGE,
+  agentForRole,
   agentForStage,
+  isOpenCodeProfile,
   isStageRole,
   isWriteCapableRole,
+  profileForAgent,
+  profileForRole,
+  profileForStage,
   roleDefinition,
-  roleForAgent,
+  roleForStage,
+  rolesForProfile,
   stagesForRole,
 } from "@agent-workflow-kit/opencode";
 import { STAGE_ROLES, WORK_STAGES } from "@agent-workflow-kit/orchestration";
@@ -23,33 +31,38 @@ describe("OpenCode role definitions", () => {
     expect([...OPENCODE_ROLES].sort()).toEqual([...STAGE_ROLES].sort());
   });
 
-  it("maps every WorkStage to a defined agent", () => {
+  it("maps every WorkStage to one of the two physical profiles", () => {
     for (const stage of WORK_STAGES) {
-      const agent = agentForStage(stage);
-
-      expect(agent).toBeTypeOf("string");
-      expect(isStageRole(roleForAgent(agent))).toBe(true);
+      expect(isOpenCodeProfile(profileForStage(stage))).toBe(true);
     }
 
-    expect(Object.keys(AGENT_BY_STAGE).sort()).toEqual([...WORK_STAGES].sort());
+    expect(Object.keys(PROFILE_BY_STAGE).sort()).toEqual([...WORK_STAGES].sort());
   });
 
-  it("uses the expected agent for every stage", () => {
-    expect(AGENT_BY_STAGE).toEqual({
-      grill: "griller",
-      planning: "planner",
-      plan_review: "plan-reviewer",
-      implementation: "implementer",
-      code_review: "code-reviewer",
-      scope_review: "scope-reviewer",
-      static_verification: "verifier",
-      test_verification: "verifier",
-      runtime_verification: "verifier",
-      fixing: "fixer",
-      security_review: "security-reviewer",
-      final_gate: "final-gate-reviewer",
-      final_summary: "summarizer",
+  it("uses the expected profile for every stage", () => {
+    expect(PROFILE_BY_STAGE).toEqual({
+      grill: "agentflow-read",
+      planning: "agentflow-read",
+      plan_review: "agentflow-read",
+      implementation: "agentflow-write",
+      code_review: "agentflow-read",
+      scope_review: "agentflow-read",
+      static_verification: "agentflow-read",
+      test_verification: "agentflow-read",
+      runtime_verification: "agentflow-read",
+      fixing: "agentflow-write",
+      security_review: "agentflow-read",
+      final_gate: "agentflow-read",
+      final_summary: "agentflow-read",
     });
+  });
+
+  it("defines exactly two physical profiles, and every stage agrees with its role", () => {
+    expect(OPENCODE_PROFILES).toEqual(["agentflow-read", "agentflow-write"]);
+
+    for (const stage of WORK_STAGES) {
+      expect(profileForStage(stage)).toBe(profileForRole(roleForStage(stage)));
+    }
   });
 
   it("gives the three verification stages one focused verifier role", () => {
@@ -66,13 +79,60 @@ describe("OpenCode role definitions", () => {
     expect(covered.sort()).toEqual([...WORK_STAGES].sort());
   });
 
-  it("names each agent after its role file stem", () => {
+  it("covers all eleven roles with two profiles, nine and two", () => {
+    expect(rolesForProfile("agentflow-read")).toEqual([
+      "griller",
+      "planner",
+      "plan_reviewer",
+      "code_reviewer",
+      "scope_reviewer",
+      "verifier",
+      "security_reviewer",
+      "final_gate_reviewer",
+      "summarizer",
+    ]);
+    expect(rolesForProfile("agentflow-write")).toEqual(["implementer", "fixer"]);
+
+    const covered = [
+      ...rolesForProfile("agentflow-read"),
+      ...rolesForProfile("agentflow-write"),
+    ];
+
+    expect(covered.sort()).toEqual([...OPENCODE_ROLES].sort());
+  });
+
+  it("names each generated file after its profile, not after a role", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      expect(agentFileNameForProfile(profile)).toBe(`.opencode/agents/${profile}.md`);
+      expect(profileForAgent(profile)).toBe(profile);
+    }
+
+    // A role no longer has a file of its own, so no role name can resolve to a generated agent id.
+    for (const role of OPENCODE_ROLES) {
+      expect(profileForAgent(role)).toBeUndefined();
+    }
+  });
+
+  /* eslint-disable @typescript-eslint/no-deprecated -- this block exists to prove the deprecated aliases still resolve to the profile API */
+  it("resolves every deprecated role-keyed alias to the same profile as its replacement", () => {
+    for (const stage of WORK_STAGES) {
+      expect(AGENT_BY_STAGE[stage]).toBe(PROFILE_BY_STAGE[stage]);
+      expect(agentForStage(stage)).toBe(profileForStage(stage));
+    }
+
+    for (const role of OPENCODE_ROLES) {
+      expect(agentForRole(role)).toBe(profileForRole(role));
+    }
+  });
+  /* eslint-enable @typescript-eslint/no-deprecated */
+
+  it("keeps the role's own file stem out of the role definition", () => {
     for (const role of OPENCODE_ROLES) {
       const definition = roleDefinition(role);
 
-      expect(definition.agent).toBe(definition.agent.toLowerCase());
-      expect(agentFileName(role)).toBe(`.opencode/agents/${definition.agent}.md`);
-      expect(roleForAgent(definition.agent)).toBe(role);
+      expect(isStageRole(role)).toBe(true);
+      expect(Object.hasOwn(definition, "agent")).toBe(false);
+      expect(Object.hasOwn(definition, "filename")).toBe(false);
     }
   });
 

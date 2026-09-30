@@ -29,6 +29,8 @@ import {
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
+import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
+import { testWorkspaceContext } from "../fixtures/workspace.js";
 import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -310,6 +312,7 @@ describe("context routing", () => {
     const store = createFeatureSessionStore(root, { clock: fixedClock });
     const executor = new FakeStageExecutor();
     const orchestrator = createWorkflowOrchestrator({
+      workspace: createFakeWorkspaceProvider(),
       store,
       executor,
       verification: createFakeVerificationProvider(),
@@ -434,6 +437,7 @@ describe("stage result validation", () => {
     context: [],
     outputs: [{ name: "plan", kind: "document", envelopeKey: null }],
     fixReturnState: null,
+    workspace: testWorkspaceContext(),
   };
 
   const valid = {

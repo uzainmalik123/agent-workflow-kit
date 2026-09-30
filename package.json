@@ -28,6 +28,7 @@
     "@agent-workflow-kit/orchestration": "workspace:*",
     "@agent-workflow-kit/persistence": "workspace:*",
     "@agent-workflow-kit/project": "workspace:*",
+    "@agent-workflow-kit/workspace": "workspace:*",
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.13.0",
     "eslint": "^10.11.0",

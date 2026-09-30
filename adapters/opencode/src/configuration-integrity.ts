@@ -1,8 +1,6 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
-import type { StageRole } from "@agent-workflow-kit/orchestration";
+import { join, resolve } from "node:path";
 import {
-  agentFileName,
   OPENCODE_AGENT_DIRECTORY,
   OPENCODE_PLUGIN_DISABLE_ALL,
   OPENCODE_PLUGIN_TRUSTED_NAMESPACE,
@@ -13,6 +11,8 @@ import {
 } from "./agents.js";
 import { OpenCodeAdapterError } from "./errors.js";
 import { FRAMEWORK_HARD_RULES } from "./hard-rules.js";
+import type { StageRole } from "@agent-workflow-kit/orchestration";
+import { agentFileNameForProfile, profileForRole, type OpenCodeProfile } from "./roles.js";
 
 /**
  * The OpenCode control plane, checked immediately before a run.
@@ -23,10 +23,10 @@ import { FRAMEWORK_HARD_RULES } from "./hard-rules.js";
  * code under review. That exclusion is correct for judging the implementation and wrong for judging
  * the control plane, so this check is separate and is not derived from it.
  *
- * What it is protecting is a two-step escalation. A command rewrites the generated file for the role
- * that is about to run - granting a shell, widening a permission, dropping a framework rule - and
- * exits 0. Deterministic verification records a pass, because the command did pass. The next stage
- * then loads the rewritten agent and runs with it. Nothing in the verification path looks at
+ * What it is protecting is a two-step escalation. A command rewrites the generated file for the
+ * profile that is about to run - granting a shell, widening a permission, dropping a framework rule
+ * - and exits 0. Deterministic verification records a pass, because the command did pass. The next
+ * stage then loads the rewritten agent and runs with it. Nothing in the verification path looks at
  * `.opencode/`, so the second stage would consume the first stage's edit without a trace.
  *
  * Editing the generated file is the obvious way in and the one this module was written for. It is
@@ -38,7 +38,7 @@ import { FRAMEWORK_HARD_RULES } from "./hard-rules.js";
  * hold. So the check reads the *sources*, not only the file: it resolves the id the CLI will pass to
  * `--agent`, proves exactly one definition of that id exists and is the generated one, refuses the
  * alternate configuration files OpenCode would also load, and refuses the root config fields that
- * can redefine a role, re-grant a tool, or add an instruction source.
+ * can redefine a profile, re-grant a tool, or add an instruction source.
  *
  * The response is to refuse, not to repair. Overwriting the file would destroy the evidence of what
  * happened, and regenerating it would make a tampered repository look untouched while the tampered
@@ -52,21 +52,42 @@ import { FRAMEWORK_HARD_RULES } from "./hard-rules.js";
  * - **Framework-controlled, verified here.** The agent file's frontmatter, which is the `permissions`
  *   rule list and the `mode` that keeps these agents out of the subagent graph; every framework hard
  *   rule, which has to be present verbatim; the plugin-isolation and sharing directives in
- *   `opencode.json`; the uniqueness of the generated file as the only definition of the role's agent
- *   id; the absence of any other repository-local project config; and the root config fields listed in
- *   {@link FRAMEWORK_SENSITIVE_CONFIG_FIELDS}. A repository edit cannot change any of these without
- *   being refused.
- * - **Project-owned, not verified.** The prose under the role's instructions - its description of
- *   purpose, house style, and domain vocabulary - `AGENTS.md`, unrelated custom agents under their
- *   own ids, and the remaining fields of `opencode.json` such as the model, provider, and display
- *   settings. These are customization surfaces and they are not part of the security contract, so
- *   editing them does not stop a workflow.
+ *   `opencode.json`; the uniqueness of the generated file as the only definition of the profile's
+ *   agent id; the absence of any other repository-local project config; and the root config fields
+ *   listed in {@link FRAMEWORK_SENSITIVE_CONFIG_FIELDS}. A repository edit cannot change any of these
+ *   without being refused.
+ * - **Project-owned, not verified.** `AGENTS.md`, unrelated custom agents under their own ids, and
+ *   the remaining fields of `opencode.json` such as the model, provider, and display settings. These
+ *   are customization surfaces and they are not part of the security contract, so editing them does
+ *   not stop a workflow.
+ *
+ * Role prose is no longer project-owned in any sense: it is not in the generated files at all. One
+ * profile file serves every role that shares its capabilities, so per-role instructions are rendered
+ * into the stage prompt instead, and there is no agent file whose prose a repository could edit.
  */
-export interface ConfigurationIntegrityOptions {
+export type ConfigurationIntegrityOptions = {
   /** The repository the agent runs in. The only project this check reads. */
   readonly workingDirectory: string;
-  /** The role about to run. Its agent file is the one that has to be intact. */
-  readonly role: StageRole;
+} & (
+  | {
+      /** The physical profile about to run. Its agent file is the one that has to be intact. */
+      readonly profile: OpenCodeProfile;
+      readonly role?: never;
+    }
+  | {
+      /**
+       * @deprecated Pass `profile`. Several roles now share one profile, so the role only resolves
+       * the profile whose file is checked.
+       */
+      readonly role: StageRole;
+      readonly profile?: never;
+    }
+);
+
+function profileOf(options: ConfigurationIntegrityOptions): OpenCodeProfile {
+  // The `role` field is deprecated; reading it here is the whole point of accepting it.
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
+  return options.profile ?? profileForRole(options.role);
 }
 
 /** Why a file is not the configuration the framework requires. */
@@ -87,10 +108,10 @@ export interface ConfigurationIntegrityProblem {
   readonly detail: string;
 }
 
-function refuse(problem: ConfigurationIntegrityProblem, role: StageRole): never {
+function refuse(problem: ConfigurationIntegrityProblem, profile: OpenCodeProfile): never {
   throw new OpenCodeAdapterError(
     "opencode_configuration_tampered",
-    `Refusing to run the "${role}" agent: the framework-controlled OpenCode configuration at "${problem.path}" does not match what Agent Workflow Kit generates (${problem.reason}). ${problem.detail} Agent Workflow Kit never overwrites or regenerates this file on its own, so a repository edit to a permission, a framework rule, a role's agent definition, or the plugin-isolation configuration stops the workflow here rather than reaching the model. Inspect the difference, and restore the generated file with writeOpenCodeProjectFiles(root, { force: true }) if the edit was not yours.`,
+    `Refusing to run the "${profile}" agent: the framework-controlled OpenCode configuration at "${problem.path}" does not match what Agent Workflow Kit generates (${problem.reason}). ${problem.detail} Agent Workflow Kit never overwrites or regenerates this file on its own, so a repository edit to a permission, a framework rule, a profile's agent definition, or the plugin-isolation configuration stops the workflow here rather than reaching the model. Inspect the difference, and restore the generated file with writeOpenCodeProjectFiles(root, { force: true }) if the edit was not yours.`,
   );
 }
 
@@ -106,7 +127,7 @@ function refuse(problem: ConfigurationIntegrityProblem, role: StageRole): never 
 async function readControlledFile(
   root: string,
   relativePath: string,
-  role: StageRole,
+  profile: OpenCodeProfile,
 ): Promise<string> {
   const absolute = join(root, relativePath);
   let stats;
@@ -121,7 +142,7 @@ async function readControlledFile(
           reason: "missing",
           detail: "The file does not exist.",
         },
-        role,
+        profile,
       );
     }
 
@@ -131,7 +152,7 @@ async function readControlledFile(
         reason: "unreadable",
         detail: "The file could not be inspected.",
       },
-      role,
+      profile,
     );
   }
 
@@ -142,7 +163,7 @@ async function readControlledFile(
         reason: "unsafe_path",
         detail: "The path is a symbolic link, so the contents are not the file this framework generated.",
       },
-      role,
+      profile,
     );
   }
 
@@ -153,7 +174,7 @@ async function readControlledFile(
         reason: "unsafe_path",
         detail: "The path is not a regular file.",
       },
-      role,
+      profile,
     );
   }
 
@@ -166,7 +187,7 @@ async function readControlledFile(
         reason: "unreadable",
         detail: "The file exists but could not be read.",
       },
-      role,
+      profile,
     );
   }
 }
@@ -197,14 +218,14 @@ function sectionOf(contents: string, heading: string): string | null {
   return body;
 }
 
-function renderFrontmatterFor(role: StageRole): string {
-  const generated = renderAgentMarkdown(role);
+function renderFrontmatterFor(profile: OpenCodeProfile): string {
+  const generated = renderAgentMarkdown(profile);
   const frontmatter = frontmatterOf(generated);
 
   if (frontmatter === null) {
     throw new OpenCodeAdapterError(
       "opencode_configuration_tampered",
-      `The generated agent file for the "${role}" role has no frontmatter, so there is nothing to verify the installed file against.`,
+      `The generated agent file for the "${profile}" profile has no frontmatter, so there is nothing to verify the installed file against.`,
     );
   }
 
@@ -212,13 +233,22 @@ function renderFrontmatterFor(role: StageRole): string {
 }
 
 /**
- * The generated file for a role, as a repository-relative path.
+ * The generated file for a profile, as a repository-relative path.
  *
- * Detection builds the name through the same function the writer uses, so a role whose filename were
+ * Detection builds the name through the same function the writer uses, so a profile whose filename were
  * ever renamed could not leave the check reading a path nothing generates.
  */
+export function agentFilePathForProfile(profile: OpenCodeProfile): string {
+  return agentFileNameForProfile(profile);
+}
+
+/**
+ * @deprecated Use {@link agentFilePathForProfile} with {@link profileForRole}. A role no longer owns
+ * a file, so this returns the path of the profile it runs as. Several roles resolve to the same
+ * path.
+ */
 export function agentFilePathForRole(role: StageRole): string {
-  return agentFileName(role);
+  return agentFilePathForProfile(profileForRole(role));
 }
 
 /** The extension every auto-discovered agent definition carries. */
@@ -275,10 +305,10 @@ export const OPENCODE_ALTERNATE_PROJECT_CONFIG_PATHS: readonly string[] = [
  * and `disabled_providers`, which choose what talks to the model; `$schema`, `logLevel`, `layout`,
  * `username`, `snapshot`, `watcher`, `tool_output`, `compaction`, `attachment`, and `autoupdate`,
  * which are display and lifecycle settings. None of them can add an instruction, enable a tool, or
- * change what a role is allowed to do.
+ * change what a profile is allowed to do.
  */
 export const FRAMEWORK_SENSITIVE_CONFIG_FIELDS: Readonly<Record<string, string>> = {
-  agent: "redefines a role's prompt, permissions, mode, and tool list under its own id",
+  agent: "redefines a profile's prompt, permissions, mode, and tool list under its own id",
   agents: "is another spelling of the same agent override block",
   mode: "is the deprecated spelling of `agent`, which OpenCode still merges",
   default_agent: "chooses which agent a run starts as",
@@ -356,7 +386,7 @@ interface AgentDefinitionScan {
 async function scanAgentSourceDirectory(
   root: string,
   directory: string,
-  role: StageRole,
+  profile: OpenCodeProfile,
   depth = 0,
 ): Promise<AgentDefinitionScan> {
   const absolute = join(root, directory);
@@ -376,7 +406,7 @@ async function scanAgentSourceDirectory(
         reason: "unreadable",
         detail: "The agent source directory could not be inspected, so the set of definitions OpenCode would load is unknown.",
       },
-      role,
+      profile,
     );
   }
 
@@ -387,7 +417,7 @@ async function scanAgentSourceDirectory(
         reason: "unsafe_path",
         detail: "The agent source directory is a symbolic link, so the definitions OpenCode would load are not the ones this check can account for.",
       },
-      role,
+      profile,
     );
   }
 
@@ -398,7 +428,7 @@ async function scanAgentSourceDirectory(
         reason: "unsafe_path",
         detail: "The agent source directory is not a directory.",
       },
-      role,
+      profile,
     );
   }
 
@@ -413,7 +443,7 @@ async function scanAgentSourceDirectory(
         reason: "unreadable",
         detail: "The agent source directory could not be listed, so the set of definitions OpenCode would load is unknown.",
       },
-      role,
+      profile,
     );
   }
 
@@ -430,7 +460,7 @@ async function scanAgentSourceDirectory(
           reason: "unsafe_path",
           detail: "A symbolic link in an agent source directory can supply a definition from outside the repository, so which definition OpenCode resolves this id to is not decided by the repository's own files.",
         },
-        role,
+        profile,
       );
     }
 
@@ -443,7 +473,7 @@ async function scanAgentSourceDirectory(
       const nested = await scanAgentSourceDirectory(
         root,
         relativePath,
-        role,
+        profile,
         depth + 1,
       );
 
@@ -461,9 +491,9 @@ async function scanAgentSourceDirectory(
 }
 
 /**
- * Proves the generated file is the only definition of the role's agent id.
+ * Proves the generated file is the only definition of the profile's agent id.
  *
- * The CLI starts the role with `--agent <id>`, so `id` is what OpenCode resolves and every file that
+ * The CLI starts the run with `--agent <id>`, so `id` is what OpenCode resolves and every file that
  * maps to it is a candidate for the run. The generated file passing its own frontmatter check says
  * nothing about that set: a repository can define the same id in the other source directory, or nest
  * a file whose relative path is the same id. Both are found by walking every definition the loader
@@ -472,14 +502,14 @@ async function scanAgentSourceDirectory(
  * Comparison is against a sorted list rather than a traversal order, so the refusal names the same
  * files every time regardless of the order the filesystem happened to return.
  */
-async function assertUniqueAgentDefinition(root: string, role: StageRole): Promise<void> {
-  const expectedPath = agentFilePathForRole(role);
+async function assertUniqueAgentDefinition(root: string, profile: OpenCodeProfile): Promise<void> {
+  const expectedPath = agentFilePathForProfile(profile);
   const expectedId = openCodeAgentIdForPath(expectedPath);
 
   if (expectedId === null) {
     throw new OpenCodeAdapterError(
       "opencode_configuration_tampered",
-      `The generated agent file for the "${role}" role is "${expectedPath}", which resolves to no OpenCode agent id, so there is no id to prove unique.`,
+      `The generated agent file for the "${profile}" profile is "${expectedPath}", which resolves to no OpenCode agent id, so there is no id to prove unique.`,
     );
   }
 
@@ -487,7 +517,7 @@ async function assertUniqueAgentDefinition(root: string, role: StageRole): Promi
   let incomplete = false;
 
   for (const directory of OPENCODE_AGENT_SOURCE_DIRECTORIES) {
-    const scan = await scanAgentSourceDirectory(root, directory, role);
+    const scan = await scanAgentSourceDirectory(root, directory, profile);
 
     files.push(...scan.files);
     incomplete = incomplete || scan.incomplete;
@@ -500,7 +530,7 @@ async function assertUniqueAgentDefinition(root: string, role: StageRole): Promi
         reason: "duplicate_agent_definition",
         detail: `The agent source tree is nested deeper than ${String(MAX_AGENT_SCAN_DEPTH)} directories, so this check cannot prove that "${expectedId}" has exactly one definition.`,
       },
-      role,
+      profile,
     );
   }
 
@@ -521,10 +551,191 @@ async function assertUniqueAgentDefinition(root: string, role: StageRole): Promi
     {
       path: expectedPath,
       reason: "duplicate_agent_definition",
-      detail: `The role resolves to the OpenCode agent id "${expectedId}", and this repository defines that id as ${found}. Exactly one definition has to exist and it has to be the generated file, because which definition a duplicated id resolves to is OpenCode's own precedence rule and is not something the repository may decide.`,
+      detail: `The profile resolves to the OpenCode agent id "${expectedId}", and this repository defines that id as ${found}. Exactly one definition has to exist and it has to be the generated file, because which definition a duplicated id resolves to is OpenCode's own precedence rule and is not something the repository may decide.`,
     },
-    role,
+    profile,
   );
+}
+
+/**
+ * Refuses a repository definition that would resolve to a framework profile's agent id.
+ *
+ * The profiles now live in the framework-owned runtime directory rather than in the repository, but
+ * that changes where the framework's definition is, not what OpenCode resolves. A repository that
+ * defines `agentflow-read` in `.opencode/agent/` still produces an agent with that id, and the
+ * framework passes exactly that id to `--agent`. Which definition wins is OpenCode's own precedence
+ * rule, and it is not one this framework may leave to a repository: a repository that won the id
+ * would be deciding the permissions its own stage runs under.
+ *
+ * So the requirement is the same one {@link assertUniqueAgentDefinition} has always enforced -
+ * exactly one definition of a framework profile's id, and it is the framework's - restated for a
+ * definition that does not have to sit in the project. This is the check that keeps the move out of
+ * the repository from becoming a loss of the guarantee the move was meant to keep.
+ *
+ * Unlike {@link assertOpenCodeConfigurationIntegrity} it requires nothing of the repository: a
+ * project with no `.opencode/` directory at all passes, which is the normal case now.
+ */
+export async function assertNoProjectProfileShadow(root: string, profile: OpenCodeProfile): Promise<void> {
+  const expectedId = profile;
+  const files: string[] = [];
+  let incomplete = false;
+
+  for (const directory of OPENCODE_AGENT_SOURCE_DIRECTORIES) {
+    const scan = await scanAgentSourceDirectory(resolve(root), directory, profile);
+
+    files.push(...scan.files);
+    incomplete = incomplete || scan.incomplete;
+  }
+
+  if (incomplete) {
+    throw new OpenCodeAdapterError(
+      "opencode_configuration_tampered",
+      `Refusing to run the "${profile}" agent: the repository's agent source tree is nested deeper than ${String(MAX_AGENT_SCAN_DEPTH)} directories, so this check cannot prove that the OpenCode agent id "${expectedId}" is defined only by Agent Workflow Kit.`,
+    );
+  }
+
+  const conflicts = files
+    .filter((file) => openCodeAgentIdForPath(file) === expectedId)
+    .sort((left, right) => left.localeCompare(right));
+
+  if (conflicts.length === 0) {
+    return;
+  }
+
+  // A repository that already carries this framework's generated profile - an installation from
+  // before the configuration moved out of the repository - is not a shadow. Its bytes are the
+  // framework's own, so it grants exactly the permissions the framework intends and cannot widen
+  // anything. It is allowed, and it is allowed only because the contents are compared, so a file that
+  // merely shares the name is still refused.
+  const expected = renderAgentMarkdown(profile);
+  const shadowing: string[] = [];
+
+  for (const file of conflicts) {
+    let contents: string;
+
+    try {
+      contents = await readFile(join(resolve(root), file), "utf8");
+    } catch (error) {
+      throw new OpenCodeAdapterError(
+        "opencode_configuration_tampered",
+        `Refusing to run the "${profile}" agent: this repository defines the OpenCode agent id "${expectedId}" in "${file}", but the file could not be read, so whether it matches Agent Workflow Kit's own definition cannot be proved.`,
+        { cause: error },
+      );
+    }
+
+    if (contents !== expected) {
+      shadowing.push(file);
+    }
+  }
+
+  if (shadowing.length === 0) {
+    return;
+  }
+
+  throw new OpenCodeAdapterError(
+    "opencode_configuration_tampered",
+    `Refusing to run the "${profile}" agent: this repository defines the OpenCode agent id "${expectedId}" in ${shadowing.map((file) => `"${file}"`).join(", ")}, and those definitions differ from Agent Workflow Kit's own, which now lives in the framework runtime configuration. The run would be handed an id a repository also defines with different rules, and which definition OpenCode resolves it to is a precedence rule this framework does not leave to a repository. Remove the repository's definition of "${expectedId}", restore it to the framework-generated content, or rename it.`,
+  );
+}
+
+/**
+ * Refuses a repository configuration that could reach the stage run's permission or instruction
+ * boundary, without requiring the repository to carry anything.
+ *
+ * Moving the framework's configuration out of the repository changed where the framework's own
+ * settings live, not what a repository can still contribute. The target repository remains the
+ * process working directory, so OpenCode still loads the repository's configuration on top of the
+ * runtime configuration, and a repository can still set a global `permission`, `tools`, `plugin`,
+ * `instructions`, or `command` there. Global permissions of exactly that kind are what would widen a
+ * profile, so they are refused here - the same fields, and the same refusals, that
+ * {@link assertOpenCodeConfigurationIsolation} refuses, minus the parts that only made sense while
+ * the file was framework-generated.
+ *
+ * What is deliberately *not* required any more: the repository no longer has to carry an
+ * `opencode.json`, the `plugins` list and `share` directive are not expected in it because the
+ * framework states them in the runtime configuration, and a repository that keeps a legitimate
+ * `model`, `provider`, or display preference still passes.
+ *
+ * So a repository with no `.opencode/` directory and no `opencode.json` passes, which is the normal
+ * case now, and one that adds a global permission or a plugin is still refused.
+ */
+export async function assertNoRepositoryConfigBoundaryCrossing(
+  root: string,
+  profile: OpenCodeProfile,
+): Promise<void> {
+  // A second configuration file is still a repository choosing which configuration wins, and the
+  // answer to that is OpenCode's precedence rule rather than a property of the file's contents.
+  await assertNoAlternateProjectConfig(root, profile);
+
+  const absolute = join(root, OPENCODE_PROJECT_CONFIG_PATH);
+  let stats;
+
+  try {
+    stats = await lstat(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // Absent is the normal case: the framework's own configuration is not written here any more.
+      return;
+    }
+
+    refuse(
+      {
+        path: OPENCODE_PROJECT_CONFIG_PATH,
+        reason: "unreadable",
+        detail: "The project configuration could not be inspected, so what it contributes to the run is unknown.",
+      },
+      profile,
+    );
+  }
+
+  if (stats.isSymbolicLink()) {
+    refuse(
+      {
+        path: OPENCODE_PROJECT_CONFIG_PATH,
+        reason: "unsafe_path",
+        detail: "The project configuration is a symbolic link, so what it contributes to the run is not decided by the repository's own files.",
+      },
+      profile,
+    );
+  }
+
+  const contents = await readFile(absolute, "utf8");
+
+  if (contents.trim() === "") {
+    return;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    refuse(
+      {
+        path: OPENCODE_PROJECT_CONFIG_PATH,
+        reason: "project_config_changed",
+        detail: "The file is not valid JSON, so OpenCode would fall back to its own configuration and the repository's intent would be read as something other than what it wrote.",
+      },
+      profile,
+    );
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    refuse(
+      {
+        path: OPENCODE_PROJECT_CONFIG_PATH,
+        reason: "project_config_changed",
+        detail: "The file is not a JSON object.",
+      },
+      profile,
+    );
+  }
+
+  // The sensitive-field check is the whole point of this function: it is what stops a global
+  // permission, tool, plugin, instruction source, or command from reaching a stage run. The
+  // `plugins` list and `share` directives are not checked here, because they are the framework's to
+  // state and it states them in the runtime configuration rather than asking the repository to.
+  assertNoFrameworkSensitiveConfigFields(parsed as Record<string, unknown>, profile);
 }
 
 /**
@@ -533,7 +744,7 @@ async function assertUniqueAgentDefinition(root: string, role: StageRole): Promi
  * Each path is absent or empty in a correctly generated repository, so refusing a non-empty one
  * costs a project nothing and closes the merge-precedence question without answering it.
  */
-async function assertNoAlternateProjectConfig(root: string, role: StageRole): Promise<void> {
+async function assertNoAlternateProjectConfig(root: string, profile: OpenCodeProfile): Promise<void> {
   for (const relativePath of OPENCODE_ALTERNATE_PROJECT_CONFIG_PATHS) {
     const absolute = join(root, relativePath);
     let stats;
@@ -551,7 +762,7 @@ async function assertNoAlternateProjectConfig(root: string, role: StageRole): Pr
           reason: "alternate_project_config",
           detail: "The file could not be inspected, so whether it is one OpenCode would load is unknown.",
         },
-        role,
+        profile,
       );
     }
 
@@ -562,7 +773,7 @@ async function assertNoAlternateProjectConfig(root: string, role: StageRole): Pr
           reason: "unsafe_path",
           detail: "The path is not a regular file, so what OpenCode would load from it is not what this check can account for.",
         },
-        role,
+        profile,
       );
     }
 
@@ -577,7 +788,7 @@ async function assertNoAlternateProjectConfig(root: string, role: StageRole): Pr
           reason: "alternate_project_config",
           detail: "The file exists but could not be read, so whether it changes the configuration OpenCode loads is unknown.",
         },
-        role,
+        profile,
       );
     }
 
@@ -588,7 +799,7 @@ async function assertNoAlternateProjectConfig(root: string, role: StageRole): Pr
           reason: "alternate_project_config",
           detail: `The generated project configuration is "${OPENCODE_PROJECT_CONFIG_PATH}", and OpenCode also loads this file. Which one wins when both are present is OpenCode's own merge precedence, so a second project config in a repository means the repository is choosing the configuration a stage runs under. Delete or empty the file to run; everything a project needs belongs in "${OPENCODE_PROJECT_CONFIG_PATH}".`,
         },
-        role,
+        profile,
       );
     }
   }
@@ -603,7 +814,7 @@ async function assertNoAlternateProjectConfig(root: string, role: StageRole): Pr
  */
 function assertNoFrameworkSensitiveConfigFields(
   config: Record<string, unknown>,
-  role: StageRole,
+  profile: OpenCodeProfile,
 ): void {
   const found = Object.keys(config)
     .filter((field) => Object.hasOwn(FRAMEWORK_SENSITIVE_CONFIG_FIELDS, field))
@@ -621,9 +832,9 @@ function assertNoFrameworkSensitiveConfigFields(
     {
       path: OPENCODE_PROJECT_CONFIG_PATH,
       reason: "project_config_changed",
-      detail: `The framework-owned field(s) ${explained} must be absent, because each of them can redefine a role, re-grant a tool, or add an instruction source behind the generated agent file. Every other field of this file, including the model and provider settings, stays the repository's to set.`,
+      detail: `The framework-owned field(s) ${explained} must be absent, because each of them can redefine a profile, re-grant a tool, or add an instruction source behind the generated agent file. Every other field of this file, including the model and provider settings, stays the repository's to set.`,
     },
-    role,
+    profile,
   );
 }
 
@@ -631,9 +842,9 @@ function assertNoFrameworkSensitiveConfigFields(
  * Refuses the stage when the OpenCode configuration a run depends on is not the configuration this
  * framework generates.
  *
- * The check is per invocation and covers the role about to run, which is the only moment its agent
- * file matters: every stage verifies its own file immediately before that stage starts, so a file
- * rewritten at any point is caught before the role that would read it runs.
+ * The check is per invocation and covers the profile about to run, which is the only moment its
+ * agent file matters: every stage verifies its own file immediately before that stage starts, so a
+ * file rewritten at any point is caught before the run that would read it starts.
  *
  * The order is deliberate. The generated file is read first, so a plain edit to it is reported as
  * what it is; the sources that could shadow or outrank it are checked next, so the id the CLI is
@@ -644,11 +855,12 @@ function assertNoFrameworkSensitiveConfigFields(
 export async function assertOpenCodeConfigurationIntegrity(
   options: ConfigurationIntegrityOptions,
 ): Promise<void> {
-  const { workingDirectory: root, role } = options;
-  const agentPath = agentFilePathForRole(role);
-  await assertUniqueAgentDefinition(root, role);
-  const agentContents = await readControlledFile(root, agentPath, role);
-  const expectedFrontmatter = renderFrontmatterFor(role);
+  const root = options.workingDirectory;
+  const profile = profileOf(options);
+  const agentPath = agentFilePathForProfile(profile);
+  await assertUniqueAgentDefinition(root, profile);
+  const agentContents = await readControlledFile(root, agentPath, profile);
+  const expectedFrontmatter = renderFrontmatterFor(profile);
   const actualFrontmatter = frontmatterOf(agentContents);
 
   if (actualFrontmatter === null) {
@@ -658,7 +870,7 @@ export async function assertOpenCodeConfigurationIntegrity(
         reason: "frontmatter_changed",
         detail: "The installed file has no YAML frontmatter, so OpenCode would apply its own defaults instead of the generated permissions.",
       },
-      role,
+      profile,
     );
   }
 
@@ -669,7 +881,7 @@ export async function assertOpenCodeConfigurationIntegrity(
         reason: "frontmatter_changed",
         detail: `The \`permissions\` rule list or the agent \`mode\` differs from the generated one. The expected frontmatter is:\n${expectedFrontmatter}`,
       },
-      role,
+      profile,
     );
   }
 
@@ -682,7 +894,7 @@ export async function assertOpenCodeConfigurationIntegrity(
         reason: "hard_rules_missing",
         detail: `The section "${HARD_RULES_HEADING}" is gone, so the file no longer states the framework rules the prompt also carries.`,
       },
-      role,
+      profile,
     );
   }
 
@@ -695,12 +907,12 @@ export async function assertOpenCodeConfigurationIntegrity(
         reason: "hard_rules_missing",
         detail: `${String(missing.length)} of the ${String(FRAMEWORK_HARD_RULES.length)} framework hard rules are no longer present verbatim, starting with "${missing[0] ?? ""}".`,
       },
-      role,
+      profile,
     );
   }
 
-  await assertNoAlternateProjectConfig(root, role);
-  await assertProjectConfigIsolation(root, role);
+  await assertNoAlternateProjectConfig(root, profile);
+  await assertProjectConfigIsolation(root, profile);
 }
 
 /**
@@ -713,8 +925,8 @@ export async function assertOpenCodeConfigurationIntegrity(
  * to stay disabled, because a session transcript is repository state that the framework did not agree
  * to publish.
  */
-async function assertProjectConfigIsolation(root: string, role: StageRole): Promise<void> {
-  const contents = await readControlledFile(root, OPENCODE_PROJECT_CONFIG_PATH, role);
+async function assertProjectConfigIsolation(root: string, profile: OpenCodeProfile): Promise<void> {
+  const contents = await readControlledFile(root, OPENCODE_PROJECT_CONFIG_PATH, profile);
 
   let parsed: unknown;
 
@@ -727,7 +939,7 @@ async function assertProjectConfigIsolation(root: string, role: StageRole): Prom
         reason: "project_config_changed",
         detail: "The file is not valid JSON, so OpenCode would fall back to its own configuration.",
       },
-      role,
+      profile,
     );
   }
 
@@ -738,7 +950,7 @@ async function assertProjectConfigIsolation(root: string, role: StageRole): Prom
         reason: "project_config_changed",
         detail: "The file is not a JSON object.",
       },
-      role,
+      profile,
     );
   }
 
@@ -747,10 +959,10 @@ async function assertProjectConfigIsolation(root: string, role: StageRole): Prom
   const expectedPlugins = expected["plugins"];
   const plugins = config["plugins"];
 
-  // Checked before the values it shares the file with, because a field that redefines the role is a
+  // Checked before the values it shares the file with, because a field that redefines the profile is a
   // different failure from a field that breaks the plugin directives, and naming the override is more
   // useful than naming the mismatch it happens to also cause.
-  assertNoFrameworkSensitiveConfigFields(config, role);
+  assertNoFrameworkSensitiveConfigFields(config, profile);
 
   if (!Array.isArray(expectedPlugins)) {
     throw new OpenCodeAdapterError(
@@ -766,7 +978,7 @@ async function assertProjectConfigIsolation(root: string, role: StageRole): Prom
         reason: "project_config_changed",
         detail: `The "plugins" list must be exactly ${JSON.stringify(expectedPlugins)}. Anything else either leaves a repository plugin enabled or disables the OpenCode plugins a run cannot work without.`,
       },
-      role,
+      profile,
     );
   }
 
@@ -778,7 +990,7 @@ async function assertProjectConfigIsolation(root: string, role: StageRole): Prom
           reason: "project_config_changed",
           detail: `The "plugins" list must be exactly ${JSON.stringify(expectedPlugins)}, because OpenCode applies the directives in order: entry ${String(index)} is ${JSON.stringify(plugins[index])} rather than ${JSON.stringify(directive)}.`,
         },
-        role,
+        profile,
       );
     }
   }
@@ -790,7 +1002,7 @@ async function assertProjectConfigIsolation(root: string, role: StageRole): Prom
         reason: "project_config_changed",
         detail: `"share" must remain ${JSON.stringify(expected["share"])}. The model, provider, and display fields of this file are the repository's to set; the framework-owned fields listed in the refusal above are not.`,
       },
-      role,
+      profile,
     );
   }
 }

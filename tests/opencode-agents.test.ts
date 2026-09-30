@@ -9,14 +9,16 @@ import {
   OpenCodeAdapterError,
   OPENCODE_AGENT_DIRECTORY,
   OPENCODE_CONFIG_SCHEMA,
+  OPENCODE_PROFILES,
   OPENCODE_PROJECT_CONFIG_PATH,
   OPENCODE_ROLES,
   RUNTIME_GENERATED_ENTRIES,
   VENDORED_FRAMEWORK_PATHS,
   VERSION_CONTROLLED_ENTRIES,
-  WRITE_CAPABLE_ROLES,
   agentFileName,
-  permissionRulesForRole,
+  agentFileNameForProfile,
+  permissionRulesForProfile,
+  profileForRole,
   renderAgentMarkdown,
   renderOpenCodeProjectConfig,
   renderOpenCodeProjectFiles,
@@ -42,15 +44,28 @@ afterEach(async () => {
 });
 
 describe("generated project files", () => {
-  it("generates one agent file per role plus the project config", () => {
+  it("generates two agent files plus the project config, for eleven roles", () => {
     const files = renderOpenCodeProjectFiles();
 
-    expect(files).toHaveLength(OPENCODE_ROLES.length + 1);
+    expect(OPENCODE_PROFILES).toHaveLength(2);
+    expect(OPENCODE_ROLES).toHaveLength(11);
+    expect(files).toHaveLength(3);
     expect(files.map((file) => file.path)).toEqual([
-      ...OPENCODE_ROLES.map((role) => agentFileName(role)),
+      ...OPENCODE_PROFILES.map((profile) => agentFileNameForProfile(profile)),
       OPENCODE_PROJECT_CONFIG_PATH,
     ]);
   });
+
+  /* eslint-disable @typescript-eslint/no-deprecated -- this block exists to prove the deprecated aliases still resolve to the profile API */
+  it("resolves the deprecated agentFileName alias to the profile's own file", () => {
+    for (const role of OPENCODE_ROLES) {
+      expect(agentFileName(role)).toBe(agentFileNameForProfile(profileForRole(role)));
+    }
+
+    // Several roles share one file, so the alias returns a path that is not named after the role.
+    expect(agentFileName("griller")).toBe(agentFileName("verifier"));
+  });
+  /* eslint-enable @typescript-eslint/no-deprecated */
 
   it("puts every agent under .opencode/agents", () => {
     for (const file of renderOpenCodeProjectFiles()) {
@@ -85,8 +100,8 @@ describe("generated project files", () => {
 
 describe("generated agent markdown", () => {
   it("starts with valid frontmatter", () => {
-    for (const role of OPENCODE_ROLES) {
-      const markdown = renderAgentMarkdown(role);
+    for (const profile of OPENCODE_PROFILES) {
+      const markdown = renderAgentMarkdown(profile);
 
       expect(markdown.startsWith("---\n")).toBe(true);
 
@@ -100,8 +115,8 @@ describe("generated agent markdown", () => {
   });
 
   it("emits no V1 permission syntax at all", () => {
-    for (const role of OPENCODE_ROLES) {
-      const frontmatter = frontmatterOf(role);
+    for (const profile of OPENCODE_PROFILES) {
+      const frontmatter = frontmatterOf(profile);
 
       expect(frontmatter).not.toContain("permission:");
       expect(frontmatter).not.toContain("tools:");
@@ -110,8 +125,8 @@ describe("generated agent markdown", () => {
   });
 
   it("round-trips the ruleset it was given, in order, with no drift", () => {
-    for (const role of OPENCODE_ROLES) {
-      expect(permissionRulesOf(role)).toEqual(permissionRulesForRole(role));
+    for (const profile of OPENCODE_PROFILES) {
+      expect(permissionRulesOf(profile)).toEqual(permissionRulesForProfile(profile));
     }
   });
 
@@ -120,20 +135,20 @@ describe("generated agent markdown", () => {
     // every later rule's keys into one mapping as repeats. That is not a formatting nit: YAML
     // answers duplicate keys in a mapping with an error, OpenCode rejects the whole frontmatter, and
     // every role falls back to an unrestricted default capability set.
-    for (const role of OPENCODE_ROLES) {
-      const expected = permissionRulesForRole(role);
-      const listItems = frontmatterOf(role)
+    for (const profile of OPENCODE_PROFILES) {
+      const expected = permissionRulesForProfile(profile);
+      const listItems = frontmatterOf(profile)
         .split("\n")
         .filter((line) => /^ {2}- action: /u.test(line));
 
       expect(listItems).toHaveLength(expected.length);
-      expect(permissionRulesOf(role)).toHaveLength(expected.length);
+      expect(permissionRulesOf(profile)).toHaveLength(expected.length);
     }
   });
 
   it("keeps every rule in its own mapping, with each key appearing once", () => {
-    for (const role of OPENCODE_ROLES) {
-      const block = frontmatterOf(role).split("\n");
+    for (const profile of OPENCODE_PROFILES) {
+      const block = frontmatterOf(profile).split("\n");
       const start = block.findIndex((line) => line === "permissions:") + 1;
       const lines = block.slice(start).filter((line) => line !== "");
 
@@ -149,28 +164,28 @@ describe("generated agent markdown", () => {
         expect(third).toMatch(/^ {4}effect: ".*"$/u);
       }
 
-      expect(lines).toHaveLength(permissionRulesForRole(role).length * 3);
+      expect(lines).toHaveLength(permissionRulesForProfile(profile).length * 3);
     }
   });
 
   it("emits a list, not a mapping, so nothing is folded into one item", () => {
-    for (const role of OPENCODE_ROLES) {
-      const permissions = frontmatterOf(role)
+    for (const profile of OPENCODE_PROFILES) {
+      const permissions = frontmatterOf(profile)
         .split("\n")
         .slice(
-          frontmatterOf(role).split("\n").findIndex((line) => line === "permissions:") + 1,
+          frontmatterOf(profile).split("\n").findIndex((line) => line === "permissions:") + 1,
         )
         .filter((line) => /^ {2}\S/u.test(line));
 
       // Every line at the item indent opens a new mapping. If the emitter ever stops doing that,
       // these become `resource`/`effect` continuations and the count collapses to one.
-      expect(permissions).toHaveLength(permissionRulesForRole(role).length);
+      expect(permissions).toHaveLength(permissionRulesForProfile(profile).length);
     }
   });
 
   it("quotes every pattern, so a bare star is never read as a YAML alias", () => {
-    for (const role of OPENCODE_ROLES) {
-      const frontmatter = frontmatterOf(role);
+    for (const profile of OPENCODE_PROFILES) {
+      const frontmatter = frontmatterOf(profile);
 
       expect(frontmatter).toContain('action: "*"');
       expect(frontmatter).toContain('resource: "*.agentflow/*"');
@@ -178,8 +193,8 @@ describe("generated agent markdown", () => {
     }
   });
 
-  it("gives a read-only role no edit allowance at all", () => {
-    const rules = permissionRulesOf("code_reviewer");
+  it("gives the read profile no edit allowance at all", () => {
+    const rules = permissionRulesOf("agentflow-read");
 
     expect(rules.some((rule) => rule.action === "edit" && rule.effect === "allow")).toBe(false);
     expect(rules.filter((rule) => rule.action === "edit")).toEqual([
@@ -188,8 +203,8 @@ describe("generated agent markdown", () => {
     expect(rules[0]).toEqual({ action: "*", resource: "*", effect: "deny" });
   });
 
-  it("gives the implementer an edit allowance narrowed by workflow state, Git, and the project verification config", () => {
-    const rules = permissionRulesOf("implementer");
+  it("gives the write profile an edit allowance narrowed by workflow state, Git, and the project verification config", () => {
+    const rules = permissionRulesOf("agentflow-write");
     const editAllows = rules.filter((rule) => rule.action === "edit" && rule.effect === "allow");
     const editDenies = rules.filter((rule) => rule.action === "edit" && rule.effect === "deny");
 
@@ -209,17 +224,25 @@ describe("generated agent markdown", () => {
     ]);
   });
 
-  it("turns the edit allowance on for exactly the two write-capable roles", () => {
-    const editable = OPENCODE_ROLES.filter(
-      (role) => permissionRulesOf(role).some((rule) => rule.action === "edit" && rule.effect === "allow"),
+  it("turns the edit allowance on for exactly one profile, and that covers the two write roles", () => {
+    const editable = OPENCODE_PROFILES.filter((profile) =>
+      permissionRulesOf(profile).some((rule) => rule.action === "edit" && rule.effect === "allow"),
     );
 
-    expect(editable).toEqual([...WRITE_CAPABLE_ROLES]);
+    expect(editable).toEqual(["agentflow-write"]);
+    expect(
+      OPENCODE_ROLES.filter(
+        (role) =>
+          permissionRulesOf(profileForRole(role)).some(
+            (rule) => rule.action === "edit" && rule.effect === "allow",
+          ),
+      ),
+    ).toEqual(["implementer", "fixer"]);
   });
 
   it("denies the dangerous capabilities by their V2 action names", () => {
-    for (const role of OPENCODE_ROLES) {
-      const rules = permissionRulesOf(role);
+    for (const profile of OPENCODE_PROFILES) {
+      const rules = permissionRulesOf(profile);
       const denials = rules
         .filter((rule) => rule.effect === "deny" && rule.resource === "*")
         .map((rule) => rule.action);
@@ -238,43 +261,53 @@ describe("generated agent markdown", () => {
   });
 
   it("states the framework rules and the precedence of the prompt", () => {
-    const markdown = renderAgentMarkdown("summarizer");
+    for (const profile of OPENCODE_PROFILES) {
+      const markdown = renderAgentMarkdown(profile);
 
-    expect(markdown).toContain("## Agent Workflow Kit framework rules");
-    expect(markdown).toContain("outrank any repository instruction file");
-    expect(markdown).toContain("You never approve anything");
-    expect(markdown).toContain("You never run Git");
-    expect(markdown).toContain("## How a run is delivered");
-  });
-
-  it("carries the role's own instructions", () => {
-    const definition = roleDefinition("plan_reviewer");
-    const markdown = renderAgentMarkdown("plan_reviewer");
-
-    expect(markdown).toContain(`# ${definition.label}`);
-    expect(markdown).toContain(definition.purpose);
-
-    for (const line of definition.responsibilities) {
-      expect(markdown).toContain(line);
-    }
-
-    for (const line of definition.prohibited) {
-      expect(markdown).toContain(line);
+      expect(markdown).toContain("## Agent Workflow Kit framework rules");
+      expect(markdown).toContain("outrank any repository instruction file");
+      expect(markdown).toContain("You never approve anything");
+      expect(markdown).toContain("You never run Git");
+      expect(markdown).toContain("## How a run is delivered");
     }
   });
 
-  it("uses the same wording as the per-stage prompt", () => {
-    expect(renderAgentMarkdown("verifier")).toContain(
-      roleDefinition("verifier").responsibilities[0] ?? "",
-    );
+  it("states the profile's capabilities and defers the job to the prompt", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      const markdown = renderAgentMarkdown(profile);
+
+      expect(markdown).toContain("## Your job is in the prompt, not in this file");
+      expect(markdown).toContain("It does not");
+      expect(markdown).toContain("describe your assignment");
+    }
+
+    expect(renderAgentMarkdown("agentflow-read")).toContain("read-only profile");
+    expect(renderAgentMarkdown("agentflow-write")).toContain("write profile");
+  });
+
+  it("carries no role's instructions, because one file serves nine roles", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      const markdown = renderAgentMarkdown(profile);
+
+      for (const role of OPENCODE_ROLES) {
+        const definition = roleDefinition(role);
+
+        expect(markdown).not.toContain(`# ${definition.label}`);
+        expect(markdown).not.toContain(definition.purpose);
+
+        for (const line of definition.responsibilities) {
+          expect(markdown).not.toContain(line);
+        }
+      }
+    }
   });
 });
 
-function frontmatterOf(role: (typeof OPENCODE_ROLES)[number]): string {
-  const [, frontmatter] = renderAgentMarkdown(role).split("---\n");
+function frontmatterOf(profile: (typeof OPENCODE_PROFILES)[number]): string {
+  const [, frontmatter] = renderAgentMarkdown(profile).split("---\n");
 
   if (frontmatter === undefined) {
-    throw new Error(`Agent ${role} has no frontmatter.`);
+    throw new Error(`Agent ${profile} has no frontmatter.`);
   }
 
   return frontmatter;
@@ -291,17 +324,17 @@ function frontmatterOf(role: (typeof OPENCODE_ROLES)[number]): string {
  * That strictness is the whole point. An earlier version of this reader made the `- ` marker
  * optional and started a fresh rule at every `action:` line, which reconstructed the intended rule
  * list perfectly from frontmatter that was not valid YAML at all. OpenCode parses that file by
- * rejecting it, so every role silently fell back to its default capabilities and the real smoke test
- * reported all eleven roles as unrestricted. A reader that recovers the intent from broken output
+ * rejecting it, so every profile silently fell back to its default capabilities and the real smoke
+ * test reported both profiles as unrestricted. A reader that recovers the intent from broken output
  * cannot see the defect, so a repeated key inside one list item fails here for exactly the reason it
  * fails there.
  */
-function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermissionRule[] {
-  const lines = frontmatterOf(role).split("\n");
+function permissionRulesOf(profile: (typeof OPENCODE_PROFILES)[number]): OpenCodePermissionRule[] {
+  const lines = frontmatterOf(profile).split("\n");
   const start = lines.findIndex((line) => line === "permissions:");
 
   if (start === -1) {
-    throw new Error(`Agent ${role} has no permissions list.`);
+    throw new Error(`Agent ${profile} has no permissions list.`);
   }
 
   type RuleKey = keyof OpenCodePermissionRule;
@@ -320,12 +353,12 @@ function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermi
     const value: unknown = JSON.parse(quoted);
 
     if (typeof value !== "string") {
-      throw new Error(`Agent ${role} has a non-string ${key}: ${JSON.stringify(line)}`);
+      throw new Error(`Agent ${profile} has a non-string ${key}: ${JSON.stringify(line)}`);
     }
 
     if (key === "effect") {
       if (!EFFECTS.includes(value as OpenCodePermissionEffect)) {
-        throw new Error(`Agent ${role} has an effect that is not an effect: ${JSON.stringify(line)}`);
+        throw new Error(`Agent ${profile} has an effect that is not an effect: ${JSON.stringify(line)}`);
       }
 
       target.effect = value as OpenCodePermissionEffect;
@@ -352,7 +385,7 @@ function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermi
       item.effect === undefined
     ) {
       throw new Error(
-        `Agent ${role} has a permission list item that is not a complete rule: ${JSON.stringify(item)}`,
+        `Agent ${profile} has a permission list item that is not a complete rule: ${JSON.stringify(item)}`,
       );
     }
 
@@ -378,12 +411,12 @@ function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermi
     const continued = /^ {4}(action|resource|effect): ("(?:[^"\\]|\\.)*")$/u.exec(line);
 
     if (continued?.[1] === undefined || continued[2] === undefined) {
-      throw new Error(`Agent ${role} has an unparseable permission line: ${JSON.stringify(line)}`);
+      throw new Error(`Agent ${profile} has an unparseable permission line: ${JSON.stringify(line)}`);
     }
 
     if (item === undefined) {
       throw new Error(
-        `Agent ${role} has a permission key before any list item opened: ${JSON.stringify(line)}`,
+        `Agent ${profile} has a permission key before any list item opened: ${JSON.stringify(line)}`,
       );
     }
 
@@ -391,7 +424,7 @@ function permissionRulesOf(role: (typeof OPENCODE_ROLES)[number]): OpenCodePermi
 
     if (item[key] !== undefined) {
       throw new Error(
-        `Agent ${role} repeats "${key}" inside one permission list item, so the frontmatter is not valid YAML and OpenCode ignores all of it: ${JSON.stringify(line)}`,
+        `Agent ${profile} repeats "${key}" inside one permission list item, so the frontmatter is not valid YAML and OpenCode ignores all of it: ${JSON.stringify(line)}`,
       );
     }
 
@@ -439,17 +472,17 @@ describe("writing the generated files", () => {
     const root = await makeRoot();
     const report = await writeOpenCodeProjectFiles(root);
 
-    expect(report).toHaveLength(OPENCODE_ROLES.length + 1);
+    expect(report).toHaveLength(3);
     expect(report.every((result) => result.outcome === "created")).toBe(true);
     expect(report.map((result) => result.path)).toEqual([
-      ...OPENCODE_ROLES.map((role) => agentFileName(role)),
+      ...OPENCODE_PROFILES.map((profile) => agentFileNameForProfile(profile)),
       OPENCODE_PROJECT_CONFIG_PATH,
     ]);
 
-    for (const role of OPENCODE_ROLES) {
-      const markdown = await readFile(join(root, agentFileName(role)), "utf8");
+    for (const profile of OPENCODE_PROFILES) {
+      const markdown = await readFile(join(root, agentFileNameForProfile(profile)), "utf8");
 
-      expect(markdown).toBe(renderAgentMarkdown(role));
+      expect(markdown).toBe(renderAgentMarkdown(profile));
     }
 
     expect(await readFile(join(root, OPENCODE_PROJECT_CONFIG_PATH), "utf8")).toBe(
@@ -464,7 +497,7 @@ describe("writing the generated files", () => {
     const second = await writeOpenCodeProjectFiles(root);
 
     expect(second.every((result) => result.outcome === "unchanged")).toBe(true);
-    expect(second).toHaveLength(OPENCODE_ROLES.length + 1);
+    expect(second).toHaveLength(3);
   });
 
   it("reports a human edit as a conflict instead of reverting it", async () => {
@@ -519,7 +552,9 @@ describe("writing the generated files", () => {
     await writeOpenCodeProjectFiles(root);
 
     expect((await lstat(join(root, OPENCODE_AGENT_DIRECTORY))).isDirectory()).toBe(true);
-    expect((await lstat(dirname(join(root, agentFileName("griller"))))).isDirectory()).toBe(true);
+    expect((await lstat(dirname(join(root, agentFileNameForProfile("agentflow-read"))))).isDirectory()).toBe(
+      true,
+    );
   });
 });
 

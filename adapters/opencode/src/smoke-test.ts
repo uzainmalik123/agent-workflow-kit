@@ -1,26 +1,37 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { STAGE_ROLES, type StageRole } from "@agent-workflow-kit/orchestration";
-import { writeOpenCodeProjectFiles } from "./agents.js";
+import {
+  OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE,
+  createOpenCodeRuntimeConfig,
+  removeOpenCodeRuntimeConfig,
+} from "./runtime-config.js";
 import { DEFAULT_OPENCODE_COMMAND } from "./cli-transport.js";
 import {
   probeOpenCodeCapabilities,
   type OpenCodeCapabilities,
   type ProbeOpenCodeCapabilitiesOptions,
 } from "./capabilities.js";
+import {
+  buildStageRunEnvironment,
+  OPENCODE_SMOKE_TEST_FORCED_ENVIRONMENT,
+} from "./environment.js";
 import { effectFor, type OpenCodePermissionRuleset } from "./permissions.js";
 import { runProcess } from "./process.js";
-import { agentForRole, isWriteCapableRole } from "./roles.js";
+import { OPENCODE_PROFILES, agentForProfile, isWriteCapableProfile, type OpenCodeProfile } from "./roles.js";
 
 /**
  * An optional, local, no-model check that the generated files are actually valid OpenCode V2
  * configuration.
  *
  * It writes the generated files into a temporary directory, asks the installed binary to report the
- * agents it discovered there with `opencode debug agents`, and checks that a read-only agent is denied
- * editing and shell access while a write-capable agent is not. It never runs `opencode run`, so it
+ * agents it discovered there with `opencode debug agents`, and checks that `agentflow-read` is denied
+ * editing and shell access while `agentflow-write` is not. It never runs `opencode run`, so it
  * calls no model and needs no network.
+ *
+ * It checks the two profiles rather than the eleven roles, because the two profiles are the only
+ * things OpenCode resolves. Every role is covered by the profile it runs under, and a distinct
+ * permission decision per role is exactly what this change removed.
  *
  * The listing is polled until it accounts for every generated agent, because the first answer from a
  * freshly started background service does not. See {@link readAgentListing} for why that matters and
@@ -35,7 +46,8 @@ import { agentForRole, isWriteCapableRole } from "./roles.js";
  * an environment without OpenCode never fails a build.
  */
 export interface OpenCodeSmokeTestAgentReport {
-  readonly role: StageRole;
+  /** The physical agent, which is also the profile that granted the capabilities under test. */
+  readonly profile: OpenCodeProfile;
   readonly agent: string;
   readonly discovered: boolean;
   /** True when the binary's own output agreed with the generated decision for every check. */
@@ -50,8 +62,16 @@ export interface OpenCodeSmokeTestReport {
   readonly capabilities: OpenCodeCapabilities;
   readonly agents: readonly OpenCodeSmokeTestAgentReport[];
   readonly failures: readonly string[];
-  /** The temporary directory used, when it was kept for inspection. */
+  /** The target directory the binary ran in, when it was kept for inspection. */
   readonly directory: string | null;
+  /**
+   * The framework-owned configuration directory the binary was pointed at, when it was kept.
+   *
+   * Reported separately from {@link directory} because the two are the point of the check: the target
+   * is the process working directory and is expected to stay free of framework-written files, while
+   * this is where the profiles were written.
+   */
+  readonly runtimeConfigDirectory: string | null;
 }
 
 export interface RunOpenCodeConfigSmokeTestOptions {
@@ -100,25 +120,32 @@ export const DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_AGENT_LISTING_POLL_INTERVAL_MS = 500;
 
 /**
- * Environment entries the smoke test forces on every child process.
+ * The environment for one smoke-test child.
  *
- * `OPENCODE_DISABLE_MODELS_FETCH` stops OpenCode fetching the model catalog from models.dev, and
- * `OPENCODE_DISABLE_AUTOUPDATE` stops it checking for a new release. Without them, a configuration
- * check that is supposed to be local and offline would quietly reach the network. They are spread
- * last so a caller cannot switch them off through this API, because "this check never calls out" is
- * a property of the check, not a preference.
+ * It is the same scrub every stage run gets, for the same reason: the listing this check reads is the
+ * listing the generated configuration produces, so an inherited `OPENCODE_CONFIG` would have the probe
+ * validate somebody else's file. The forced offline entries are applied after the scrub, which is why
+ * they live in `environment.ts` next to the rule they are exempt from rather than here.
  */
-const FORCED_OFFLINE_ENV: Readonly<Record<string, string>> = {
-  OPENCODE_DISABLE_MODELS_FETCH: "1",
-  OPENCODE_DISABLE_AUTOUPDATE: "1",
-};
-
 function childOptions(
   options: RunOpenCodeConfigSmokeTestOptions | ProbeOpenCodeCapabilitiesOptions,
-): { inheritEnv?: boolean; env: Readonly<Record<string, string>>; signal?: AbortSignal } {
+  runtimeConfigDirectory?: string,
+): { inheritEnv: false; env: Readonly<Record<string, string>>; signal?: AbortSignal } {
   return {
-    ...(options.inheritEnv === undefined ? {} : { inheritEnv: options.inheritEnv }),
-    env: { ...options.env, ...FORCED_OFFLINE_ENV },
+    inheritEnv: false,
+    env: buildStageRunEnvironment({
+      ...(options.inheritEnv === false ? { base: {} } : {}),
+      ...(options.env === undefined ? {} : { overrides: options.env }),
+      forced: {
+        ...OPENCODE_SMOKE_TEST_FORCED_ENVIRONMENT,
+        // After the scrub, for the same reason a stage run forces it: the probe has to read the
+        // listing the framework's own runtime configuration produces, so it cannot be pointed at
+        // somebody else's configuration directory.
+        ...(runtimeConfigDirectory === undefined
+          ? {}
+          : { [OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE]: runtimeConfigDirectory }),
+      },
+    }).env,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
 }
@@ -130,19 +157,19 @@ export interface OpenCodeSmokeTestCheck {
   readonly expected: "allow" | "deny";
 }
 
-function checksForRole(role: StageRole): readonly OpenCodeSmokeTestCheck[] {
+function checksForProfile(profile: OpenCodeProfile): readonly OpenCodeSmokeTestCheck[] {
   const base: readonly OpenCodeSmokeTestCheck[] = [
     { action: "shell", resource: "git status", expected: "deny" },
     { action: "shell", resource: "git commit -m x", expected: "deny" },
     { action: "shell", resource: "git push origin main", expected: "deny" },
-    { action: "subagent", resource: "implementer", expected: "deny" },
+    { action: "subagent", resource: "agentflow-write", expected: "deny" },
     { action: "skill", resource: "anything", expected: "deny" },
     { action: "read", resource: "src/app.ts", expected: "allow" },
     { action: "read", resource: ".agentflow/session.json", expected: "deny" },
     { action: "read", resource: ".git/config", expected: "deny" },
   ];
 
-  const edit: readonly OpenCodeSmokeTestCheck[] = isWriteCapableRole(role)
+  const edit: readonly OpenCodeSmokeTestCheck[] = isWriteCapableProfile(profile)
     ? [
         { action: "edit", resource: "src/app.ts", expected: "allow" },
         { action: "edit", resource: ".agentflow/session.json", expected: "deny" },
@@ -266,6 +293,7 @@ async function readAgentListingOnce(
   command: string,
   directory: string,
   options: RunOpenCodeConfigSmokeTestOptions,
+  runtimeConfigDirectory: string,
 ): Promise<readonly OpenCodeListedAgent[]> {
   let stdout: string;
 
@@ -274,7 +302,7 @@ async function readAgentListingOnce(
       cwd: directory,
       timeoutMs: options.timeoutMs ?? DEFAULT_AGENT_LISTING_TIMEOUT_MS,
       maxOutputBytes: 8_000_000,
-      ...childOptions(options),
+      ...childOptions(options, runtimeConfigDirectory),
       label: "The OpenCode debug agents probe",
     });
 
@@ -325,7 +353,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * no service is running yet the CLI reports the service healthy and asks it for the agent list before
  * that service has loaded the directory's configuration. On a real 2.0.18 binary the first call
  * returns an empty array, and an immediate second call returns only the built-in agents; the
- * generated ones appear a moment later. Reading the first answer would report all eleven roles as
+ * generated ones appear a moment later. Reading the first answer would report both profiles as
  * missing, which is a statement about the service's start-up rather than about the generated
  * configuration.
  *
@@ -339,6 +367,7 @@ async function readAgentListing(
   directory: string,
   expected: readonly string[],
   options: RunOpenCodeConfigSmokeTestOptions,
+  runtimeConfigDirectory: string,
 ): Promise<readonly OpenCodeListedAgent[]> {
   const deadline = Date.now() + (options.readyTimeoutMs ?? DEFAULT_AGENT_LISTING_READY_TIMEOUT_MS);
   const seen = new Set(expected);
@@ -347,7 +376,7 @@ async function readAgentListing(
 
   for (;;) {
     try {
-      const listed = await readAgentListingOnce(command, directory, options);
+      const listed = await readAgentListingOnce(command, directory, options, runtimeConfigDirectory);
 
       last = listed;
 
@@ -412,18 +441,39 @@ export async function runOpenCodeConfigSmokeTest(
   const command = options?.command ?? DEFAULT_OPENCODE_COMMAND;
   const directory = await mkdtemp(join(tmpdir(), "agentflow-opencode-smoke-"));
 
+  // The runtime configuration is a second directory outside the one the binary runs in, so it is
+  // cleaned up separately. `keepDirectory` reports the target directory, which is the one a report
+  // reader would want to inspect; the runtime directory is named in the report as well so it can be
+  // kept deliberately.
+  let runtimeConfigDirectory: string | null = null;
+
+  // The kept counterpart of `directory`, so a report can name where the profiles actually went.
+  let keptRuntime: string | null = null;
+
   const cleanup = async (): Promise<string | null> => {
     if (options?.keepDirectory === true) {
+      keptRuntime = runtimeConfigDirectory;
+
       return directory;
     }
 
     await rm(directory, { recursive: true, force: true });
 
+    if (runtimeConfigDirectory !== null) {
+      await removeOpenCodeRuntimeConfig(runtimeConfigDirectory);
+    }
+
     return null;
   };
 
   try {
-    await writeOpenCodeProjectFiles(directory);
+    // The framework's configuration is written outside the directory the binary runs in, and the
+    // binary runs in the target directory. That is the arrangement a stage run has, so this is the
+    // arrangement worth validating: if the two were ever the same directory again, this probe would
+    // no longer be proving what a stage run depends on.
+    const runtimeConfig = await createOpenCodeRuntimeConfig(directory, { fresh: true });
+
+    runtimeConfigDirectory = runtimeConfig.directory;
 
     const capabilities = await probeOpenCodeCapabilities({
       command,
@@ -441,6 +491,7 @@ export async function runOpenCodeConfigSmokeTest(
         agents: [],
         failures: [],
         directory: kept,
+        runtimeConfigDirectory: keptRuntime,
       };
     }
 
@@ -457,6 +508,7 @@ export async function runOpenCodeConfigSmokeTest(
         agents: [],
         failures: [],
         directory: kept,
+        runtimeConfigDirectory: keptRuntime,
       };
     }
 
@@ -473,6 +525,7 @@ export async function runOpenCodeConfigSmokeTest(
         agents: [],
         failures: [],
         directory: kept,
+        runtimeConfigDirectory: keptRuntime,
       };
     }
 
@@ -484,16 +537,17 @@ export async function runOpenCodeConfigSmokeTest(
       listed = await readAgentListing(
         command,
         directory,
-        STAGE_ROLES.map((role) => agentForRole(role)),
+        OPENCODE_PROFILES.map((profile) => agentForProfile(profile)),
         options ?? {},
+        runtimeConfig.directory,
       );
     } catch (error) {
       failures.push(error instanceof Error ? error.message : "the agent listing could not be read");
     }
 
-    for (const role of STAGE_ROLES) {
-      const agent = agentForRole(role);
-      const checks = checksForRole(role);
+    for (const profile of OPENCODE_PROFILES) {
+      const agent = agentForProfile(profile);
+      const checks = checksForProfile(profile);
       const agentFailures: string[] = [];
       const entry = listed?.find((candidate) => candidate.id === agent);
       const discovered = entry !== undefined;
@@ -514,12 +568,12 @@ export async function runOpenCodeConfigSmokeTest(
       }
 
       failures.push(...agentFailures.map((failure) => `${agent}: ${failure}`));
-      agents.push({ role, agent, discovered, verified, failures: agentFailures });
+      agents.push({ profile, agent, discovered, verified, failures: agentFailures });
     }
 
     const kept = await cleanup();
 
-    const unverified = agents.filter((agent) => agent.verified !== true);
+    const unverified = agents.filter((entry) => entry.verified !== true);
 
     return {
       status: failures.length === 0 ? "passed" : "failed",
@@ -533,6 +587,7 @@ export async function runOpenCodeConfigSmokeTest(
       agents,
       failures,
       directory: kept,
+      runtimeConfigDirectory: keptRuntime,
     };
   } catch (error) {
     const kept = await cleanup();
@@ -544,6 +599,7 @@ export async function runOpenCodeConfigSmokeTest(
       agents: [],
       failures: [],
       directory: kept,
+      runtimeConfigDirectory: keptRuntime,
     };
   }
 }
@@ -554,7 +610,7 @@ export function describeSmokeTest(report: OpenCodeSmokeTestReport): string {
     return `OpenCode configuration smoke test skipped: ${report.reason ?? "no reason recorded"}`;
   }
 
-  const verified = report.agents.filter((agent) => agent.verified === true).length;
+  const verified = report.agents.filter((entry) => entry.verified === true).length;
 
   return [
     `OpenCode configuration smoke test ${report.status}:`,

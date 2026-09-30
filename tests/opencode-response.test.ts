@@ -9,6 +9,7 @@ import {
   parseStageResponse,
 } from "@agent-workflow-kit/opencode";
 import { describe, expect, it } from "vitest";
+import { testWorkspaceContext } from "../fixtures/workspace.js";
 
 const created = "2026-04-05T06:07:08.000Z";
 
@@ -30,6 +31,7 @@ function requestFor(stage: StageExecutionRequest["stage"]): StageExecutionReques
     context: [],
     outputs: definition.outputs,
     fixReturnState: null,
+    workspace: testWorkspaceContext(),
   };
 }
 

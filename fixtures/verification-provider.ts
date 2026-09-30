@@ -66,6 +66,7 @@ export function passingEvidenceFor(
     controlPlane: { before: FINGERPRINT, after: FINGERPRINT, changed: false },
     collectedAt: "2026-04-05T06:07:08.000Z",
     projectRoot: request.projectRoot,
+    workspaceId: request.workspaceId,
     project: profileSummary(),
     checks: [],
     ...overrides,

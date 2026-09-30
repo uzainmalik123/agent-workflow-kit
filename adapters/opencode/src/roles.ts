@@ -7,16 +7,34 @@ import { STAGE_DEFINITIONS, STAGE_ROLES, WORK_STAGES } from "@agent-workflow-kit
  */
 export type OpenCodeAccessLevel = "read_only" | "write_capable";
 
+/**
+ * The physical OpenCode agents this adapter generates. There are exactly two.
+ *
+ * A role decides *what job* a stage run does. A profile decides *what capabilities* the model is
+ * given while it does it. Those are independent, so one profile serves every role that needs the
+ * same capabilities: the eleven roles collapse onto two agents because the only capability
+ * difference between them is whether project files may be edited.
+ *
+ * The consequence that matters is that a role's identity is no longer an OpenCode agent id. It is
+ * carried entirely by the stage prompt, which names the stage, the role, and the routed context.
+ * Nothing is lost, and no two roles can be confused for one another, because the profile is never
+ * asked to know which role it is playing.
+ */
+export const OPENCODE_PROFILES = ["agentflow-read", "agentflow-write"] as const;
+
+export type OpenCodeProfile = (typeof OPENCODE_PROFILES)[number];
+
+const PROFILE_BY_ACCESS: Readonly<Record<OpenCodeAccessLevel, OpenCodeProfile>> = {
+  read_only: "agentflow-read",
+  write_capable: "agentflow-write",
+};
+
 export interface OpenCodeRoleDefinition {
   /** The orchestration contract this agent implements. */
   readonly role: StageRole;
-  /** The OpenCode agent id, which is also the generated file stem. */
-  readonly agent: string;
-  /** Repository-relative path of the generated agent file. */
-  readonly filename: string;
   readonly access: OpenCodeAccessLevel;
   readonly label: string;
-  /** One line, used as the OpenCode agent description. */
+  /** One line describing what this role is for. */
   readonly description: string;
   readonly purpose: string;
   readonly responsibilities: readonly string[];
@@ -47,8 +65,6 @@ function agentFile(agent: string): string {
 const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   griller: {
     role: "griller",
-    agent: "griller",
-    filename: agentFile("griller"),
     access: "read_only",
     label: "Griller",
     description:
@@ -77,8 +93,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   planner: {
     role: "planner",
-    agent: "planner",
-    filename: agentFile("planner"),
     access: "read_only",
     label: "Planner",
     description: "Produces the structured plan that every later stage is measured against.",
@@ -103,8 +117,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   plan_reviewer: {
     role: "plan_reviewer",
-    agent: "plan-reviewer",
-    filename: agentFile("plan-reviewer"),
     access: "read_only",
     label: "Plan reviewer",
     description:
@@ -131,8 +143,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   implementer: {
     role: "implementer",
-    agent: "implementer",
-    filename: agentFile("implementer"),
     access: "write_capable",
     label: "Implementer",
     description: "Implements the approved plan exactly, within the approved file scope.",
@@ -158,8 +168,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   code_reviewer: {
     role: "code_reviewer",
-    agent: "code-reviewer",
-    filename: agentFile("code-reviewer"),
     access: "read_only",
     label: "Code reviewer",
     description: "Independent read-only review of the implementation for correctness and shortcuts.",
@@ -185,8 +193,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   scope_reviewer: {
     role: "scope_reviewer",
-    agent: "scope-reviewer",
-    filename: agentFile("scope-reviewer"),
     access: "read_only",
     label: "Scope reviewer",
     description: "Compares what was actually changed against the approved plan's declared scope.",
@@ -210,8 +216,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   verifier: {
     role: "verifier",
-    agent: "verifier",
-    filename: agentFile("verifier"),
     access: "read_only",
     label: "Verifier",
     description:
@@ -241,8 +245,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   fixer: {
     role: "fixer",
-    agent: "fixer",
-    filename: agentFile("fixer"),
     access: "write_capable",
     label: "Fixer",
     description: "Repairs one reported finding, and nothing else.",
@@ -267,8 +269,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   security_reviewer: {
     role: "security_reviewer",
-    agent: "security-reviewer",
-    filename: agentFile("security-reviewer"),
     access: "read_only",
     label: "Security reviewer",
     description: "Read-only review of the changed code for obvious security problems.",
@@ -292,8 +292,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   final_gate_reviewer: {
     role: "final_gate_reviewer",
-    agent: "final-gate-reviewer",
-    filename: agentFile("final-gate-reviewer"),
     access: "read_only",
     label: "Final gate reviewer",
     description: "Checks that the recorded evidence is internally consistent and nothing is still blocking.",
@@ -317,8 +315,6 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
   },
   summarizer: {
     role: "summarizer",
-    agent: "summarizer",
-    filename: agentFile("summarizer"),
     access: "read_only",
     label: "Summarizer",
     description: "Writes the human-facing final summary from the persisted workflow artifacts only.",
@@ -361,38 +357,60 @@ export function accessForRole(role: StageRole): OpenCodeAccessLevel {
   return ROLE_DEFINITIONS[role].access;
 }
 
-export function agentForRole(role: StageRole): string {
-  return ROLE_DEFINITIONS[role].agent;
+export function isOpenCodeProfile(value: unknown): value is OpenCodeProfile {
+  return typeof value === "string" && (OPENCODE_PROFILES as readonly string[]).includes(value);
 }
 
-export function roleForAgent(agent: string): StageRole | undefined {
-  const match = Object.values(ROLE_DEFINITIONS).find((entry) => entry.agent === agent);
+/** The single physical OpenCode agent a role runs as. */
+export function profileForRole(role: StageRole): OpenCodeProfile {
+  return PROFILE_BY_ACCESS[ROLE_DEFINITIONS[role].access];
+}
 
-  return match?.role;
+export function isWriteCapableProfile(profile: OpenCodeProfile): boolean {
+  return profile === "agentflow-write";
+}
+
+/** The physical OpenCode agent id, which is also the generated file stem. */
+export function agentForProfile(profile: OpenCodeProfile): string {
+  return profile;
+}
+
+/** Repository-relative path of a profile's generated agent file. */
+export function agentFileNameForProfile(profile: OpenCodeProfile): string {
+  return agentFile(agentForProfile(profile));
+}
+
+/** Every role that runs as one physical agent. */
+export function rolesForProfile(profile: OpenCodeProfile): readonly StageRole[] {
+  return STAGE_ROLES.filter((role) => profileForRole(role) === profile);
+}
+
+export function profileForAgent(agent: string): OpenCodeProfile | undefined {
+  return isOpenCodeProfile(agent) ? agent : undefined;
 }
 
 /**
- * The stage-to-agent map the adapter actually invokes. It is written out explicitly so a drift
+ * The stage-to-profile map the adapter actually invokes. It is written out explicitly so a drift
  * from the orchestrator's own stage definitions is a failing test rather than a silent mismatch.
  */
-export const AGENT_BY_STAGE: Readonly<Record<WorkStage, string>> = {
-  grill: "griller",
-  planning: "planner",
-  plan_review: "plan-reviewer",
-  implementation: "implementer",
-  code_review: "code-reviewer",
-  scope_review: "scope-reviewer",
-  static_verification: "verifier",
-  test_verification: "verifier",
-  runtime_verification: "verifier",
-  fixing: "fixer",
-  security_review: "security-reviewer",
-  final_gate: "final-gate-reviewer",
-  final_summary: "summarizer",
+export const PROFILE_BY_STAGE: Readonly<Record<WorkStage, OpenCodeProfile>> = {
+  grill: "agentflow-read",
+  planning: "agentflow-read",
+  plan_review: "agentflow-read",
+  implementation: "agentflow-write",
+  code_review: "agentflow-read",
+  scope_review: "agentflow-read",
+  static_verification: "agentflow-read",
+  test_verification: "agentflow-read",
+  runtime_verification: "agentflow-read",
+  fixing: "agentflow-write",
+  security_review: "agentflow-read",
+  final_gate: "agentflow-read",
+  final_summary: "agentflow-read",
 };
 
-export function agentForStage(stage: WorkStage): string {
-  return AGENT_BY_STAGE[stage];
+export function profileForStage(stage: WorkStage): OpenCodeProfile {
+  return PROFILE_BY_STAGE[stage];
 }
 
 export function roleForStage(stage: WorkStage): StageRole {
@@ -401,4 +419,27 @@ export function roleForStage(stage: WorkStage): StageRole {
 
 export function stagesForRole(role: StageRole): readonly WorkStage[] {
   return WORK_STAGES.filter((stage) => STAGE_DEFINITIONS[stage].role === role);
+}
+
+/**
+ * @deprecated Use {@link PROFILE_BY_STAGE}. Eleven stages now share two physical agents, so this
+ * map holds profile ids. It is kept as a name for the same data while the role-keyed surface is
+ * still in use.
+ */
+export const AGENT_BY_STAGE: Readonly<Record<WorkStage, string>> = PROFILE_BY_STAGE;
+
+/**
+ * @deprecated Use {@link profileForRole}. The returned id is the role's shared profile agent, not
+ * an agent of its own.
+ */
+export function agentForRole(role: StageRole): OpenCodeProfile {
+  return profileForRole(role);
+}
+
+/**
+ * @deprecated Use {@link profileForStage}. The returned id is the stage's shared profile agent, not
+ * an agent of its own.
+ */
+export function agentForStage(stage: WorkStage): OpenCodeProfile {
+  return profileForStage(stage);
 }

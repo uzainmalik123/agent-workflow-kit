@@ -219,6 +219,45 @@ Every stage that runs after the approval (`implementation` and everything downst
 
 A rejected approval never runs a stage, never stores a result, and leaves the checkpoint untouched: the orchestrator never re-approves on the caller's behalf. A human must approve again, which is only reachable by driving the feature back through the gate.
 
+## Workspace isolation
+
+The orchestrator owns the policy and never touches a filesystem path itself. A `ProjectWorkspaceProvider`, supplied at construction and optional, is the only thing that may create, read, or clean up a working tree.
+
+```ts
+const orchestrator = createWorkflowOrchestrator({ store, executor, workspace });
+```
+
+`workspace` absent means the orchestrator runs every stage against `projectRoot` and records scope evidence with `measured: false`, so "nobody looked" can never be read as "nothing changed".
+
+A stage is either pre- or post-approval, and the difference is not a flag the executor can influence:
+
+| stage | directory | access | `baseline` |
+| --- | --- | --- | --- |
+| `grill`, `planning`, `plan_review` | the human's checkout | `read_only` | `null` |
+| everything after the plan gate | a worktree at the approved commit | `read_write` | the approved baseline |
+
+`StageExecutionRequest.workspace` carries all of it, and the executor is given a directory to work in rather than being asked to find one.
+
+**Before approval.** The orchestrator inspects the human's tree before and after each pre-approval stage and refuses a write. It reports the delta and changes nothing: the framework cannot attribute a difference to itself when it did not cause it, and reverting a human's unsaved work is worse than recording that a stage tried.
+
+**At the gate.** `approvePlan` captures the baseline, and refuses on uncommitted tracked work with `workspace_dirty_baseline`, naming the paths. The provider's verdict is not the authority on that: a capture that claims a clean tree while listing dirty paths, or a dirty tree with no paths, is refused too, because both mean the answer cannot be relied on. Nothing is stashed, reset, or committed to get past it. The baseline is frozen in the same mutation that applies `approve_plan`, and carries the `workspaceId`, the full 40-character commit, and the session revision that approved it.
+
+**After approval.** Before the executor is called, the framework reads the change set and decides authorization itself: a path is allowed only if the approved plan named a pattern that matches it, and `.git`, `.agentflow`, `.opencode`, `opencode.json(c)`, and the root `agent-workflow.config.json(c)` are refused regardless of what a pattern says. The exact unauthorized set goes to the adapter, which restores each path from the approved commit or deletes it, and reports what it actually achieved.
+
+| the stage's effect | result |
+| --- | --- |
+| every change inside the approved scope | `stage_completed`, scope evidence recorded |
+| a path outside it, reversed cleanly | `scope_violation`, the stage's result discarded, `restoredPaths` / `removedPaths` naming what was reversed |
+| a path the adapter could not reverse safely | `scope_violation`, `unsafePaths` naming it, result discarded |
+| `HEAD` moved, or anything staged | `rejected` with `repository_state_changed` and nothing touched |
+| the workspace could not be opened or read | `rejected` with `workspace_unavailable` |
+
+A moved `HEAD` is deliberately not a scope violation. It is a commit a stage made that nobody approved, and reporting it as a path problem would send a reader looking for the wrong evidence.
+
+The workspace is opened once per stage and closed when the stage ends, including when the executor throws, because that is when a half-written worktree is most likely. `close` releases the provider's lease; it never removes the worktree, so a failed stage leaves its work on disk for a human to read and the next run of the feature to find. The orchestrator closes only a workspace it opened itself: closing the human's own checkout would be a request to tidy up files it does not own.
+
+Every post-approval stage records a `WorkspaceScopeEvidence` alongside the result: the approved commit and patterns, every observed path, every unauthorized path, what was restored, removed, or left unsafe, the staged paths, the `HEAD`, and a fingerprint of the tree. It is evidence of what the framework saw, not an approval, and `measured` is there so an unmeasured record cannot pass for a clean one.
+
 ## Result contract
 
 `OrchestrationResult` always reports `status`, `failureClass`, `fromState`, `state`, `committed`, `executedStages` (0 or 1), `stage`, `role`, `event`, `artifacts`, `action`, `fixReturnState`, `findings`, `evidence`, and `error`.
@@ -270,6 +309,6 @@ Artifacts are written before the transition, so durable state never claims progr
 
 ## Deferred
 
-No AI model, OpenCode, Freebuff, Git operation, or third-party skill is used or simulated. A project command is run, but not by this package: it is run by a `VerificationProvider` implementation outside the orchestrator, and the orchestrator only collects, validates, enforces, and records the result. `runUntilBlocked()` is deliberately not implemented: it belongs on top of `runNext` once the one-stage guarantee is trusted in production use.
+No AI model, OpenCode, Freebuff, or third-party skill is used or simulated. A project command is run, but not by this package: it is run by a `VerificationProvider` implementation outside the orchestrator, and the orchestrator only collects, validates, enforces, and records the result. Git is likewise not run by this package: worktrees, leases, and restoration belong to a `ProjectWorkspaceProvider` outside it, and the orchestrator only decides, requests, and records. `runUntilBlocked()` is deliberately not implemented: it belongs on top of `runNext` once the one-stage guarantee is trusted in production use.
 
 A lock is a directory created with an exclusive `mkdir` plus an owner record carrying a token, the owner `pid`, and the host, so a lock left behind by a dead process on this machine can be taken over without any age-based guesswork. It is deliberately **not** a distributed lock: it serializes writers on one machine, a lock held by another host is respected rather than reclaimed, and cross-machine coordination is the caller's problem to solve.

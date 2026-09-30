@@ -5,6 +5,7 @@ import {
   createFeatureSessionStore,
   FeatureSessionStore,
   PersistenceError,
+  FEATURE_SESSION_SCHEMA_VERSION,
 } from "@agent-workflow-kit/persistence";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -68,7 +69,7 @@ describe("feature session revisions", () => {
     const session = await store.load("F-001");
 
     expect(session.revision).toBe(0);
-    expect(session.schemaVersion).toBe(2);
+    expect(session.schemaVersion).toBe(FEATURE_SESSION_SCHEMA_VERSION);
     expect(session.approvals).toEqual({ plan: null });
   });
 
@@ -77,7 +78,7 @@ describe("feature session revisions", () => {
     const session = await store.load("F-001");
 
     expect(session.revision).toBe(1);
-    expect(session.schemaVersion).toBe(2);
+    expect(session.schemaVersion).toBe(FEATURE_SESSION_SCHEMA_VERSION);
     expect(session.approvals).toEqual({ plan: null });
   });
 
