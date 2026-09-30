@@ -18,6 +18,12 @@ export type OrchestrationErrorCode =
   | "artifacts_not_allowed"
   | "illegal_needs_fix"
   | "illegal_transition"
+  | "fix_attempts_exhausted"
+  | "fix_protected_file_touched"
+  | "fix_check_removed"
+  | "fix_target_modified"
+  | "fix_verification_config_modified"
+  | "fix_outside_approved_scope"
   | "missing_context_artifact"
   | "unmergeable_artifact"
   | "inconsistent_fix_state"
@@ -29,6 +35,7 @@ export type OrchestrationErrorCode =
   | "verification_provider_failed"
   | "verification_evidence_invalid"
   | "verification_evidence_mismatch"
+  | "stale_verification_evidence"
   | "workspace_not_configured"
   | "workspace_unavailable"
   | "workspace_baseline_missing"
@@ -65,6 +72,12 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     artifacts_not_allowed: "executor",
     illegal_needs_fix: "workflow",
     illegal_transition: "workflow",
+    fix_attempts_exhausted: "workflow",
+    fix_protected_file_touched: "workflow",
+    fix_check_removed: "workflow",
+    fix_target_modified: "workflow",
+    fix_verification_config_modified: "workflow",
+    fix_outside_approved_scope: "workflow",
     missing_context_artifact: "workflow",
     unmergeable_artifact: "persistence",
     inconsistent_fix_state: "workflow",
@@ -76,6 +89,7 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     verification_provider_failed: "verification",
     verification_evidence_invalid: "verification",
   verification_evidence_mismatch: "verification",
+  stale_verification_evidence: "verification",
   workspace_not_configured: "workspace",
   workspace_unavailable: "workspace",
   workspace_baseline_missing: "workspace",

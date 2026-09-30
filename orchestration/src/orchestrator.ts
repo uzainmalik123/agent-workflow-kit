@@ -1,5 +1,6 @@
 import {
   WorkflowStateMachine,
+  type FixReturnState,
   type ReviewFinding,
   type WorkflowEvent,
   type WorkflowMachineSnapshot,
@@ -16,12 +17,34 @@ import {
   type FeatureMutationReader,
   type FeatureSession,
   type FeatureSessionStore,
+  type FixAttemptOutcome,
+  type FixHistoryEntry,
 } from "@agent-workflow-kit/persistence";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { buildPlanApproval, verifyPlanApproval } from "./approval.js";
+import { buildPlanApproval, digestArtifactText, verifyPlanApproval } from "./approval.js";
 import { describeError, orchestrationError, type OrchestrationError } from "./errors.js";
-import { appendFixHistoryEntry } from "./fix-history.js";
+import { appendFixHistoryEntry, parseFixHistory } from "./fix-history.js";
+import {
+  evaluateFixIntegrity,
+  failureReasonFrom,
+  failureTargetFrom,
+  fixAttemptsExhausted,
+  fixRejected,
+  FIX_PROTECTED_PATTERNS,
+  latestFixEntry,
+  latestRecordedEvidence,
+  nextFixAttempt,
+  resolveMaxFixAttempts,
+  staleVerificationEvidence,
+  suspectedFilesFrom,
+  verificationConfigurationDigest,
+  verificationForOrigin,
+  workStageForOrigin,
+  type FixIntegritySnapshot,
+  type FixRejectionCode,
+  type FixerInputContract,
+} from "./fix-policy.js";
 import type { StageArtifactContext, StageExecutionRequest, StageExecutor } from "./executor.js";
 import {
   buildOrchestrationResult,
@@ -31,8 +54,9 @@ import {
 } from "./result.js";
 import { isRecord, validateStageExecutionResult } from "./result-validation.js";
 import {
-  APPROVAL_VERIFIED_STAGES,
+  isApprovalVerifiedStage,
   DEFERRED_WORK_STATES,
+  fixTriggerArtifact,
   humanActionForState,
   isTerminalState,
   outputSpecFor,
@@ -44,6 +68,7 @@ import {
   type WorkStage,
 } from "./stages.js";
 import {
+  approvedPathsOf,
   approvedScopeFromPlan,
   evaluateWorkspaceIntegrity,
   evaluateWorkspaceScope,
@@ -115,6 +140,17 @@ export interface WorkflowOrchestratorOptions {
    * the resolved path to the executor.
    */
   readonly workspace?: ProjectWorkspaceProvider | null;
+  /**
+   * How many times one fix loop may run before the framework stops and escalates.
+   *
+   * Defaults to `MAX_FIX_ATTEMPTS`. It is a construction option rather than a project setting because
+   * it is a statement about the workflow's own tolerance for an unrepairable defect, not about the
+   * project: a project cannot raise its own limit past the point where a failing loop looks like
+   * progress, and no project can lower it to zero, which would make every defect unfixable. A value
+   * that is not a positive integer is ignored in favour of the default, so a malformed configuration
+   * behaves exactly like no configuration and never refuses every repair.
+   */
+  readonly maxFixAttempts?: number | null;
 }
 
 type ResultExtras = Omit<OrchestrationResultInput, "status" | "state">;
@@ -135,6 +171,54 @@ interface CommitInput {
   readonly prepare?: (reader: FeatureMutationReader) => Promise<FeatureMutationPlan>;
   readonly successStatus: OrchestrationStatus;
   readonly extras: ResultExtras;
+}
+
+/**
+ * Everything the framework decided about one fix attempt before the fixer was invoked.
+ *
+ * Captured up front for three reasons that all have the same shape: the attempt has to be counted
+ * before it runs, the acceptance criteria have to be hashed before anything can rewrite them, and the
+ * fixer has to be handed a contract that describes the failure as it stood rather than as the fixer
+ * will describe it afterwards. `allowed` is false when the loop has already spent every attempt it
+ * was given, and a guard that is not allowed is escalated rather than handed to an executor.
+ */
+interface FixGuard {
+  readonly originStage: FixReturnState;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly allowed: boolean;
+  readonly contract: FixerInputContract;
+  readonly before: FixIntegritySnapshot;
+}
+
+type FixPreparation =
+  | { readonly ok: true; readonly guard: FixGuard }
+  | { readonly ok: false; readonly error: OrchestrationError };
+
+/** What the framework measured after a fix ran, for the comparison and the history record. */
+interface FixMeasurement {
+  readonly after: FixIntegritySnapshot;
+  readonly inspection: WorkspaceInspection;
+  readonly changedPaths: readonly string[];
+}
+
+/**
+ * The framework's own account of one fix attempt, carried into the history write.
+ *
+ * Everything here was measured by the framework rather than taken from the fixer's report, which is
+ * what makes the entry worth keeping. The report is stored alongside it as a claim; this is the
+ * finding. The accepted path uses `outcome: "accepted"` and a null summary, and the escalation path
+ * uses the rejection's own explanation, so a reader can tell the two apart without interpreting
+ * prose.
+ */
+interface FixAttemptContext {
+  readonly attempt: number;
+  readonly originStage: FixReturnState;
+  readonly outcome: FixAttemptOutcome;
+  readonly failureSummary: string | null;
+  readonly implementationFingerprint: string | null;
+  readonly changedPaths: readonly string[];
+  readonly integrity: FixIntegritySnapshot;
 }
 
 /** Raised inside a mutation's prepare step so a rejected composition never reaches storage. */
@@ -308,6 +392,7 @@ export class WorkflowOrchestrator {
   readonly #verification: VerificationProvider | null;
   readonly #projectRoot: string;
   readonly #workspace: ProjectWorkspaceProvider | null;
+  readonly #maxFixAttempts: number;
 
   constructor(options: WorkflowOrchestratorOptions) {
     this.#store = options.store;
@@ -315,6 +400,7 @@ export class WorkflowOrchestrator {
     this.#verification = options.verification ?? null;
     this.#projectRoot = resolve(options.projectRoot ?? process.cwd());
     this.#workspace = options.workspace ?? null;
+    this.#maxFixAttempts = resolveMaxFixAttempts(options.maxFixAttempts);
   }
 
   get store(): FeatureSessionStore {
@@ -639,6 +725,62 @@ export class WorkflowOrchestrator {
       return this.#result({ ...base, status: "rejected", state: fromState, error: context.error });
     }
 
+    // The fix guard is built before the request exists, so the fixer is handed the failure as it stood
+    // and the attempt is counted before anything runs. A guard that finds the loop out of attempts
+    // stops here rather than before the executor: the attempt number has to come from the recorded
+    // history, which needs the workspace this stage runs in.
+    let fix: FixGuard | null = null;
+
+    if (stage === "fixing") {
+      const originStage = session.machine.fixReturnState;
+
+      if (originStage === undefined) {
+        return this.#result({
+          ...base,
+          status: "rejected",
+          state: fromState,
+          error: orchestrationError(
+            "inconsistent_fix_state",
+            "The persisted session is fixing without a recorded fix return state, so there is no failure to repair and no origin to return to.",
+          ),
+        });
+      }
+
+      const prepared = await this.#prepareFix(session, originStage);
+
+      if (!prepared.ok) {
+        return this.#result({ ...base, status: "rejected", state: fromState, error: prepared.error });
+      }
+
+      if (!prepared.guard.allowed) {
+        return await this.#escalateFix(
+          session,
+          { ...base, verification: evidence.bundle },
+          prepared.guard,
+          null,
+          fixAttemptsExhausted(originStage, prepared.guard.attempt, prepared.guard.maxAttempts),
+        );
+      }
+
+      // A fix whose effect nobody measures cannot be accepted into the audit trail, and "nobody looked"
+      // is not the same as "nothing changed". The refusal is explicit and named here rather than left to
+      // surface later as a fix report the framework cannot attach a measurement to.
+      if (this.#workspace === null) {
+        return this.#result({
+          ...base,
+          status: "rejected",
+          state: fromState,
+          verification: evidence.bundle,
+          error: orchestrationError(
+            "workspace_not_configured",
+            `Stage "fixing" would run for "${originStage}" with no workspace provider, so nothing could measure what the repair changed. A repair the framework cannot measure is not a repair the workflow can accept, so it is refused here instead of being recorded as one that changed nothing.`,
+          ),
+        });
+      }
+
+      fix = prepared.guard;
+    }
+
     const request: StageExecutionRequest = {
       feature: {
         featureId,
@@ -655,6 +797,7 @@ export class WorkflowOrchestrator {
       outputs: definition.outputs,
       fixReturnState: stage === "fixing" ? (session.machine.fixReturnState ?? null) : null,
       verification: evidence.bundle,
+      fix: fix?.contract ?? null,
       workspace: {
         workspaceId: workspace.workspaceId,
         repositoryRoot: workspace.repositoryRoot,
@@ -693,11 +836,97 @@ export class WorkflowOrchestrator {
       executorFailure = orchestrationError("executor_threw", `Stage executor threw: ${describeError(error)}`);
     }
 
+    // The fix guard runs before the scope check, and that order is the whole point of not restoring
+    // anything. Both would refuse a fix that wrote outside its authority, but scope enforcement puts
+    // the workspace back to the approved baseline while it does it — which would quietly repair the
+    // very evidence the workflow has just escalated a human to. A rejected fix is left as the fixer
+    // wrote it, and a fix that passed the guard is in scope by construction, so nothing a passing
+    // attempt could contain reaches the restoring branch.
+    let measured: WorkspaceInspection | null = null;
+    let fixAttempt: FixAttemptContext | null = null;
+
+    if (fix !== null && this.#workspace !== null) {
+      const observed = await this.#inspect(session, workspace, stage);
+
+      if (!observed.ok) {
+        return this.#result({
+          ...base,
+          executedStages: [stage],
+          status: "rejected",
+          state: fromState,
+          verification: evidence.bundle,
+          error: orchestrationError(
+            "workspace_unavailable",
+            `The workspace could not be read to decide whether fix attempt ${String(fix.attempt)} was acceptable: ${observed.message}`,
+          ),
+        });
+      }
+
+      measured = observed.inspection;
+
+      const after = await this.#measureFixIntegrity(session, fix.originStage);
+
+      if (!after.ok) {
+        return this.#result({
+          ...base,
+          executedStages: [stage],
+          status: "rejected",
+          state: fromState,
+          verification: evidence.bundle,
+          error: after.error,
+        });
+      }
+
+      // What counts as the fix's changes is decided by what the stage was given, not by which inspection
+      // looks convenient. After approval the stage owns a worktree, so the difference between the tree
+      // as it was and the tree as it is is the fix and nothing else. Before approval the stage is pointed
+      // at a human's checkout that may already have contained uncommitted work, and the difference is
+      // still the only honest answer: attributing the human's dirt to the fix would have the audit trail
+      // blame a fixer for edits it did not make, and would fail the feature over them.
+      const attemptChanges =
+        before === null
+          ? observed.inspection.changes
+          : subtractWorkspaceChanges(before.changes, observed.inspection.changes);
+
+      const changedPaths = approvedPathsOf(attemptChanges);
+
+      const verdict = evaluateFixIntegrity({
+        featureId,
+        originStage: fix.originStage,
+        attempt: fix.attempt,
+        approvedPatterns: fix.contract.approvedScope,
+        changes: attemptChanges,
+        before: fix.before,
+        after: after.snapshot,
+      });
+
+      if (!verdict.ok) {
+        return await this.#escalateFix(
+          session,
+          { ...base, executedStages: [stage], verification: evidence.bundle },
+          fix,
+          { after: after.snapshot, inspection: observed.inspection, changedPaths },
+          fixRejected(verdict.rejections),
+          verdict.rejections.map((rejection) => rejection.code),
+        );
+      }
+
+      fixAttempt = {
+        attempt: fix.attempt,
+        originStage: fix.originStage,
+        outcome: "accepted",
+        failureSummary: null,
+        implementationFingerprint: fix.contract.implementationFingerprint,
+        changedPaths,
+        integrity: after.snapshot,
+      };
+    }
+
     // The scope check runs for a stage that returned and for a stage that threw, because a transport
     // failure, a timeout, or a model that abandoned the run halfway are precisely the runs that leave a
     // half-written file behind. Its verdict outranks the executor's: a stage that changed a path no
     // human approved has not produced a result, whatever it managed to say before or after doing it.
-    const scope = await this.#enforceScope(session, stage, workspace, baseline, before);
+    const scope = await this.#enforceScope(session, stage, workspace, baseline, before, measured);
 
     if (!scope.ok) {
       return this.#result({
@@ -805,6 +1034,7 @@ export class WorkflowOrchestrator {
             stage,
             artifact.name,
             artifact.content,
+            fixAttempt,
           );
 
           if (!composed.ok) {
@@ -848,7 +1078,9 @@ export class WorkflowOrchestrator {
     | { readonly ok: true; readonly workspace: ProjectWorkspace; readonly baseline: WorkspaceBaseline | null }
     | { readonly ok: false; readonly error: OrchestrationError }
   > {
-    if (!APPROVAL_VERIFIED_STAGES.has(stage)) {
+    const approvalVerified = isApprovalVerifiedStage(stage, session.approvals.plan !== null);
+
+    if (!approvalVerified) {
       // Before a human approves a plan there is nothing to fork a worktree from, so the stage reads
       // the human's own checkout under a read-only workspace. The baseline and the opening Git state
       // are null rather than stand-ins: no commit was approved, and a placeholder here would let a
@@ -929,7 +1161,8 @@ export class WorkflowOrchestrator {
       };
     }
 
-    if (resolve(opened.workspace.workingDirectory) === this.#projectRoot && APPROVAL_VERIFIED_STAGES.has(stage)) {
+    // Reached only for a stage that is approval-verified, which is what makes the root disqualifying.
+    if (resolve(opened.workspace.workingDirectory) === this.#projectRoot) {
       return {
         ok: false,
         error: orchestrationError(
@@ -1080,6 +1313,7 @@ export class WorkflowOrchestrator {
     workspace: ProjectWorkspace,
     baseline: WorkspaceBaseline | null,
     before: WorkspaceInspection | null,
+    measured: WorkspaceInspection | null = null,
   ): Promise<
     | { readonly ok: true; readonly evidence: WorkspaceScopeEvidence | null }
     | { readonly ok: false; readonly error: OrchestrationError; readonly evidence: WorkspaceScopeEvidence | null }
@@ -1088,7 +1322,11 @@ export class WorkflowOrchestrator {
       return { ok: true, evidence: null };
     }
 
-    const inspection = await this.#inspect(session, workspace, stage);
+    // A caller that already inspected the tree for its own decision hands the reading over rather than
+    // paying for a second one. It is the same reading either way: the provider is asked once, and both
+    // decisions are made about that one tree, which is the property `WorkspaceInspection` exists for.
+    const inspection =
+      measured === null ? await this.#inspect(session, workspace, stage) : { ok: true as const, inspection: measured };
 
     if (!inspection.ok) {
       return {
@@ -1301,6 +1539,292 @@ export class WorkflowOrchestrator {
     return approvedScopeFromPlan(plan);
   }
 
+  /** Reads an artifact that is allowed to be absent, distinguishing absence from failure. */
+  async #readOptionalArtifact(
+    featureId: string,
+    name: FeatureArtifactName,
+  ): Promise<
+    | { readonly ok: true; readonly value: unknown }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    try {
+      return { ok: true, value: await this.#store.readArtifact(featureId, name) };
+    } catch (error) {
+      if (isArtifactMissing(error)) {
+        return { ok: true, value: undefined };
+      }
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "persistence_failed",
+          `The "${name}" artifact could not be read while preparing the fix: ${describeError(error)}`,
+        ),
+      };
+    }
+  }
+
+  /** The recorded fix history for a feature, or the failure to read it. */
+  async #readFixHistory(
+    featureId: string,
+  ): Promise<
+    | { readonly ok: true; readonly entries: readonly FixHistoryEntry[] }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    let raw: unknown;
+
+    try {
+      raw = await this.#store.readArtifact(featureId, "fixes");
+    } catch (error) {
+      if (isArtifactMissing(error)) {
+        return { ok: true, entries: [] };
+      }
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "persistence_failed",
+          `The fix history could not be read while preparing a fix: ${describeError(error)}`,
+        ),
+      };
+    }
+
+    return parseFixHistory(raw);
+  }
+
+  /**
+   * Hashes what a fix must leave alone, from the persisted artifacts rather than from the working tree.
+   *
+   * Persisted is the right source for every one of these. The spec and the plan are the approved
+   * statements of what the feature is and what the work is, and they live in the session store rather
+   * than in the repository, so reading them is what it means to check them: no working-tree path can
+   * stand in for them, and a fixer that reached the repository to change one would have to change the
+   * store through the session API, which is not a path it has.
+   *
+   * The verification digest comes from the evidence the failing stage's own run recorded, which is the
+   * only place the command set the provider actually used is written down. Its absence is a null rather
+   * than a failure: a review-stage fix has no deterministic surface, and refusing one for that would
+   * break the loop this milestone is hardening rather than harden it.
+   */
+  async #measureFixIntegrity(
+    session: FeatureSession,
+    originStage: FixReturnState,
+  ): Promise<
+    | { readonly ok: true; readonly snapshot: FixIntegritySnapshot }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    const featureId = session.featureId;
+    const stage = workStageForOrigin(originStage);
+
+    // Read one at a time rather than as a batch, because each read is a condition on continuing and
+    // there is no operation here that would be faster in parallel. A digest of three of the four
+    // surfaces would be worse than no digest at all: it would compare equal on both sides while
+    // describing less than it claims to, which is how a guard stops meaning anything.
+    const spec = await this.#readArtifactDigest(featureId, "spec");
+
+    if (!spec.ok) {
+      return spec;
+    }
+
+    const plan = await this.#readArtifactDigest(featureId, "plan");
+
+    if (!plan.ok) {
+      return plan;
+    }
+
+    const planReview = await this.#readArtifactDigest(featureId, "plan_review");
+
+    if (!planReview.ok) {
+      return planReview;
+    }
+
+    const verification = await this.#readOptionalArtifact(featureId, "verification");
+
+    if (!verification.ok) {
+      return verification;
+    }
+
+    return {
+      ok: true,
+      snapshot: {
+        specSha256: spec.digest,
+        planSha256: plan.digest,
+        planReviewSha256: planReview.digest,
+        verificationConfigSha256:
+          stage === null ? null : verificationConfigurationDigest(verification.value, stage),
+      },
+    };
+  }
+
+  /**
+   * The digest of an approved artifact, computed exactly as the plan-approval check computes it.
+   *
+   * Reusing `digestArtifactText` over the artifact's own text rather than hashing the parsed value is
+   * what makes these two mechanisms one mechanism instead of two that look alike. The approval record
+   * holds digests of text, so a fix guard that digested parsed values would produce different digests
+   * for identical content, and the two could not be compared, correlated, or explained side by side.
+   */
+  async #readArtifactDigest(
+    featureId: string,
+    name: FeatureArtifactName,
+  ): Promise<
+    | { readonly ok: true; readonly digest: string | null }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    try {
+      return { ok: true, digest: digestArtifactText(await this.#store.readArtifactText(featureId, name)) };
+    } catch (error) {
+      if (isArtifactMissing(error)) {
+        return { ok: true, digest: null };
+      }
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "persistence_failed",
+          `The "${name}" artifact could not be read while hashing what a fix must leave alone: ${describeError(error)}`,
+        ),
+      };
+    }
+  }
+
+  /**
+   * Builds the guard for the fix attempt about to run: the count, the frozen digests, and the contract.
+   *
+   * The attempt number comes from the durable history rather than from the session, because the session
+   * only knows the current state and a fix loop that failed four times looks identical to one about to
+   * try. Counting the recorded entries is what makes the limit mean what it says across process
+   * restarts and across every stage that has sent the workflow here.
+   */
+  async #prepareFix(session: FeatureSession, originStage: FixReturnState): Promise<FixPreparation> {
+    const featureId = session.featureId;
+    const history = await this.#readFixHistory(featureId);
+
+    if (!history.ok) {
+      return history;
+    }
+
+    const attempt = nextFixAttempt(history.entries, originStage);
+    const stage = workStageForOrigin(originStage);
+
+    const before = await this.#measureFixIntegrity(session, originStage);
+
+    if (!before.ok) {
+      return before;
+    }
+
+    const scope = await this.#readApprovedScope(session);
+
+    if (!scope.ok) {
+      return scope;
+    }
+
+    const trigger = await this.#readOptionalArtifact(featureId, fixTriggerArtifact(originStage));
+
+    if (!trigger.ok) {
+      return trigger;
+    }
+
+    const artifact = trigger.value;
+    const target = stage === null ? null : failureTargetFrom(artifact, stage);
+    const evidence = stage === null ? null : latestRecordedEvidence(artifact, stage);
+
+    const contract: FixerInputContract = {
+      featureId,
+      failedStage: originStage,
+      failedVerification: verificationForOrigin(originStage),
+      target,
+      deterministicEvidence: evidence,
+      failureReason: failureReasonFrom(originStage, evidence, target),
+      suspectedFiles: stage === null ? [] : suspectedFilesFrom(artifact, stage),
+      approvedScope: scope.patterns,
+      revision: session.revision,
+      implementationFingerprint: evidence?.implementationFingerprint ?? null,
+      attempt,
+      maxAttempts: this.#maxFixAttempts,
+      protectedPaths: FIX_PROTECTED_PATTERNS,
+    };
+
+    return {
+      ok: true,
+      guard: {
+        originStage,
+        attempt,
+        maxAttempts: this.#maxFixAttempts,
+        allowed: attempt <= this.#maxFixAttempts,
+        contract,
+        before: before.snapshot,
+      },
+    };
+  }
+
+  /**
+   * Records the attempt, fails the feature, and reports why — in that order and in one mutation.
+   *
+   * The record is written first because it is the part a human needs and the part that is lost the
+   * moment the feature is failed. The workspace is not touched: the rejection is the finding, and a
+   * framework that restored the files would be deleting it while explaining that it kept it.
+   *
+   * The entry is written with an explicit origin rather than read from the session, because the `fail`
+   * event clears the recorded return state in the same commit and the history has to say which stage
+   * the refused loop was repairing.
+   */
+  async #escalateFix(
+    session: FeatureSession,
+    extras: ResultExtras,
+    guard: FixGuard,
+    measurement: FixMeasurement | null,
+    error: OrchestrationError,
+    rejectionCodes: readonly FixRejectionCode[] = [],
+  ): Promise<OrchestrationResult> {
+    const changedPaths = measurement?.changedPaths ?? [];
+    const summary = `${error.message} (${JSON.stringify({
+      attempt: guard.attempt,
+      ofMax: guard.maxAttempts,
+      originStage: guard.originStage,
+      changedPaths,
+      rejectionCodes,
+    })})`;
+
+    return this.#commit({
+      featureId: session.featureId,
+      session,
+      event: "fail",
+      successStatus: "feature_failed",
+      extras: {
+        ...extras,
+        error: { ...error, message: summary },
+        fix: {
+          originStage: guard.originStage,
+          attempt: guard.attempt,
+          maxAttempts: guard.maxAttempts,
+          outcome: "rejected",
+          changedPaths,
+          rejectionCodes,
+        },
+      },
+      prepare: async (reader) => {
+        const appended = await appendFixHistoryEntry(reader, {
+          attempt: guard.attempt,
+          fixReturnState: guard.originStage,
+          outcome: "rejected",
+          failureSummary: summary,
+          revisionBefore: reader.session.revision,
+          implementationFingerprint: guard.contract.implementationFingerprint,
+          changedPaths,
+          integrity: measurement?.after ?? guard.before,
+          report: null,
+        });
+
+        if (!appended.ok) {
+          throw new StageFinalizeError(appended.error);
+        }
+
+        return { artifacts: [{ name: "fixes", content: appended.document }] };
+      },
+    });
+  }
+
   /**
    * Asks the deterministic provider for this stage's evidence and refuses a bundle it cannot verify.
    *
@@ -1373,6 +1897,27 @@ export class WorkflowOrchestrator {
 
     if (!bound.ok) {
       return { ok: false, error: orchestrationError(bound.code, bound.message) };
+    }
+
+    // Binding proves the bundle belongs to this revision. It cannot prove the run happened after the
+    // last fix, because a provider that cached one bundle and restamped it would produce a bundle that
+    // binds correctly and is older than the fix. This stage exists to re-test a repair, so evidence
+    // gathered before that repair cannot decide whether it worked — and a stage that accepted it would
+    // report the repair as verified by the failure it was supposed to fix.
+    const history = await this.#readFixHistory(session.featureId);
+
+    if (!history.ok) {
+      return { ok: false, error: history.error };
+    }
+
+    const lastFix = latestFixEntry(history.entries, stage);
+
+    if (lastFix !== null) {
+      const stale = staleVerificationEvidence(bound.bundle, lastFix);
+
+      if (stale !== null) {
+        return { ok: false, error: stale };
+      }
     }
 
     return { ok: true, bundle: bound.bundle };
@@ -1451,6 +1996,7 @@ export class WorkflowOrchestrator {
     stage: WorkStage,
     name: FeatureArtifactName,
     content: unknown,
+    fix: FixAttemptContext | null = null,
   ): Promise<ComposeOutcome> {
     const spec = outputSpecFor(stage, name);
 
@@ -1467,7 +2013,39 @@ export class WorkflowOrchestrator {
         };
       }
 
-      const appended = await appendFixHistoryEntry(reader, fixReturnState, content);
+      // Every field of the entry is the framework's, so a missing one is a bug in the framework and not
+      // a missing input to be defaulted. An entry assembled from stand-ins — attempt one, no changed
+      // paths, no integrity digests — would read in the history exactly like a real first attempt that
+      // changed nothing, and the one record a human relies on after a repair is the record that would
+      // be fabricated. Refusing to write it is the only outcome that stays honest.
+      if (fix === null) {
+        return {
+          ok: false,
+          error: orchestrationError(
+            "inconsistent_fix_state",
+            `Stage "${stage}" reported a fix report but the orchestrator has no measured attempt to attach it to, so nothing was written. A fix history entry is assembled by the framework alone and is never defaulted into existence.`,
+          ),
+        };
+      }
+
+      // The fixer's own output is the `report` field of an entry the framework writes. The attempt
+      // number, the revisions, the changed paths, the integrity digests, and the outcome are the
+      // framework's, and a fixer cannot supply any of them: it has no slot for them, no way to compute
+      // them, and no reason to be believed about them. The report is kept because a human reading the
+      // history wants to know what was attempted, and it is stored as a claim rather than as the
+      // finding, because that is what it is.
+      const appended = await appendFixHistoryEntry(reader, {
+        attempt: fix.attempt,
+        fixReturnState,
+        outcome: fix.outcome,
+        failureSummary: fix.failureSummary,
+        revisionBefore: reader.session.revision,
+        implementationFingerprint: fix.implementationFingerprint,
+        changedPaths: fix.changedPaths,
+        integrity: fix.integrity,
+        report: content,
+      });
+
       return appended.ok ? { ok: true, content: appended.document } : { ok: false, error: appended.error };
     }
 

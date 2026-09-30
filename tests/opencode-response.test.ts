@@ -31,6 +31,7 @@ function requestFor(stage: StageExecutionRequest["stage"]): StageExecutionReques
     context: [],
     outputs: definition.outputs,
     fixReturnState: null,
+    fix: null,
     workspace: testWorkspaceContext(),
   };
 }

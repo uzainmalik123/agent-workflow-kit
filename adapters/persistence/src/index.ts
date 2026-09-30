@@ -5,6 +5,7 @@ export {
   FEATURE_ARTIFACT_FILENAMES,
   FEATURE_ARTIFACT_NAMES,
   FEATURE_SESSION_SCHEMA_VERSION,
+  FIX_ATTEMPT_OUTCOMES,
   createEmptyApprovals,
   createEmptyArtifactReferences,
 } from "./contracts.js";
@@ -20,8 +21,10 @@ export type {
   FeatureSession,
   FeatureApprovals,
   FeatureSessionSchemaVersion,
+  FixAttemptOutcome,
   FixHistoryDocument,
   FixHistoryEntry,
+  FixIntegrityRecord,
   PlanApprovalRecord,
 } from "./contracts.js";
 export { PersistenceError } from "./errors.js";

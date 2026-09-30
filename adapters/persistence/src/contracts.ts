@@ -109,12 +109,67 @@ export interface CreateFeatureSessionInput {
  */
 export type Clock = () => string;
 
-/** Entry recorded in the durable fix-history artifact. */
+/**
+ * The outcome of one fix attempt, as the framework recorded it.
+ *
+ * `accepted` means the attempt passed every framework check and the workflow returned to the stage
+ * that asked for it. `rejected` means the attempt was refused — a protected file was touched, a check
+ * was removed, an approved artifact or the recorded verification configuration changed, or the fix
+ * wrote outside the approved scope — and the feature was failed for a human. Rejected attempts are
+ * recorded rather than discarded, because "the fixer tried five times and the fifth one edited the
+ * test" is the finding a human needs and a history that only kept the successes cannot produce.
+ */
+export const FIX_ATTEMPT_OUTCOMES = ["accepted", "rejected"] as const;
+
+export type FixAttemptOutcome = (typeof FIX_ATTEMPT_OUTCOMES)[number];
+
+/**
+ * The digests of the things a fix had to leave alone, captured before it ran and compared after.
+ *
+ * These are the immutable representation of what the fix was being held to: the requirements and
+ * acceptance criteria in the spec, the plan that scoped the work, its review, and the verification
+ * commands the failing stage was measured with. Persisting both sides is what makes a rejected fix
+ * auditable — a reader can see which of them moved rather than being told that something did — and it
+ * is why the record is useful after the workspace is gone.
+ */
+export interface FixIntegrityRecord {
+  readonly specSha256: string | null;
+  readonly planSha256: string | null;
+  readonly planReviewSha256: string | null;
+  readonly verificationConfigSha256: string | null;
+}
+
+/**
+ * One entry in the durable fix-history artifact.
+ *
+ * Every field is framework-written and none of them is the fixer's word about whether it worked. The
+ * report is there because a human reading the history wants to know what was attempted; `outcome` is
+ * there because that report is not evidence; and the revisions, the integrity digests, and the changed
+ * paths are there because they are. An audit of a fix loop should be answerable from this document
+ * alone: which stage asked, how many times, what the tree looked like before and after, what the
+ * success criteria hashed to on both sides, which paths moved, and whether the framework believed it.
+ */
 export interface FixHistoryEntry {
   readonly sequence: number;
+  /** Which attempt this was, counted per origin stage. 1 is the first fix for that stage. */
+  readonly attempt: number;
+  /** The stage whose failure triggered the attempt, and the state the workflow returns to. */
   readonly fixReturnState: FixReturnState;
+  /** One sentence on why the attempt was refused, or null when it was accepted. */
+  readonly failureSummary: string | null;
   readonly recordedAt: string;
+  /** The session revision the fix was made against. */
+  readonly revisionBefore: number;
+  /** The revision that carried this entry; equal to `sessionRevision`. */
+  readonly revisionAfter: number;
+  /** The revision that carried this entry. Kept as its own field so older readers still line up. */
   readonly sessionRevision: number;
+  /** The implementation fingerprint the failure was measured with, when there was one. */
+  readonly implementationFingerprint: string | null;
+  /** Every path the fix changed, as measured, sorted. */
+  readonly changedPaths: readonly string[];
+  readonly integrity: FixIntegrityRecord;
+  readonly outcome: FixAttemptOutcome;
   readonly report: unknown;
 }
 

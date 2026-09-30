@@ -437,6 +437,7 @@ describe("stage result validation", () => {
     context: [],
     outputs: [{ name: "plan", kind: "document", envelopeKey: null }],
     fixReturnState: null,
+    fix: null,
     workspace: testWorkspaceContext(),
   };
 

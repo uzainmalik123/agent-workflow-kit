@@ -466,6 +466,9 @@ export function normalizeScopePattern(entry: string): string | null {
   return directoryPattern ? `${body}/**` : body;
 }
 
+/** The characters that make a pattern segment a pattern rather than a path. */
+const GLOB_CHARACTER = /[*?[]/u;
+
 /**
  * Matches one repository-relative path against one approved pattern.
  *
@@ -476,7 +479,12 @@ export function normalizeScopePattern(entry: string): string | null {
  * to it.
  */
 export function matchesScopePattern(pattern: string, path: string): boolean {
-  if (pattern.endsWith("/**")) {
+  // The `/**` shortcut is only a shortcut when the part in front of it is literal. A prefix that still
+  // contains a wildcard — `**/tests/**`, the natural way to write "the tests directory anywhere" — is
+  // not a path prefix at all, so taking this branch for it would compare the path against the literal
+  // string `**/tests` and match nothing at all. A pattern that silently approves nothing is worse than
+  // one that refuses: the writer believes it named something, and the scope check agrees with them.
+  if (pattern.endsWith("/**") && !GLOB_CHARACTER.test(pattern.slice(0, -3))) {
     const prefix = pattern.slice(0, -3);
 
     return path === prefix || path.startsWith(`${prefix}/`);

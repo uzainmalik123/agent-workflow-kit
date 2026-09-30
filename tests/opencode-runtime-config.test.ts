@@ -426,6 +426,7 @@ const READ_STAGE = {
   role: "verifier",
   state: WorkflowState.StaticVerification,
   fixReturnState: null,
+  fix: null,
 } as const;
 
 const WRITE_STAGE = {
@@ -433,6 +434,7 @@ const WRITE_STAGE = {
   role: "implementer",
   state: WorkflowState.Implementing,
   fixReturnState: null,
+  fix: null,
 } as const;
 
 function renderAgentFileContents(profile: OpenCodeProfile): string {
@@ -594,6 +596,7 @@ async function runVerifier(
       context: [],
       outputs: STAGE_DEFINITIONS[target.stage].outputs,
       fixReturnState: target.fixReturnState,
+      fix: target.fix,
       workspace: testWorkspaceContext({ repositoryRoot: repository, workingDirectory: repository }),
     });
 

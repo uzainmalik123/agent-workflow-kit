@@ -16,6 +16,7 @@ export {
 export {
   APPROVED_ARTIFACTS,
   APPROVAL_VERIFIED_STAGES,
+  isApprovalVerifiedStage,
   DEFERRED_WORK_STATES,
   WRITE_CAPABLE_WORK_STAGES,
   fixTriggerArtifact,
@@ -46,8 +47,40 @@ export type {
 export { digestArtifactText } from "./approval.js";
 export type { ApprovalOutcome, ApprovalVerification } from "./approval.js";
 
-export { appendFixHistoryEntry } from "./fix-history.js";
-export type { FixHistoryOutcome } from "./fix-history.js";
+export { appendFixHistoryEntry, parseFixHistory } from "./fix-history.js";
+export type { FixAttemptRecord, FixHistoryOutcome, FixHistoryRead } from "./fix-history.js";
+
+export {
+  evaluateFixIntegrity,
+  failureReasonFrom,
+  failureTargetFrom,
+  fixAttemptsExhausted,
+  fixRejected,
+  FIX_PROTECTED_PATTERNS,
+  FIX_REJECTION_CODES,
+  isVerificationCheckPath,
+  latestFixEntry,
+  latestRecordedEvidence,
+  MAX_FIX_ATTEMPTS,
+  nextFixAttempt,
+  resolveMaxFixAttempts,
+  staleVerificationEvidence,
+  suspectedFilesFrom,
+  verificationConfigurationDigest,
+  verificationConfigurationText,
+  verificationForOrigin,
+  VERIFICATION_CHECK_PATH_PATTERNS,
+  workStageForOrigin,
+} from "./fix-policy.js";
+export type {
+  FixFailureTarget,
+  FixIntegrityInput,
+  FixIntegritySnapshot,
+  FixIntegrityVerdict,
+  FixRejection,
+  FixRejectionCode,
+  FixerInputContract,
+} from "./fix-policy.js";
 
 export { isStageOutcome, STAGE_OUTCOMES } from "./executor.js";
 export type {
@@ -176,6 +209,7 @@ export type {
 
 export { buildOrchestrationResult, ORCHESTRATION_STATUSES } from "./result.js";
 export type {
+  FixOutcomeSummary,
   OrchestrationResult,
   OrchestrationResultInput,
   OrchestrationStatus,

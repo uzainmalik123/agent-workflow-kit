@@ -187,25 +187,44 @@ describe("durable fix history", () => {
       committed: true,
     });
 
-    const history = await harness.store.readArtifact("F-001", "fixes");
+    const history = (await harness.store.readArtifact("F-001", "fixes")) as FixHistoryDocument;
 
-    expect(history).toEqual({
-      schemaVersion: 1,
-      fixes: [
-        {
-          sequence: 1,
-          fixReturnState: WorkflowState.CodeReview,
-          recordedAt: fixedTimestamp,
-          sessionRevision: beforeFixing.revision + 1,
-          report: {
-            featureId: "F-001",
-            fixedFor: WorkflowState.CodeReview,
-            summary: `Deterministic fix for ${WorkflowState.CodeReview}.`,
-            changes: [],
-          },
-        },
-      ],
+    // The entry is mostly framework-written. Only `report` is the fixer's, and it is stored beside
+    // the framework's own account of the attempt rather than in place of it: the attempt number, the
+    // revision it was made against, and the outcome are all things the fixer cannot supply and would
+    // have no reason to state honestly.
+    expect(history.fixes).toHaveLength(1);
+    expect(history.fixes[0]).toMatchObject({
+      sequence: 1,
+      attempt: 1,
+      fixReturnState: WorkflowState.CodeReview,
+      failureSummary: null,
+      recordedAt: fixedTimestamp,
+      revisionBefore: beforeFixing.revision,
+      revisionAfter: beforeFixing.revision + 1,
+      sessionRevision: beforeFixing.revision + 1,
+      implementationFingerprint: null,
+      changedPaths: [],
+      outcome: "accepted",
+      report: {
+        featureId: "F-001",
+        fixedFor: WorkflowState.CodeReview,
+        summary: `Deterministic fix for ${WorkflowState.CodeReview}.`,
+        changes: [],
+      },
     });
+    expect(history).toMatchObject({ schemaVersion: 1 });
+    // A review-stage fix has no deterministic surface, so there is nothing to hash here and the
+    // framework says so rather than inventing a digest.
+    expect(history.fixes[0]?.integrity.verificationConfigSha256).toBeNull();
+
+    for (const digest of [
+      history.fixes[0]?.integrity.specSha256,
+      history.fixes[0]?.integrity.planSha256,
+      history.fixes[0]?.integrity.planReviewSha256,
+    ]) {
+      expect(digest).toMatch(/^[0-9a-f]{64}$/u);
+    }
     expect((await harness.store.load("F-001")).revision).toBe(beforeFixing.revision + 1);
   });
 

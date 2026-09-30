@@ -15,7 +15,7 @@ The dependency direction stays one-way: `orchestration` depends on `core` and `p
 ## API
 
 ```ts
-const orchestrator = createWorkflowOrchestrator({ store, executor });
+const orchestrator = createWorkflowOrchestrator({ store, executor, maxFixAttempts });
 
 await orchestrator.createFeature({ featureId, title, request?, slug? });
 await orchestrator.runNext(featureId);
@@ -27,6 +27,7 @@ await orchestrator.failFeature(featureId);
 - `createFeature` creates the session in `draft` and, when a request is supplied, writes `request.md`. It never transitions.
 - `runNext` performs **at most one** work stage. It never loops, never approves anything, and never calls a second stage in the same call.
 - `approvePlan` / `approvePush` / `failFeature` apply the corresponding legal state-machine event. `approvePlan` also records the approval checkpoint; `approvePush` only moves the session to `committing`, no Git work exists.
+- `maxFixAttempts` bounds one repair loop per origin stage and defaults to `MAX_FIX_ATTEMPTS`. `workspace` and `verification` are optional; without them the framework records that it measured nothing rather than passing for a clean run. See [Fixer trust model](#fixer-trust-model).
 - Usage and storage errors on `createFeature` and on the initial `load` of `runNext` propagate as `PersistenceError`. Everything the orchestrator decides is returned as an `OrchestrationResult`.
 
 Every decision the orchestrator makes is a single persistence mutation carrying the revision it read, so a caller may drive the same feature from several processes and a losing writer is told so instead of overwriting the winner.
@@ -39,7 +40,7 @@ interface StageExecutor {
 }
 ```
 
-A request carries the session identity, the current state, the stage and role, the routed context artifacts, the artifact slots the stage may fill, and the pending `fixReturnState`. An executor may not receive the whole history, may not name a file, and may not request a transition: it can only answer with a structured outcome.
+A request carries the session identity, the current state, the stage and role, the routed context artifacts, the artifact slots the stage may fill, the pending `fixReturnState`, the workspace it may work in, the deterministic evidence collected for the stage, and `fix: FixerInputContract | null` — the whole of a fixer's authority, present exactly when the stage is `fixing`. An executor may not receive the whole history, may not name a file, and may not request a transition: it can only answer with a structured outcome.
 
 ```ts
 type StageOutcome = "success" | "needs_fix" | "failed" | "inconclusive";
@@ -166,14 +167,44 @@ control-plane measurement at all: a provider that measured nothing cannot report
 ## Fix loop
 
 1. A review or verification stage returns `needs_fix`; its artifacts are persisted and the legal `request_fix` event moves the session to `fixing`, recording the returning state.
-2. The next `runNext` executes the `fixer` with the recorded `fixReturnState`, the report of the stage that asked for the fix, the plan, and the implementation context, then applies `complete_fix`.
+2. The next `runNext` builds a `FixerInputContract`, executes the `fixer` against it, measures what it did, and applies `complete_fix` if the attempt was accepted.
 3. The returning stage is **not** marked as passed. A later `runNext` executes it again against the persisted state, and it must succeed on its own evidence.
 
 `needs_fix` from a stage that is not fixable is rejected as `illegal_needs_fix`, so the graph can never record a fix for a state that cannot return.
 
+### Fixer trust model
+
+The fixer is the only stage that writes, and the only stage whose job is to make a failing check stop failing. That combination is the whole problem: an agent that may edit code can also remove the evidence that the code was broken, widen its own goal, and report success. The framework's answer is that the fixer is given authority and given nothing else. `FixerInputContract` names the failing stage, the failure summary, the deterministic evidence that decided it, the criteria those checks assert, the paths it may write, the paths it may not, which attempt this is, and how many attempts remain. It has no field for the acceptance criteria, the verification commands, the workflow state, or the approval checkpoint, because those are not the fixer's to read and change.
+
+What the fixer says about itself is never what is recorded. The attempt number, the outcome, the revisions, the changed paths, and the integrity digests are the framework's, measured after the executor returns; the fixer's own text survives only as a `report` claim inside the entry, beside the framework's verdict on it. A stage that cannot produce a measured attempt cannot write a history entry at all, so there is no shape in which an unmeasured record is defaulted into existence.
+
+**Bounded attempts.** `maxFixAttempts` is a construction option, defaults to `MAX_FIX_ATTEMPTS` (5), and is counted per origin stage from the durable history — so one repair loop cannot spend another's budget, and a restart cannot reset it. A value that is not a positive integer is ignored in favour of the default, because a malformed configuration behaving exactly like no configuration is the only safe reading of "I did not say". The attempt after the limit is refused before the executor is called: the fixer is never asked to try again, and the feature fails with the limit named.
+
+**What one attempt is measured against.** Four digests, taken from the persisted bytes rather than from anything the fixer said:
+
+| surface | refused as |
+| --- | --- |
+| `spec.json`, `plan.json`, `plan-review.json` | `fix_target_modified` |
+| the failing stage's recorded deterministic verification configuration | `fix_verification_config_modified` |
+| a framework-controlled path: `.git`, `.agentflow`, `.opencode`, `opencode.json(c)`, `agent-workflow.config.json(c)` | `fix_protected_file_touched` |
+| a verification check file, by path convention | `fix_check_removed` |
+| any path the approved plan does not name | `fix_outside_approved_scope` |
+
+Every rejection is named at once rather than first-one-wins, because a fixer that rewrote the plan and deleted a test file is one finding and not two.
+
+A check file is recognized by convention — `*.test.*`, `*.spec.*`, `test_*`, `*_test.*`, `*_spec.*`, `conftest.*`, and `test`/`tests`/`spec`/`__tests__` directories — not by reading it, so the refusal is a statement about what the fixer touched and never a claim to have understood it. This is a path-and-hash boundary, not a semantic one: a fixer that satisfies a check by rewriting what the check asserts is visible to the approved-scope rule, and invisible to everything here. That limit is deliberate, and it is why a human still owns the goal.
+
+**Nothing is restored after a refusal**, including for `fix_outside_approved_scope`. The rejection is the finding, and a framework that quietly put the files back would be deleting it while explaining that it kept it; restoring only the unauthorized paths while leaving the rest would produce a tree the fixer never wrote, which is a third thing, and not a finding at all. The fix guard runs before `#enforceScope`, so its verdict stands and the worktree keeps everything the attempt did. The refused attempt is appended to the history and the feature fails in one mutation, so the workspace, the history, and the result all describe the same refusal. An ordinary stage that wanders outside its scope is still reversed, because nothing about it is evidence and a clean tree is the useful outcome.
+
+**Where a fix may write** follows from the loop it belongs to. `isApprovalVerifiedStage("fixing", hasApprovedPlan)` is the only place that question is answered: a fix sent back from `static_verification` has an approval behind it and runs in an isolated worktree at the approved commit, exactly like the stage that asked for it; a fix sent back from `plan_review` has none, so it reads the human's checkout `read_only` and is held to not writing to it at all.
+
+**Attribution.** Before approval the workspace may already contain a human's uncommitted work, so the change set an attempt is answerable for is the difference between the tree as it looked before the executor ran and the tree as it looks now — after approval, in a worktree, that difference is the whole inspection. Blaming a fixer for edits the human made an hour ago would fail a feature over something nobody in the loop did, and the audit trail would name the wrong author.
+
+**Fresh evidence.** The returning stage is re-run and collects its own evidence, and a bundle is refused as `stale_verification_evidence` when it was collected before the fix was recorded or carries a revision at or below the one the fix was made against. A repair is proved by a check that ran afterwards, never by one that ran before.
+
 ### Fix history
 
-The fixer's own report is required on every successful fix and is never written by the stage. The orchestrator appends it to `fixes.json` inside the same mutation that applies `complete_fix`:
+The fixer's own report is required on every successful fix and is never written by the stage. The orchestrator appends the measured entry to `fixes.json` inside the same mutation that applies `complete_fix`:
 
 ```json
 {
@@ -181,16 +212,31 @@ The fixer's own report is required on every successful fix and is never written 
   "fixes": [
     {
       "sequence": 1,
-      "fixReturnState": "code_review",
+      "attempt": 1,
+      "fixReturnState": "static_verification",
+      "outcome": "accepted",
+      "failureSummary": null,
       "recordedAt": "2026-04-05T06:07:08.000Z",
+      "revisionBefore": 11,
+      "revisionAfter": 12,
       "sessionRevision": 12,
+      "implementationFingerprint": "...",
+      "changedPaths": ["src/parser.ts", "src/token.ts"],
+      "integrity": {
+        "specSha256": "...",
+        "planSha256": "...",
+        "planReviewSha256": "...",
+        "verificationConfigSha256": "..."
+      },
       "report": { "featureId": "F-001", "summary": "..." }
     }
   ]
 }
 ```
 
-Entries are append-only: a later fix never rewrites an earlier one, `sequence` counts them, and `sessionRevision` records the revision that carried the entry, so an audit can line a fix up with the exact state it was made against. A `fixes.json` that declares another schema version or is not a list is reported as `unmergeable_artifact` instead of being overwritten. The accumulated history is routed to the verification stages, `security_review`, `final_gate`, and `final_summary`.
+A rejected attempt is written the same way, with `outcome: "rejected"`, the rejection named in `failureSummary`, and the paths it touched measured the same, in the same mutation that fails the feature.
+
+Entries are append-only: a later fix never rewrites an earlier one, `sequence` counts them, and `sessionRevision` records the revision that carried the entry, so an audit can line a fix up with the exact state it was made against. Reading is as strict as writing, and for the same reason: a document that declares another schema version, is not a list, or holds an entry missing an outcome, a digest, or its place in the sequence is reported as `unmergeable_artifact` by entry position rather than overwritten, because overwriting it would destroy the record of what the fixer already did. The accumulated history is routed to the verification stages, `security_review`, `final_gate`, and `final_summary`.
 
 ## Human gates
 
@@ -227,7 +273,7 @@ The orchestrator owns the policy and never touches a filesystem path itself. A `
 const orchestrator = createWorkflowOrchestrator({ store, executor, workspace });
 ```
 
-`workspace` absent means the orchestrator runs every stage against `projectRoot` and records scope evidence with `measured: false`, so "nobody looked" can never be read as "nothing changed".
+`workspace` absent means the orchestrator runs every stage against `projectRoot` and records scope evidence with `measured: false`, so "nobody looked" can never be read as "nothing changed". It also means a fix is refused outright with `workspace_not_configured`, before the executor is called: a post-approval fix would otherwise be pointed at the human's checkout, and a pre-approval one would be recorded as having changed nothing when in fact nobody measured it. A repair the framework cannot measure is not one the workflow can accept.
 
 A stage is either pre- or post-approval, and the difference is not a flag the executor can influence:
 
@@ -235,6 +281,9 @@ A stage is either pre- or post-approval, and the difference is not a flag the ex
 | --- | --- | --- | --- |
 | `grill`, `planning`, `plan_review` | the human's checkout | `read_only` | `null` |
 | everything after the plan gate | a worktree at the approved commit | `read_write` | the approved baseline |
+| `fixing` | whichever of the two the loop it belongs to requires | as above | as above |
+
+`fixing` is the only row that is not a property of the stage alone, so it is decided by `isApprovalVerifiedStage(stage, hasApprovedPlan)` rather than by a set. See [Fixer trust model](#fixer-trust-model).
 
 `StageExecutionRequest.workspace` carries all of it, and the executor is given a directory to work in rather than being asked to find one.
 
@@ -260,7 +309,9 @@ Every post-approval stage records a `WorkspaceScopeEvidence` alongside the resul
 
 ## Result contract
 
-`OrchestrationResult` always reports `status`, `failureClass`, `fromState`, `state`, `committed`, `executedStages` (0 or 1), `stage`, `role`, `event`, `artifacts`, `action`, `fixReturnState`, `findings`, `evidence`, and `error`.
+`OrchestrationResult` always reports `status`, `failureClass`, `fromState`, `state`, `committed`, `executedStages` (0 or 1), `stage`, `role`, `event`, `artifacts`, `action`, `fixReturnState`, `findings`, `evidence`, `fix`, and `error`.
+
+`fix` is a `FixOutcomeSummary` and is null on every result that is not about a repair. On a `fixing` stage it carries the origin stage, the attempt, the limit, the outcome, the measured `changedPaths`, and the rejection codes — so a caller learns why a repair was refused without reopening `fixes.json`, and learns it from the same record the audit trail holds.
 
 | status | meaning | transition |
 | --- | --- | --- |

@@ -332,6 +332,26 @@ export const APPROVAL_VERIFIED_STAGES: ReadonlySet<WorkStage> = new Set<WorkStag
 ]);
 
 /**
+ * Whether a stage runs against an approved plan, which is what decides where its work lands. A stage
+ * that does is given an isolated workspace forked from the approved commit; one that does not reads
+ * the human's own checkout and is held to not writing to it at all.
+ *
+ * Almost every stage belongs to exactly one of the two — verification happens after approval, spec
+ * and plan before it — but a fix belongs to whichever loop sent it there, so the answer is not a
+ * property of the stage alone. A fix sent back from `plan_review` has no approval behind it and must
+ * stay read-only in the human's checkout. A fix sent back from `static_verification` has one, and it
+ * must write into an isolated worktree: that is the only way its changes are attributable to the fix
+ * rather than to whatever the human happened to have uncommitted at the time.
+ */
+export function isApprovalVerifiedStage(stage: WorkStage, approvedPlanExists: boolean): boolean {
+  if (APPROVAL_VERIFIED_STAGES.has(stage)) {
+    return true;
+  }
+
+  return stage === "fixing" && approvedPlanExists;
+}
+
+/**
  * Stages that are allowed to change files.
  *
  * Every other stage runs with read-only access to its working directory. The set exists so the

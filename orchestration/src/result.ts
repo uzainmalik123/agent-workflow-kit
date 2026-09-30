@@ -5,8 +5,9 @@ import type {
   WorkflowEvent,
   WorkflowState,
 } from "@agent-workflow-kit/core";
-import type { FeatureArtifactName } from "@agent-workflow-kit/persistence";
+import type { FeatureArtifactName, FixAttemptOutcome } from "@agent-workflow-kit/persistence";
 import type { OrchestrationError, OrchestrationFailureClass } from "./errors.js";
+import type { FixRejectionCode } from "./fix-policy.js";
 import type { HumanAction, StageRole, WorkStage } from "./stages.js";
 import type { VerificationEvidenceBundle } from "./verification.js";
 import type { WorkspaceScopeEvidence } from "./workspace.js";
@@ -31,6 +32,24 @@ export const ORCHESTRATION_STATUSES = [
 ] as const;
 
 export type OrchestrationStatus = (typeof ORCHESTRATION_STATUSES)[number];
+
+/**
+ * What the framework decided about one fix attempt, for a result that concerned one.
+ *
+ * Present when a stage ran a fix or refused to run one, and null otherwise. It exists because the
+ * error message has to be written for a person and this is the same decision in a shape a program can
+ * branch on: how far into the loop the attempt was, how many the loop was allowed, what the framework
+ * concluded, what the fix touched, and — when it refused — every shape of the refusal rather than just
+ * the one the error names first.
+ */
+export interface FixOutcomeSummary {
+  readonly originStage: FixReturnState;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly outcome: FixAttemptOutcome;
+  readonly changedPaths: readonly string[];
+  readonly rejectionCodes: readonly FixRejectionCode[];
+}
 
 export interface OrchestrationResult {
   readonly status: OrchestrationStatus;
@@ -58,6 +77,7 @@ export interface OrchestrationResult {
    * names only, so it is safe to persist, print, and pass to a reviewer as context.
    */
   readonly scope: WorkspaceScopeEvidence | null;
+  readonly fix: FixOutcomeSummary | null;
   readonly error: OrchestrationError | null;
 }
 
@@ -78,6 +98,7 @@ export interface OrchestrationResultInput {
   readonly evidence?: readonly VerificationEvidence[];
   readonly verification?: VerificationEvidenceBundle | null;
   readonly scope?: WorkspaceScopeEvidence | null;
+  readonly fix?: FixOutcomeSummary | null;
   readonly error?: OrchestrationError | null;
 }
 
@@ -102,6 +123,7 @@ export function buildOrchestrationResult(input: OrchestrationResultInput): Orche
     evidence: input.evidence ?? [],
     verification: input.verification ?? null,
     scope: input.scope ?? null,
+    fix: input.fix ?? null,
     error,
   };
 }

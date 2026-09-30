@@ -2,6 +2,7 @@ import type { FeatureArtifactName } from "@agent-workflow-kit/persistence";
 import { isTextArtifactName } from "@agent-workflow-kit/persistence";
 import {
   STAGE_DEFINITIONS,
+  type FixerInputContract,
   type StageArtifactContext,
   type StageArtifactOutputSpec,
   type StageExecutionRequest,
@@ -223,6 +224,76 @@ function renderStage(request: StageExecutionRequest, profile: string): string {
     lines.push(
       "",
       `You were invoked to repair a finding raised in workflow state \`${request.fixReturnState}\`. The artifact of that stage is in your routed context: it is the finding you must fix. Fix that finding only.`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Renders the fixer's authority, and its limits, from the contract the framework built.
+ *
+ * The framework hashes the approved spec, the plan, and the verification configuration before this
+ * stage is invoked and compares them after, so a fix that edits any of them is refused and the feature
+ * is failed for a human. Saying that here is not a warning the agent can weigh against finishing: the
+ * comparison does not read this prompt, and it will run whether or not the agent believed it.
+ *
+ * The approved scope is rendered as the exact patterns the fix may write, because "stay in scope" is
+ * only actionable if the scope is stated. And the attempt counter is rendered because a fixer that
+ * knows it is on its last attempt does not spend it on a change it is not sure of — while the
+ * framework, not the agent, decides what happens after the limit, and a failure there is terminal
+ * rather than another try.
+ */
+function renderFixerAuthority(request: StageExecutionRequest, contract: FixerInputContract): string {
+  const lines = [
+    "## Your authority for this fix",
+    "",
+    bulletList([
+      `the failure: ${contract.failureReason}`,
+      contract.target === null
+        ? "the criterion: none was recorded as numbered, so the routed report of the failing stage is the finding"
+        : `the criterion: \`${contract.target.requirementId}\`${
+            contract.target.acceptanceCriterionId === null
+              ? ""
+              : ` / \`${contract.target.acceptanceCriterionId}\``
+          } — ${contract.target.description}`,
+      `the deterministic verification that measured it: ${
+        contract.failedVerification === null ? "none, this is a review-stage fix" : `\`${contract.failedVerification}\``
+      }`,
+      `attempt ${String(contract.attempt)} of ${String(contract.maxAttempts)}`,
+      contract.implementationFingerprint === null
+        ? "the tree fingerprint: none was recorded for this failure"
+        : `the tree fingerprint you start from: \`${contract.implementationFingerprint}\``,
+    ]),
+    "",
+    contract.suspectedFiles.length === 0
+      ? "The failing stage named no files. Work out where the defect is from the routed evidence and report."
+      : ["The failing stage named these files:", "", bulletList(contract.suspectedFiles.map((path) => `\`${path}\``))].join("\n"),
+    "",
+    "You may write only these paths, which are the approved scope of the plan:",
+    "",
+    contract.approvedScope.length === 0
+      ? "Nothing. The approved plan names no paths, so there is nothing this fix is authorized to change."
+      : bulletList(contract.approvedScope.map((pattern) => `\`${pattern}\``)),
+    "",
+    "These paths are framework-controlled and no fix may change them, whatever the approved plan says:",
+    "",
+    bulletList(contract.protectedPaths.map((pattern) => `\`${pattern}\``)),
+    "",
+    "## What happens to a fix that is refused",
+    "",
+    bulletList([
+      "A fix that writes outside the approved scope, or that writes a framework-controlled path, is refused and the workflow fails for a human.",
+      "The specification, the plan, the verification configuration, and the recorded evidence are hashed before you run and compared after. Editing any of them is refused the same way.",
+      "Nothing is restored on your behalf. Whatever you wrote is left exactly as you wrote it, because it is the evidence a human is about to read.",
+      `This is attempt ${String(contract.attempt)} of ${String(contract.maxAttempts)}. When the limit is reached the framework refuses to start another attempt and fails the feature.`,
+    ]),
+  ];
+
+  if (contract.deterministicEvidence !== null) {
+    lines.push(
+      "",
+      "The bundle that decided this failure is in the deterministic evidence section below. It is a record of a run that already happened, not a task to reproduce, and your return value cannot change it.",
     );
   }
 
@@ -461,6 +532,7 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
     bulletList(definition.deliverables),
     renderFeature(request),
     renderStage(request, profile),
+    ...(request.fix === null ? [] : [renderFixerAuthority(request, request.fix)]),
     ["## Routed context", "", renderContext(request)].join("\n"),
     ["## Output slots you may fill", "", renderOutputs(request)].join("\n"),
     ...(request.verification === null || request.verification === undefined

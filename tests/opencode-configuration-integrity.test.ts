@@ -25,6 +25,7 @@ import {
   renderOpenCodeProjectFiles,
 } from "@agent-workflow-kit/opencode";
 import { afterEach, describe, expect, it } from "vitest";
+import { testFixerContract } from "../fixtures/fix-contract.js";
 import { testWorkspaceContext } from "../fixtures/workspace.js";
 import { createFakeOpenCodeTransport } from "../fixtures/opencode-transport.js";
 
@@ -44,6 +45,7 @@ interface StageUnderTest {
   readonly role: StageRole;
   readonly state: WorkflowState;
   readonly fixReturnState: StageExecutionRequest["fixReturnState"];
+  readonly fix: StageExecutionRequest["fix"];
 }
 
 const VERIFIER: StageUnderTest = {
@@ -51,6 +53,7 @@ const VERIFIER: StageUnderTest = {
   role: "verifier",
   state: WorkflowState.StaticVerification,
   fixReturnState: null,
+  fix: null,
 };
 
 const IMPLEMENTER: StageUnderTest = {
@@ -58,6 +61,7 @@ const IMPLEMENTER: StageUnderTest = {
   role: "implementer",
   state: WorkflowState.Implementing,
   fixReturnState: null,
+  fix: null,
 };
 
 const FIXER: StageUnderTest = {
@@ -65,6 +69,7 @@ const FIXER: StageUnderTest = {
   role: "fixer",
   state: WorkflowState.Fixing,
   fixReturnState: WorkflowState.StaticVerification,
+  fix: testFixerContract(),
 };
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
@@ -136,6 +141,7 @@ function requestFor(
     context: [],
     outputs: STAGE_DEFINITIONS[target.stage].outputs,
     fixReturnState: target.fixReturnState,
+    fix: target.fix,
     // The repository the adapter is bound to, and the directory it is asked to run in: these tests are
     // about the control plane in a checkout, so the request names the checkout for both.
     workspace: testWorkspaceContext({ repositoryRoot: root, workingDirectory: root }),
@@ -331,6 +337,7 @@ describe("duplicate agent definitions", () => {
       role: "planner",
       state: WorkflowState.Planning,
       fixReturnState: null,
+      fix: null,
     });
 
     // The refusal names the id the run needed, not the role that happened to need it.
@@ -564,13 +571,26 @@ describe("project-owned configuration that has to keep working", () => {
     // The check is per profile, so a project that satisfies it for the verifier still has to satisfy
     // it for the rest. This is the case that keeps the refusal from being the only thing that works.
     const stages: Readonly<Record<StageRole, StageUnderTest>> = {
-      griller: { stage: "grill", role: "griller", state: WorkflowState.Grilling, fixReturnState: null },
-      planner: { stage: "planning", role: "planner", state: WorkflowState.Planning, fixReturnState: null },
+      griller: {
+        stage: "grill",
+        role: "griller",
+        state: WorkflowState.Grilling,
+        fixReturnState: null,
+        fix: null,
+      },
+      planner: {
+        stage: "planning",
+        role: "planner",
+        state: WorkflowState.Planning,
+        fixReturnState: null,
+        fix: null,
+      },
       plan_reviewer: {
         stage: "plan_review",
         role: "plan_reviewer",
         state: WorkflowState.PlanReview,
         fixReturnState: null,
+        fix: null,
       },
       implementer: IMPLEMENTER,
       code_reviewer: {
@@ -578,12 +598,14 @@ describe("project-owned configuration that has to keep working", () => {
         role: "code_reviewer",
         state: WorkflowState.CodeReview,
         fixReturnState: null,
+        fix: null,
       },
       scope_reviewer: {
         stage: "scope_review",
         role: "scope_reviewer",
         state: WorkflowState.ScopeReview,
         fixReturnState: null,
+        fix: null,
       },
       verifier: VERIFIER,
       fixer: FIXER,
@@ -592,18 +614,21 @@ describe("project-owned configuration that has to keep working", () => {
         role: "security_reviewer",
         state: WorkflowState.SecurityReview,
         fixReturnState: null,
+        fix: null,
       },
       final_gate_reviewer: {
         stage: "final_gate",
         role: "final_gate_reviewer",
         state: WorkflowState.FinalGate,
         fixReturnState: null,
+        fix: null,
       },
       summarizer: {
         stage: "final_summary",
         role: "summarizer",
         state: WorkflowState.FinalSummary,
         fixReturnState: null,
+        fix: null,
       },
     };
 

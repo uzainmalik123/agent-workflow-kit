@@ -817,6 +817,7 @@ describe("a project command cannot hand the verifier a different set of rules", 
         context: [],
         outputs: STAGE_DEFINITIONS.static_verification.outputs,
         fixReturnState: null,
+        fix: null,
         workspace: testWorkspaceContext({ repositoryRoot: root, workingDirectory: root }),
       } satisfies StageExecutionRequest)
       .catch((error: unknown) => error);
@@ -896,6 +897,7 @@ describe("adapter error identity", () => {
       context: [],
       outputs: STAGE_DEFINITIONS.grill.outputs,
       fixReturnState: null,
+      fix: null,
       workspace: testWorkspaceContext({ repositoryRoot: root, workingDirectory: root }),
     } satisfies StageExecutionRequest;
 

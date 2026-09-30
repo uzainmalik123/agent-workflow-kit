@@ -77,6 +77,7 @@ function grillRequest(overrides: Partial<StageExecutionRequest> = {}): StageExec
     context: [],
     outputs: STAGE_DEFINITIONS.grill.outputs,
     fixReturnState: null,
+    fix: null,
     workspace: testWorkspaceContext(),
     ...overrides,
   };

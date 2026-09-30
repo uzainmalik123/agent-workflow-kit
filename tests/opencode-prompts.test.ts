@@ -6,6 +6,7 @@ import {
 } from "@agent-workflow-kit/orchestration";
 import { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES, buildStagePrompt } from "@agent-workflow-kit/opencode";
 import { describe, expect, it } from "vitest";
+import { testFixerContract } from "../fixtures/fix-contract.js";
 import { testWorkspaceContext } from "../fixtures/workspace.js";
 
 const created = "2026-04-05T06:07:08.000Z";
@@ -32,6 +33,7 @@ function requestFor(
     outputs: definition.outputs,
     fixReturnState: null,
     verification: null,
+    fix: null,
     workspace: testWorkspaceContext(),
     ...overrides,
   };
@@ -59,7 +61,7 @@ describe("deterministic prompt construction", () => {
       promptFor("plan_review"),
       promptFor("code_review"),
       promptFor("static_verification"),
-      promptFor("fixing", { fixReturnState: WorkflowState.RuntimeVerification }),
+      promptFor("fixing", { fixReturnState: WorkflowState.RuntimeVerification, fix: testFixerContract({ failedStage: WorkflowState.RuntimeVerification, failedVerification: "runtime" }) }),
       promptFor("security_review"),
       promptFor("final_gate"),
       promptFor("final_summary"),
@@ -183,7 +185,7 @@ describe("prompt contents", () => {
   });
 
   it("tells the fixer which finding it must repair", () => {
-    const prompt = promptFor("fixing", { fixReturnState: WorkflowState.RuntimeVerification });
+    const prompt = promptFor("fixing", { fixReturnState: WorkflowState.RuntimeVerification, fix: testFixerContract({ failedStage: WorkflowState.RuntimeVerification, failedVerification: "runtime" }) });
 
     expect(prompt).toContain("You were invoked to repair a finding raised in workflow state `runtime_verification`");
     expect(prompt).toContain("Fix that finding only.");

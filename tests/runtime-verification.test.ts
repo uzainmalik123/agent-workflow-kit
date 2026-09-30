@@ -977,9 +977,18 @@ describe("a real application", () => {
   it("runs its command with no shell, so an argument is never a line", async () => {
     const root = await makeProject(nodeProjectFiles);
 
+    // The child outlives `stableMs` on purpose. The criterion under test is whether the arguments were
+    // passed through uninterpreted, but a `process_start` check asserts that the process stayed *running*,
+    // and a child that writes and exits immediately satisfies that only when the machine is busy enough to
+    // delay its exit past the deadline. Making the lifetime longer than the criterion removes the race
+    // without weakening either assertion.
     await writeFile(
       join(root, "echo.mjs"),
-      'process.stdout.write(`${process.argv.length - 2} arguments\\n`);\n',
+      [
+        "process.stdout.write(`${process.argv.length - 2} arguments\\n`);",
+        "setTimeout(() => { process.exit(0); }, 1_000);",
+        "",
+      ].join("\n"),
       "utf8",
     );
 

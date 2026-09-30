@@ -11,6 +11,7 @@ import type {
   FeatureArtifactName,
 } from "@agent-workflow-kit/persistence";
 import type { StageArtifactOutputSpec, StageRole, WorkStage } from "./stages.js";
+import type { FixerInputContract } from "./fix-policy.js";
 import type { VerificationEvidenceBundle } from "./verification.js";
 
 export const STAGE_OUTCOMES = ["success", "needs_fix", "failed", "inconclusive"] as const;
@@ -79,6 +80,18 @@ export interface StageExecutionRequest {
    * statuses in it are what the workflow acts on, and no response can change them.
    */
   readonly verification?: VerificationEvidenceBundle | null;
+  /**
+   * The failure context a `fixing` stage runs on, and null for every other stage.
+   *
+   * Present exactly when the stage is `fixing`, so an executor can branch on the stage name and
+   * ignore it. It is the whole of the fixer's authority: the failure, the evidence that decided it,
+   * the criterion it was measured against, the paths the fix may write, the paths it may not, and
+   * which attempt this is. It deliberately carries no field for the acceptance criteria, the
+   * verification commands, the workflow state, or the approval checkpoint, because those are not the
+   * fixer's to state — the first two are hash-checked framework state, and the last two are files the
+   * fixer has no output slot for and no permission to write.
+   */
+  readonly fix: FixerInputContract | null;
 }
 
 export interface StageArtifactOutput {
