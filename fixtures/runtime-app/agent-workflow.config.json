@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "verification": {
+    "runtime": {
+      "command": { "executable": "node", "args": ["server.mjs", "4599"] },
+      "readiness": { "url": "http://127.0.0.1:4599/health", "timeoutMs": 10000 },
+      "checks": [
+        { "id": "health", "path": "/health", "expectedStatus": 200, "expectedBodyFragment": "ok" },
+        { "id": "dashboard", "path": "/", "expectedStatus": 200, "expectedBodyFragment": "Dashboard" }
+      ],
+      "timeoutMs": 30000
+    }
+  }
+}

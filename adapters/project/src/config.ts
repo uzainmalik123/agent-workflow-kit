@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { VerificationStage } from "@agent-workflow-kit/orchestration";
+import type { RuntimeVerificationConfiguration, VerificationStage } from "@agent-workflow-kit/orchestration";
 import {
   buildVerificationCommand,
   CAPABILITIES_BY_STAGE,
@@ -9,6 +9,7 @@ import {
 } from "./commands.js";
 import { ProjectAdapterError } from "./errors.js";
 import { isFile, isRecord, parseJsonFile, readProjectFile, resolveInsideRoot } from "./fs-safe.js";
+import { parseRuntimeVerificationConfiguration } from "./runtime-config.js";
 
 /**
  * Explicit project configuration for verification commands.
@@ -31,6 +32,12 @@ import { isFile, isRecord, parseJsonFile, readProjectFile, resolveInsideRoot } f
  * blocks it; declaring the tool itself, as `eslint .`, is the way to run a check whose script has
  * neighbouring hooks. The file is also project configuration rather than agent output: the OpenCode
  * adapter denies writing it to every role, and this adapter never writes it.
+ *
+ * The `runtime` section is the one place the file is not an array of commands, and the difference is
+ * the difference in what the stage does. Lint and tests are commands that exit; runtime verification is
+ * a process with a lifetime, a readiness gate, and assertions made against it while it runs, so it is
+ * an object. Its command is still a command and goes through the same policy in
+ * `runtime-config.ts`, and its absence is reported as absent rather than discovered.
  */
 export const PROJECT_CONFIG_FILENAME = "agent-workflow.config.json";
 
@@ -42,22 +49,31 @@ const CONFIG_FIELDS: ReadonlySet<string> = new Set(["schemaVersion", "verificati
 
 const COMMAND_FIELDS: ReadonlySet<string> = new Set(["id", "capability", "executable", "args", "cwd"]);
 
-const SECTIONS: readonly { readonly key: "static" | "test" | "runtime"; readonly stage: VerificationStage }[] = [
+/** The two sections that are lists of commands. `runtime` is an object and is parsed elsewhere. */
+const COMMAND_SECTIONS: readonly { readonly key: "static" | "test"; readonly stage: VerificationStage }[] = [
   { key: "static", stage: "static" },
   { key: "test", stage: "test" },
-  { key: "runtime", stage: "runtime" },
 ];
+
+const SECTION_KEYS: readonly string[] = [...COMMAND_SECTIONS.map((section) => section.key), "runtime"];
 
 export interface ProjectVerificationConfig {
   readonly static: readonly PlannedVerificationCommand[];
   readonly test: readonly PlannedVerificationCommand[];
-  readonly runtime: readonly PlannedVerificationCommand[];
+  /**
+   * The project's declared runtime verification, or `null` when it declared none.
+   *
+   * `null` is the normal case for most repositories and never an error: a project that has not said
+   * what to run has not asked to be checked at runtime, and the stage reports that as deferred rather
+   * than discovering an application or passing on the verifier's word.
+   */
+  readonly runtime: RuntimeVerificationConfiguration | null;
   /** The absolute path of the file, or `null` when the project declares nothing. */
   readonly path: string | null;
 }
 
 function emptyConfig(path: string | null): ProjectVerificationConfig {
-  return { static: [], test: [], runtime: [], path };
+  return { static: [], test: [], runtime: null, path };
 }
 
 function refuse(message: string): never {
@@ -93,10 +109,11 @@ function parseCommand(
     capability !== "lint" &&
     capability !== "typecheck" &&
     capability !== "test" &&
-    capability !== "build" &&
-    capability !== "runtime"
+    capability !== "build"
   ) {
-    refuse(`The configured command "${id}" must name a capability: lint, typecheck, test, build, or runtime.`);
+    refuse(
+      `The configured command "${id}" must name a capability: lint, typecheck, test, or build. Runtime verification is not declared as a command, because it is a process with acceptance criteria rather than a command that exits; the "runtime" section states a command, a readiness condition, and checks instead.`,
+    );
   }
 
   if (!capabilityBelongsToStage(stage, capability)) {
@@ -189,20 +206,19 @@ export async function loadProjectVerificationConfig(root: string): Promise<Proje
   }
 
   for (const field of Object.keys(verification)) {
-    if (!SECTIONS.some((section) => section.key === field)) {
+    if (!SECTION_KEYS.includes(field)) {
       refuse(
         `The project verification configuration contains the unknown section "${field}". Only static, test, and runtime are read.`,
       );
     }
   }
 
-  const commands: Record<"static" | "test" | "runtime", PlannedVerificationCommand[]> = {
+  const commands: Record<"static" | "test", PlannedVerificationCommand[]> = {
     static: [],
     test: [],
-    runtime: [],
   };
 
-  for (const section of SECTIONS) {
+  for (const section of COMMAND_SECTIONS) {
     const entries = verification[section.key];
 
     if (entries === undefined) {
@@ -227,5 +243,5 @@ export async function loadProjectVerificationConfig(root: string): Promise<Proje
     commands[section.key] = built;
   }
 
-  return { ...commands, path };
+  return { ...commands, runtime: parseRuntimeVerificationConfiguration(root, verification["runtime"]), path };
 }

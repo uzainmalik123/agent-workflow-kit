@@ -55,7 +55,7 @@ Each capability is classified, and the classification is what the evidence repor
 | `applicable`      | a command exists and can be run                                      |
 | `not_applicable`  | the ecosystem cannot have the check, such as typecheck in plain JS   |
 | `unavailable`     | the project could have it and provides no command                    |
-| `unsupported`     | this framework has no adapter for it, such as rust or runtime        |
+| `unsupported`     | this framework has no adapter for it, such as rust                |
 | `blocked`         | something outside the project stopped it, such as missing packages   |
 
 The reasons are stable codes (`detected`, `script_absent`, `language_without_typecheck`,
@@ -76,9 +76,16 @@ A bare `test` is the whole suite and is run once. The split is two half-suites a
 checks, because a project that has them is asserting that they are separable and a single run would
 hide which half broke.
 
-`runtime` is always `unsupported` with reason `runtime_deferred`. Reticle owns runtime verification
-in a later milestone, and the stage is recorded as `deferred` rather than as a pass, so the workflow
-stays satisfiable while it is deferred.
+`runtime` is `unsupported` with reason `runtime_deferred`, and stays that way whatever the project
+contains. A manifest says what a project *has*; it never says how to start it. `dev` exists in most
+projects, boots on a port chosen by the day, and is wrong often enough that guessing it would be worse
+than not guessing at all, so nothing is inferred from a script name and the capability is reported as
+deferred rather than as a command nobody ran.
+
+A project that wants its application verified says so itself, in `verification.runtime`. The stage then
+runs exactly that, and with no such section it is recorded as `deferred`: no process started, no port
+opened, one skipped check saying `runtime_not_configured`, and a workflow that stays satisfiable
+without ever having been proven.
 
 ## Command trust model
 
@@ -156,6 +163,59 @@ static stage report a pass it never measured. A configured command replaces the 
 same capability rather than running alongside it, so a capability is never checked twice under two
 different interpretations.
 
+### Runtime verification
+
+The other section is an object, because starting an application is not a command: it is a command, a
+condition for being ready, and a set of criteria to judge.
+
+```json
+{
+  "schemaVersion": 1,
+  "verification": {
+    "runtime": {
+      "command": { "executable": "pnpm", "args": ["dev"] },
+      "readiness": { "url": "http://127.0.0.1:3000", "timeoutMs": 30000 },
+      "checks": [
+        { "id": "health", "path": "/health", "expectedStatus": 200, "expectedBodyFragment": "ok" },
+        { "id": "home", "path": "/", "expectedStatus": 200, "expectedBodyFragment": "Dashboard" }
+      ],
+      "timeoutMs": 60000
+    }
+  }
+}
+```
+
+`command` is the same executable-and-arguments shape as everywhere else, and the same trust model
+applies to it: no shell, no interpolation, and a `sh -c` style invocation is refused. `readiness` is a
+URL the framework polls until it answers or `timeoutMs` is spent, and it is the one URL the checks are
+resolved against. Each check declares `id`, `path`, and an optional `method` (default `GET`),
+`expectedStatus`, and `expectedBodyFragment`; the absolute URL is resolved once, when the file is
+parsed, and recorded as the `url` of every probe, so an evidence record names what was actually asked.
+
+Resolution is deliberately narrow: the path is joined to the readiness URL, a path that begins with
+`//` or carries its own host is refused, and a check that would leave the declared host is refused with
+that host named. A verification that follows a redirect to another origin is verifying something the
+project did not declare. `https:` is not supported, which is a refusal rather than a silent downgrade.
+
+The stage is a sequence, and each step is honest about what it knows. The process starts; readiness is
+polled until the URL answers with any status, so a 503 that means "booting" is not mistaken for a
+healthy service and a 404 that means "up" is not mistaken for a broken one; the checks run in declared
+order; the process is stopped whatever happened. A process that exits during the wait ends the wait
+immediately with its exit code and its bounded output, rather than being polled against a port it will
+never bind. The whole run shares one deadline, `timeoutMs` from the start of the process, so a
+criterion that never answers is `deadline_exceeded` and the checks after it are not attempted.
+
+Failure is determined by what came back, never by what was printed. A status that is not the expected
+one is `status_mismatch` with both statuses in the detail, a body without the fragment is
+`body_absent`, an unreachable port is `request_failed`, and a refusal, timeout, or abort keeps the
+reason the client reported rather than the consequence of resetting the socket. Only `http:` is
+attempted, redirects are not followed, responses are read under a 256 KiB ceiling, and the connection
+is closed after each one: this is a check, not a client library.
+
+`fixtures/runtime-app/` is the whole thing in miniature — a server, a manifest, and a committed
+configuration — and `tests/runtime-verification.test.ts` drives it end to end: once passing, once
+failing a criterion the same server cannot satisfy, and once with its port confirmed free afterwards.
+
 The file is project configuration, not agent output. It is readable, because a fixer repairing a
 failing check has a legitimate reason to know which command produced it, and it is not writable by
 any role: the generated OpenCode permissions deny `edit` on it for every role, including the
@@ -163,8 +223,8 @@ implementer and the fixer.
 
 ## Process execution
 
-`runChildProcess` is the single deterministic runner in the repository, and the OpenCode transport
-uses it too, so there is no weaker second path. It never rejects and never throws: every outcome is a
+`runChildProcess` is the single deterministic runner in the repository, the OpenCode transport uses it
+too, and the runtime stage uses a supervised form of it, so there is no weaker second path. It never rejects and never throws: every outcome is a
 result, because a failing lint run is exactly the evidence a verification stage must be able to
 record. Turning a result into a refusal is a caller's decision, and the transport's refusal is one.
 
@@ -174,6 +234,15 @@ stable reason code for anything that was not an exit. A timeout or an abort term
 escalates to `SIGKILL` after the grace period, and the first forced termination wins, so a command
 that is aborted and then overruns is reported as cancelled. Output that exceeds the byte ceiling stops
 the run rather than growing the process's memory.
+
+The runtime stage needs more than a finished result, because a process that is still running has no
+result yet. `startChildProcess` therefore returns a handle whose outcome can be asked for without
+awaiting it (`peekOutcome`, which returns `null` while the process is alive and is honest about a
+process that had already exited), whose output can be read at any moment, and which can be stopped and
+then awaited. On POSIX the child is placed in its own process group and the group is signalled, so a
+grandchild that inherited the pipes is stopped too. A stop the framework requested is recorded in the
+stage diagnostics, and stopping is attempted on every path out of the stage — pass, fail, timeout,
+cancellation — because a port left bound is a failure the next attempt would blame on something else.
 
 ## Evidence
 
@@ -266,12 +335,17 @@ runs, and running it is a consequence of a human having approved work in this re
 - appends every attempt under `deterministic_evidence` in `verification.json`, beside the model's own
   section and never over it.
 
-`deferred` does not block. Runtime verification has no deterministic command yet, and treating a
-deferred check as a failure would make the workflow unsatisfiable.
+`deferred` does not block. Treating a deferred check as a failure would make the workflow
+unsatisfiable. A deferred runtime stage is also not a pass: the orchestrator overrules a reported
+`success` on evidence that is deferred to `inconclusive` with `override:
+"deterministic_inconclusive"`, so nobody can skip the last stage by leaving it unconfigured. A
+`failed` or `blocked` runtime stage needs no overrule: it is a real failure and it goes back to the
+fixer.
 
 ## Not in this milestone
 
-No dependency installation, no lifecycle scripts, no Git, no Reticle, no free-form command templates,
-and no third-party skill integration. A Rust, Go, or Python command has to be declared in
+No dependency installation, no lifecycle scripts, no Git, no free-form command templates, no
+third-party skill integration, and no inference about how a project starts: an application is verified
+only when the project has declared the command, and a capability nobody declared is never run. A Rust, Go, or Python command has to be declared in
 `agent-workflow.config.json` and is run exactly as strictly as a detected Node command, or the
 capability is reported as unsupported.

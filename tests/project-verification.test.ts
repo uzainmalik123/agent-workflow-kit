@@ -65,7 +65,13 @@ const run = (overrides: Partial<ChildProcessRequest> & Pick<ChildProcessRequest,
 const declaredRuntimeCommand = (): string =>
   JSON.stringify({
     schemaVersion: 1,
-    verification: { runtime: [{ id: "smoke", capability: "runtime", executable: "smoke", args: [] }] },
+    verification: {
+      runtime: {
+        command: { executable: "node", args: ["server.mjs"] },
+        readiness: { url: "http://127.0.0.1:3000/health" },
+        checks: [{ id: "smoke", path: "/health", expectedStatus: 200 }],
+      },
+    },
   });
 
 const checkFor = (
@@ -326,7 +332,7 @@ describe("verification provider", () => {
     expect(bundle.checks[0]).toMatchObject({ capability: "test", status: "skipped" });
   });
 
-  it("defers the runtime stage explicitly, for every project", async () => {
+  it("defers the runtime stage explicitly, for every project that declared none", async () => {
     const project = await makeNodeProject(exitWith(0), { lint: "runner" });
     const provider = new ProjectVerificationProvider({ projectRoot: project.root });
 
@@ -339,8 +345,10 @@ describe("verification provider", () => {
       workspaceId: null,
     });
 
+    // Deferred, not passed and not failed: no command was started, so the stage had nothing to do.
+    // The workflow turns this into `inconclusive` rather than letting a verifier call it a success.
     expect(bundle.outcome).toBe("deferred");
-    expect(checkFor(bundle, "runtime")).toMatchObject({ status: "skipped", reason: "runtime_deferred" });
+    expect(checkFor(bundle, "runtime")).toMatchObject({ status: "skipped", reason: "runtime_not_configured" });
   });
 
   it("blocks instead of installing when dependencies are missing", async () => {

@@ -185,7 +185,7 @@ function emptyCapabilities(): Record<ProjectCapability, CapabilityDetection> {
       status: "unsupported",
       reason: "runtime_deferred",
       script: null,
-      detail: "Runtime verification is owned by Reticle and is not implemented.",
+detail: "A manifest cannot say how an application starts, and this framework never infers one: declare the runtime command, the readiness condition, and the checks in agent-workflow.config.json.",
     },
   };
 }
@@ -465,7 +465,7 @@ async function discoverUnsupportedProject(root: string, notes: string[]): Promis
           status: "unsupported",
           reason: "runtime_deferred",
           script: null,
-          detail: "Runtime verification is owned by Reticle and is not implemented.",
+    detail: "A manifest cannot say how an application starts, and this framework never infers one: declare the runtime command, the readiness condition, and the checks in agent-workflow.config.json.",
         },
       },
       commands: [],

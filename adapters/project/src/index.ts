@@ -4,9 +4,10 @@
  *
  * The public surface is deliberately small. `discoverProject` reports facts, `loadProjectVerificationConfig`
  * reports declared commands, `ProjectVerificationProvider` implements the orchestration
- * `VerificationProvider` port, and `runChildProcess` is the shared deterministic runner. Nothing here
- * writes to the project, nothing here follows a symbolic link, and nothing here accepts a command
- * that came from a model.
+ * `VerificationProvider` port, `ProjectRuntimeVerificationProvider` implements the runtime port, and
+ * `runChildProcess` and `startChildProcess` are the shared deterministic runners. Nothing here writes to
+ * the project, nothing here follows a symbolic link, and nothing here accepts a command that came from a
+ * model.
  */
 export { ProjectAdapterError, isProjectAdapterError, isDiscoveryRefusal } from "./errors.js";
 export type { ProjectAdapterErrorCode, ProjectAdapterErrorOptions } from "./errors.js";
@@ -20,6 +21,7 @@ export {
   describeOutcome,
   PROCESS_TERMINATIONS,
   runChildProcess,
+  startChildProcess,
 } from "./process.js";
 export type {
   ChildProcessOutcome,
@@ -28,6 +30,8 @@ export type {
   ProcessStreamCapture,
   ProcessTermination,
   RunChildProcessOptions,
+  SupervisedChildProcess,
+  SupervisedChildProcessRequest,
 } from "./process.js";
 
 export {
@@ -77,6 +81,23 @@ export type {
 
 export { loadProjectVerificationConfig, PROJECT_CONFIG_FILENAME, PROJECT_CONFIG_SCHEMA_VERSION } from "./config.js";
 export type { ProjectVerificationConfig } from "./config.js";
+
+export { parseRuntimeVerificationConfiguration } from "./runtime-config.js";
+
+export {
+  MAX_RUNTIME_RESPONSE_BYTES,
+  performHttpCheck,
+  resolveHttpTarget,
+} from "./http-check.js";
+export type { HttpCheckOutcome, HttpCheckRequest } from "./http-check.js";
+
+export {
+  createProjectRuntimeVerificationProvider,
+  ProjectRuntimeVerificationProvider,
+} from "./runtime.js";
+export type { ProjectRuntimeVerificationOptions } from "./runtime.js";
+
+export { runtimeCheckEvidence } from "./runtime-evidence.js";
 
 export {
   DEFAULT_MAX_FINGERPRINT_FILES,

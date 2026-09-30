@@ -5,6 +5,7 @@ import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   createWorkflowOrchestrator,
   DETERMINISTIC_EVIDENCE_KEY,
+  type OrchestrationResult,
   type VerificationCommandEvidence,
   type VerificationEvidenceBundle,
   type VerificationProvider,
@@ -417,27 +418,42 @@ describe("orchestrator verification integration", () => {
     });
   });
 
-  it("accepts a deferred runtime stage as completed, because deferral is not failure", async () => {
+  it("holds a deferred runtime stage at inconclusive, because nothing was measured", async () => {
     const root = await makeRoot();
     const provider = new RecordingProvider((request) =>
       request.verification === "runtime"
         ? evidenceFor(request, { outcome: "deferred", checks: [skippedRuntimeCheck(request)] })
         : evidenceFor(request),
     );
-    const harness = makeHarness(root, provider);
+    const executor = new FakeStageExecutor().configure("runtime_verification", {
+      outcome: "success",
+      summary: "The application serves the feature.",
+    });
+    const harness = makeHarness(root, provider, executor);
 
     await driveToPlanGate(harness);
+
+    let runtimeResult: OrchestrationResult | undefined;
 
     for (let step = 0; step < 8; step += 1) {
       const result = await harness.orchestrator.runNext("F-001");
 
-      if (result.status === "stage_completed" && result.stage === "runtime_verification") {
-        expect(result.state).toBe(WorkflowState.SecurityReview);
-        return;
+      if (result.stage === "runtime_verification") {
+        runtimeResult = result;
+        break;
       }
     }
 
-    throw new Error("The runtime verification stage never completed.");
+    // The verifier said success and the framework declined to record one. Nothing was started, no
+    // request was made, and no acceptance criterion was put to the running application, so there is
+    // nothing a pass could be a statement about.
+    expect(runtimeResult).toMatchObject({ status: "inconclusive" });
+    expect(runtimeResult?.state).toBe(WorkflowState.RuntimeVerification);
+    expect((runtimeResult?.findings ?? []).map((finding) => finding.message).join(" ")).toContain(
+      "no evidence",
+    );
+    // And it does not send the feature back to the fixer: nothing is known to be broken.
+    expect(runtimeResult?.state).not.toBe(WorkflowState.Fixing);
   });
 
   it("refuses the stage and writes nothing when the provider itself fails", async () => {

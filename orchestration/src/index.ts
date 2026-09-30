@@ -69,6 +69,7 @@ export {
   bindVerificationEvidenceToRequest,
   CAPABILITY_REASONS,
   CAPABILITY_STATUSES,
+  deferredRuntimeBlocksSuccess,
   DETERMINISTIC_EVIDENCE_KEY,
   evidenceBlocksSuccess,
   MAX_EVIDENCE_DETAIL_CHARS,
@@ -103,6 +104,36 @@ export type {
   ControlPlaneIntegrity,
   WorkspaceIntegrity,
 } from "./verification.js";
+
+export {
+  DEFAULT_RUNTIME_CHECK_TIMEOUT_MS,
+  DEFAULT_RUNTIME_READINESS_POLL_MS,
+  DEFAULT_RUNTIME_TIMEOUT_MS,
+  READINESS_FAILURE_REASONS,
+  RUNTIME_CHECK_KINDS,
+  RUNTIME_CHECK_REASONS,
+  RUNTIME_HTTP_METHODS,
+  RUNTIME_VERIFICATION_STATUSES,
+} from "./runtime-verification.js";
+export type {
+  RuntimeCheckConfiguration,
+  RuntimeCheckEvidence,
+  RuntimeCheckKind,
+  RuntimeCheckReason,
+  RuntimeCommandConfiguration,
+  RuntimeHttpCheckConfiguration,
+  RuntimeHttpMethod,
+  RuntimeProcessDiagnostics,
+  RuntimeProcessStartCheckConfiguration,
+  RuntimeReadinessConfiguration,
+  RuntimeReadinessEvidence,
+  RuntimeVerificationConfiguration,
+  RuntimeVerificationDiagnostics,
+  RuntimeVerificationProvider,
+  RuntimeVerificationRequest,
+  RuntimeVerificationResult,
+  RuntimeVerificationStatus,
+} from "./runtime-verification.js";
 
 export {
   approvedScopeFromPlan,

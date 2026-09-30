@@ -738,9 +738,11 @@ export class WorkflowOrchestrator {
     }
 
     const outcome = validation.result;
-    // Hard evidence is applied here, and only in one direction: a stage whose deterministic checks
-    // did not pass cannot be reported as a success. A verifier that says "success" about a failing
-    // lint run is overruled by the exit code, and the stage enters the fix loop instead.
+    // Hard evidence is applied here, in two directions. A stage whose deterministic checks did not
+    // pass cannot be reported as a success: a verifier that says "success" about a failing lint run is
+    // overruled by the exit code, and the stage enters the fix loop. And a runtime stage that measured
+    // nothing cannot be reported as a success either, which holds the stage inconclusive rather than
+    // pretending the acceptance criteria were met.
     const applied =
       evidence.bundle === null
         ? ({ outcome: outcome.outcome, override: "none", findings: [] } as const)

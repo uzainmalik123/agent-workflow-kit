@@ -331,7 +331,9 @@ describe("project configuration", () => {
     expect(config.path).toBeNull();
     expect(config.static).toEqual([]);
     expect(config.test).toEqual([]);
-    expect(config.runtime).toEqual([]);
+    // `null` rather than an empty list: a project that declared no runtime section and a project that
+    // declared one with nothing in it are not the same, and only the first is a project without one.
+    expect(config.runtime).toBeNull();
   });
 
   it("loads declared commands and pins a configured cwd inside the root", async () => {
@@ -632,7 +634,6 @@ describe("a configured command may only claim a capability its section covers", 
     ["static", "typecheck"],
     ["static", "build"],
     ["test", "test"],
-    ["runtime", "runtime"],
   ];
 
   for (const [section, capability] of allowed) {
@@ -643,13 +644,9 @@ describe("a configured command may only claim a capability its section covers", 
 
   const refused: readonly (readonly [string, string])[] = [
     ["static", "test"],
-    ["static", "runtime"],
     ["test", "lint"],
     ["test", "typecheck"],
     ["test", "build"],
-    ["test", "runtime"],
-    ["runtime", "lint"],
-    ["runtime", "test"],
   ];
 
   for (const [section, capability] of refused) {
@@ -662,6 +659,24 @@ describe("a configured command may only claim a capability its section covers", 
       expect((refusal as ProjectAdapterError).message).toContain(`"${section}" section`);
     });
   }
+
+  it("refuses a static or test command that claims runtime, because runtime is not a command", async () => {
+    for (const section of ["static", "test"]) {
+      const refusal = await loadPairing(section, "runtime").catch((error: unknown) => error as ProjectAdapterError);
+
+      expect(refusal).toMatchObject({ code: "config_invalid" });
+      expect((refusal as ProjectAdapterError).message).toContain("must name a capability: lint, typecheck, test, or build");
+    }
+  });
+
+  it("refuses a runtime section that claims a capability, because runtime claims no capability", async () => {
+    // A capability is a fact about the repository. A runtime stage has no repository fact to point at:
+    // it is a command plus criteria, so a `capability` field there would be a claim about nothing.
+    const refusal = await loadPairing("runtime", "runtime").catch((error: unknown) => error as ProjectAdapterError);
+
+    expect(refusal).toMatchObject({ code: "config_invalid" });
+    expect((refusal as ProjectAdapterError).message).toContain('an array of commands');
+  });
 
   it("says which capabilities the section does cover", async () => {
     const refusal = await loadPairing("test", "build").catch(

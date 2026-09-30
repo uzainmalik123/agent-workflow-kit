@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
+import { DEFAULT_RUNTIME_TIMEOUT_MS } from "@agent-workflow-kit/orchestration";
 import type {
   CapabilityDetection,
+  RuntimeVerificationConfiguration,
+  RuntimeVerificationProvider,
   VerificationCapability,
   VerificationCommandEvidence,
   VerificationEvidenceBundle,
@@ -29,6 +32,8 @@ import {
   type ChildProcessOutcome,
   type ChildProcessRequest,
 } from "./process.js";
+import { runtimeCheckEvidence } from "./runtime-evidence.js";
+import { ProjectRuntimeVerificationProvider } from "./runtime.js";
 
 /**
  * The fingerprint recorded when the project could not be measured at all. A real digest would be a
@@ -68,6 +73,12 @@ export interface ProjectVerificationProviderOptions {
    * another one to prove that discovery and planning run no process at all.
    */
   readonly run?: (request: ChildProcessRequest) => Promise<ChildProcessOutcome>;
+  /**
+   * Substitutable runtime verifier. The default starts the configured application, waits for its
+   * readiness condition, and issues its checks; a test may supply another one to prove that collection
+   * itself starts nothing.
+   */
+  readonly runtime?: RuntimeVerificationProvider;
   /**
    * Where a request's commands may run, when the framework opened an isolated worktree for it.
    *
@@ -205,6 +216,7 @@ export class ProjectVerificationProvider implements VerificationProvider {
   readonly #clock: () => number;
   readonly #timeoutMs: number;
   readonly #run: (request: ChildProcessRequest) => Promise<ChildProcessOutcome>;
+  readonly #runtime: RuntimeVerificationProvider;
   readonly #resolveRunRoot: (request: VerificationRequest) => string;
   // Discovery and configuration are cached per root, not per provider. The same provider instance
   // collects for an isolated worktree and for the repository it was configured with, and a profile
@@ -226,6 +238,9 @@ export class ProjectVerificationProvider implements VerificationProvider {
       // `startedAt` and the bundle's `collectedAt` are read from the same source, and a test that
       // injects a clock gets a fully reproducible record.
       ((request) => runChildProcess(request, { clock: this.#clock }));
+    // The same one clock reaches the runtime provider, so a runtime run's process timestamps, check
+    // durations, and whole-run elapsed time are on the same timeline as the bundle that records them.
+    this.#runtime = options.runtime ?? new ProjectRuntimeVerificationProvider({ clock: this.#clock });
   }
 
   get projectRoot(): string {
@@ -332,16 +347,7 @@ export class ProjectVerificationProvider implements VerificationProvider {
     // implementation fingerprint on purpose, so this is the only measurement that notices a command
     // rewriting the session it is running inside or the agent file the next stage is about to load.
     const controlPlaneBefore = (await fingerprintControlPlane(root)).hash;
-    const checks = await this.#runStage(
-      request.verification,
-      request.revision,
-      fingerprint,
-      collectedAt,
-      root,
-      profile,
-      config,
-      request.signal ?? null,
-    );
+    const checks = await this.#runStage(request, fingerprint, collectedAt, root, profile, config);
     const workspaceAfter = (await fingerprintImplementation(root)).hash;
     const controlPlaneAfter = (await fingerprintControlPlane(root)).hash;
 
@@ -361,15 +367,23 @@ export class ProjectVerificationProvider implements VerificationProvider {
   }
 
   async #runStage(
-    stage: VerificationStage,
-    revision: number,
+    request: VerificationRequest,
     fingerprint: string,
     collectedAt: string,
     root: string,
     profile: ProjectProfile,
     config: ProjectVerificationConfig,
-    signal: AbortSignal | null,
   ): Promise<readonly VerificationCommandEvidence[]> {
+    const { verification: stage, revision } = request;
+    const signal = request.signal ?? null;
+
+    // The runtime stage is not discovered and never iterates commands. It is a supervised application
+    // and a set of criteria the project wrote, so it takes a different path from the branch below and
+    // shares nothing with it except the record they both produce.
+    if (stage === "runtime") {
+      return await this.#runRuntime(request, fingerprint, root, config.runtime);
+    }
+
     const capabilities = capabilitiesForStage(stage);
     const detections = capabilityDetectionsFor(profile, capabilities);
     const configured = config[stage];
@@ -477,6 +491,41 @@ export class ProjectVerificationProvider implements VerificationProvider {
     }
 
     return checks;
+  }
+
+  /**
+   * The runtime stage: a supervised application and the criteria the project wrote against it.
+   *
+   * The static and test branches above plan commands from the repository. This one plans nothing. It
+   * hands the declared configuration to the runtime provider and records what came back, and the only
+   * thing it decides is the deadline — the smaller of the provider's command ceiling and the deadline
+   * the project asked for, so a generous declaration cannot outlive the wiring's tolerance for a
+   * process that never exits.
+   */
+  async #runRuntime(
+    request: VerificationRequest,
+    fingerprint: string,
+    root: string,
+    configuration: RuntimeVerificationConfiguration | null,
+  ): Promise<readonly VerificationCommandEvidence[]> {
+    const result = await this.#runtime.verify({
+      featureId: request.featureId,
+      projectRoot: root,
+      revision: request.revision,
+      configuration,
+      timeoutMs: Math.min(this.#timeoutMs, configuration?.timeoutMs ?? DEFAULT_RUNTIME_TIMEOUT_MS),
+      signal: request.signal ?? null,
+    });
+
+    return result.evidence.map((check) =>
+      runtimeCheckEvidence({
+        check,
+        result,
+        cwd: configuration?.command.cwd ?? root,
+        revision: request.revision,
+        fingerprint,
+      }),
+    );
   }
 
   #execute(

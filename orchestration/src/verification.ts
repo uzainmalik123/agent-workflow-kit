@@ -725,9 +725,9 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
 /**
  * Whether hard evidence forbids a passing verification stage.
  *
- * `deferred` does not block: runtime verification has no deterministic command yet, and pretending a
- * deferred check is a failure would make the workflow unsatisfiable. `failed` and `blocked` both
- * block, because a stage that could not run its own check has not been verified.
+ * `failed` and `blocked` both block, because a stage that could not run its own check has not been
+ * verified. `deferred` is not a failure — treating it as one would make the workflow unsatisfiable — but
+ * for the runtime stage it still refuses a success on its own terms; see `deferredRuntimeBlocksSuccess`.
  */
 export function evidenceBlocksSuccess(bundle: VerificationEvidenceBundle): boolean {
   return bundle.outcome === "failed" || bundle.outcome === "blocked";
@@ -803,33 +803,104 @@ export function bindVerificationEvidenceToRequest(
 export type DeterministicEvidenceApplication =
   | {
       readonly outcome: StageOutcome;
-      /** `deterministic_failure` when the framework overrode a reported success. */
-      readonly override: "none" | "deterministic_failure";
+      /**
+       * Which framework rule, if any, overruled the reported outcome.
+       *
+       * `deterministic_failure` is a stage that cannot pass; `deterministic_inconclusive` is a stage
+       * that cannot be called a pass either. They are separate because the second one does not send
+       * the feature back to the fixer, and a caller reporting on a stage needs to tell "it failed" from
+       * "it was not measured".
+       */
+      readonly override: "none" | "deterministic_failure" | "deterministic_inconclusive";
       readonly findings: readonly ReviewFinding[];
     };
 
 /**
+ * Whether a `deferred` runtime bundle forbids calling the stage a success.
+ *
+ * A deferred static or test stage means the project has no lint, typecheck, build, or test command, and
+ * a verifier that reaches a conclusion from the source and the spec has still said something worth
+ * hearing. A deferred *runtime* stage means the opposite: nothing was started, nothing was requested,
+ * and nothing was observed. There is no interpretation to have, and the acceptance criteria were never
+ * put to the application at all.
+ *
+ * So absence is not a pass. It holds the stage at inconclusive, which is a state a human resolves, and
+ * it is deliberately not a `needs_fix`: nothing is known to be broken, and sending a feature back to a
+ * fixer with no defect to fix teaches people to configure the stage just to get past it.
+ */
+export function deferredRuntimeBlocksSuccess(bundle: VerificationEvidenceBundle): boolean {
+  return bundle.verification === "runtime" && bundle.outcome === "deferred";
+}
+
+/**
  * Applies hard evidence to a verifier result.
  *
- * The only override this performs is the one direction that matters: a stage whose deterministic
- * evidence is failed or blocked cannot be reported as a success, whatever the verifier said. A
- * verifier may still fail, request a fix, or report inconclusive on evidence that did pass, because
- * an interpreter that spots something the process exit code cannot is worth hearing.
+ * The overrides this performs are the two directions that matter. A stage whose deterministic evidence
+ * is failed or blocked cannot be reported as a success, whatever the verifier said; and a runtime stage
+ * with no evidence at all cannot be reported as a success either, because nothing was observed. A
+ * verifier may still fail, request a fix, or report inconclusive on evidence that did pass, because an
+ * interpreter that spots something the process exit code cannot is worth hearing.
  */
 export function applyDeterministicEvidence(
   bundle: VerificationEvidenceBundle,
   reported: StageOutcome,
   featureId: string,
 ): DeterministicEvidenceApplication {
-  if (!evidenceBlocksSuccess(bundle) || reported !== "success") {
-    return { outcome: reported, override: "none", findings: [] };
+  if (evidenceBlocksSuccess(bundle) && reported === "success") {
+    return {
+      outcome: "needs_fix",
+      override: "deterministic_failure",
+      findings: verificationFailureFindings(bundle, featureId),
+    };
   }
 
-  return {
-    outcome: "needs_fix",
-    override: "deterministic_failure",
-    findings: verificationFailureFindings(bundle, featureId),
-  };
+  if (deferredRuntimeBlocksSuccess(bundle) && reported === "success") {
+    return {
+      outcome: "inconclusive",
+      override: "deterministic_inconclusive",
+      findings: deferredRuntimeFindings(bundle, featureId),
+    };
+  }
+
+  return { outcome: reported, override: "none", findings: [] };
+}
+
+/** What a human needs to know about a runtime stage that measured nothing. */
+function deferredRuntimeFindings(
+  bundle: VerificationEvidenceBundle,
+  featureId: string,
+): readonly ReviewFinding[] {
+  return [
+    {
+      featureId,
+      severity: "warning" as const,
+      message: [
+        "Runtime verification produced no evidence, so the stage cannot be reported as a success.",
+        "Nothing was started, no request was made, and no acceptance criterion was put to the running application, so this is not a pass and not a failure: it is unmeasured.",
+        "Declare a runtime command, a readiness condition, and at least one check in agent-workflow.config.json to have the feature verified at runtime.",
+      ].join(" "),
+    },
+  ];
+}
+
+/**
+ * One sentence about how a check ended.
+ *
+ * The sentence has to match what actually ran, because a fixer reads it as the diagnosis. A check that
+ * never started has no exit code to quote. A check that ran something other than a process — a runtime
+ * probe makes a request — also has no exit code, and reporting "exited with null" for it would describe
+ * a process that never existed.
+ */
+function checkOutcomeSentence(check: VerificationCommandEvidence): string {
+  if (check.executable === null) {
+    return `No command ran: ${check.reason ?? "no reason recorded"}.`;
+  }
+
+  if (check.exitCode === null) {
+    return `${check.executable} ${check.args.join(" ")} ran to no exit code: ${check.reason ?? check.status}.`;
+  }
+
+  return `${check.executable} ${check.args.join(" ")} exited with ${String(check.exitCode)}.`;
 }
 
 /** Findings a fixer can act on, written by the framework and never by a model. */
@@ -844,9 +915,7 @@ export function verificationFailureFindings(
       severity: "error" as const,
       message: [
         `Deterministic ${check.capability} check "${check.id}" is ${check.status}.`,
-        check.executable === null
-          ? `No command ran: ${check.reason ?? "no reason recorded"}.`
-          : `${check.executable} ${check.args.join(" ")} exited with ${String(check.exitCode)}.`,
+        checkOutcomeSentence(check),
         check.detail,
       ].join(" "),
     }));

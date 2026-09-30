@@ -131,7 +131,7 @@ export function planNodeVerification(input: {
       "unsupported",
       "runtime_deferred",
       null,
-      "Runtime verification is owned by Reticle and is not implemented, so no runtime command is inferred.",
+      "A manifest cannot say how an application starts, and this framework never infers one, so no runtime command is planned from it. Declare the runtime command, the readiness condition, and the checks in agent-workflow.config.json.",
     ),
   };
 
