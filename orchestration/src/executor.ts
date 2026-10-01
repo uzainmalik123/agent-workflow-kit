@@ -12,6 +12,7 @@ import type {
 } from "@agent-workflow-kit/persistence";
 import type { StageArtifactOutputSpec, StageRole, WorkStage } from "./stages.js";
 import type { FixerInputContract } from "./fix-policy.js";
+import type { SecurityReviewEvidence } from "./security.js";
 import type { VerificationEvidenceBundle } from "./verification.js";
 
 export const STAGE_OUTCOMES = ["success", "needs_fix", "failed", "inconclusive"] as const;
@@ -80,6 +81,16 @@ export interface StageExecutionRequest {
    * statuses in it are what the workflow acts on, and no response can change them.
    */
   readonly verification?: VerificationEvidenceBundle | null;
+  /**
+   * The deterministic security record the framework collected for this stage, when the stage was the
+   * security review and a provider was configured.
+   *
+   * Read-only context for explaining the change, in exactly the sense `verification` is: every check
+   * in it has a result the framework already decided, and a return value cannot change one. A
+   * reviewer that returns `success` about a record holding a failed check is overruled by the record,
+   * and a reviewer that wants to fail a record holding no failed check is heard.
+   */
+  readonly security?: SecurityReviewEvidence | null;
   /**
    * The failure context a `fixing` stage runs on, and null for every other stage.
    *

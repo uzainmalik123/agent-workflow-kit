@@ -32,6 +32,7 @@ import { FakeStageExecutor } from "../fixtures/stage-executor.js";
 import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 import { testWorkspaceContext } from "../fixtures/workspace.js";
 import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
+import { createFakeSecurityProvider } from "../fixtures/security-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 const roots: string[] = [];
@@ -316,6 +317,7 @@ describe("context routing", () => {
       store,
       executor,
       verification: createFakeVerificationProvider(),
+      security: createFakeSecurityProvider(),
     });
 
     await orchestrator.createFeature({

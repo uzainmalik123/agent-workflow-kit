@@ -19,6 +19,7 @@ import {
   type FakeWorkspaceProvider,
 } from "../fixtures/workspace-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { createFakeSecurityProvider } from "../fixtures/security-provider.js";
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
 const roots: string[] = [];
@@ -185,6 +186,7 @@ function makeHarness(
     executor,
     workspace,
     ...(provider === null ? {} : { verification: provider }),
+    security: createFakeSecurityProvider(),
     projectRoot: root,
   });
 

@@ -33,6 +33,7 @@ import {
 import { FakeStageExecutor } from "../fixtures/stage-executor.js";
 import { createFakeWorkspaceProvider, type FakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { createFakeSecurityProvider } from "../fixtures/security-provider.js";
 
 /**
  * Runtime acceptance verification, from configuration to workflow outcome.
@@ -1029,6 +1030,7 @@ describe("runtime evidence in the workflow", () => {
       executor,
       workspace,
       verification: { collect: (request: VerificationRequest) => Promise.resolve(answer(request)) },
+      security: createFakeSecurityProvider(),
       projectRoot: root,
     });
 

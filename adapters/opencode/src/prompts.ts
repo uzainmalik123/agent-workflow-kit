@@ -1,8 +1,11 @@
 import type { FeatureArtifactName } from "@agent-workflow-kit/persistence";
 import { isTextArtifactName } from "@agent-workflow-kit/persistence";
 import {
+  SECURITY_CHECK_LABELS,
   STAGE_DEFINITIONS,
   type FixerInputContract,
+  type SecurityCheckEvidence,
+  type SecurityReviewEvidence,
   type StageArtifactContext,
   type StageArtifactOutputSpec,
   type StageExecutionRequest,
@@ -290,7 +293,9 @@ function renderFixerAuthority(request: StageExecutionRequest, contract: FixerInp
     ]),
   ];
 
-  if (contract.deterministicEvidence !== null) {
+  if (contract.securityEvidence !== null) {
+    lines.push("", "The security record that decided this failure is in the security evidence section below. It is the measured result of a deterministic scan, not your opinion of the change, and your fix must remove the finding by changing the code or structure it describes.");
+  } else if (contract.deterministicEvidence !== null) {
     lines.push(
       "",
       "The bundle that decided this failure is in the deterministic evidence section below. It is a record of a run that already happened, not a task to reproduce, and your return value cannot change it.",
@@ -496,6 +501,63 @@ function renderEvidence(bundle: VerificationEvidenceBundle): string {
   ].join("\n");
 }
 
+function renderSecurityCheck(check: SecurityCheckEvidence): string {
+  return [
+    `#### \`${check.check}\` — ${check.result}`,
+    "",
+    bulletList([
+      `check: ${SECURITY_CHECK_LABELS[check.check]}`,
+      `result: \`${check.result}\``,
+      `decided by: ${check.authority === "framework" ? "the framework, from the measured change set" : "the project's own deterministic scanner"}`,
+      ...(check.paths.length === 0 ? [] : ["paths:", ...check.paths.map((path) => `- \`${path}\``)]),
+    ]),
+    "",
+    check.reason,
+  ].join("\n");
+}
+
+/**
+ * Renders the deterministic security record for the security review stage.
+ *
+ * Rendered in the same posture as the verification bundle, and for the same reason: the reviewer's
+ * authority is a narrative, while these are measurements, and the orchestrator enforces the
+ * measurements independently of whatever the reviewer returns. The two lines that matter most are the
+ * last two. A reviewer reading a record that already contains a failed check cannot report the stage
+ * clean, and one reading a record with no failed check is not obliged to invent one — the record
+ * settles which checks are broken, and the reviewer is left with the questions a scanner cannot answer.
+ */
+function renderSecurityEvidence(record: SecurityReviewEvidence): string {
+  return [
+    "## Deterministic security evidence",
+    "",
+    "A deterministic framework process scanned this change set before you were invoked. You have no",
+    "command execution and no file-reading tools in this session. Every check below already has a",
+    "result the framework decided; nothing here is a summary you are free to reinterpret.",
+    "",
+    bulletList([
+      `recorded status: \`${record.status}\``,
+      `collected at: ${record.collectedAt}`,
+      `session revision: \`${String(record.revision)}\``,
+      `workspace fingerprint: \`${record.workspaceFingerprint}\``,
+      `changed paths measured: \`${String(record.changedPaths.length)}\``,
+    ]),
+    "",
+    "### Check results",
+    "",
+    record.checks.map(renderSecurityCheck).join("\n\n"),
+    "",
+    "### What this means for your response",
+    "",
+    bulletList([
+      `The framework recorded this stage as \`${record.status}\` before you were invoked. A failed check, or an \`inconclusive\` result from any check, cannot be turned into a pass by any response you give; the orchestrator enforces that independently.`,
+      "Judge the change against these records and against the code. Do not repeat them as your own findings and do not contradict them.",
+      "Explain what the change does that a scanner cannot: why the credential-shaped string is a test fixture rather than a live secret, why the lifecycle hook is required by the package, why the workflow permission is narrower than it first appears.",
+      "A finding about a protected path is a statement that the feature should not do what it did, not a statement about how to do it differently: those paths are framework-controlled and amending the plan never makes the edit approvable.",
+      "If the recorded status and your reading of the change disagree, report the disagreement as a finding. Do not resolve it by reclassifying a check.",
+    ]),
+  ].join("\n");
+}
+
 /**
  * Builds the prompt for exactly one stage execution.
  *
@@ -538,6 +600,9 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
     ...(request.verification === null || request.verification === undefined
       ? []
       : [renderEvidence(request.verification)]),
+    ...(request.security === null || request.security === undefined
+      ? []
+      : [renderSecurityEvidence(request.security)]),
     ["## Response protocol", "", renderResponseProtocol(request)].join("\n"),
   ];
 

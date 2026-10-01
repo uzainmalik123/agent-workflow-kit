@@ -84,6 +84,22 @@ import {
   type WorkspaceUnauthorizedPath,
 } from "./workspace.js";
 import {
+  applySecurityEvidence,
+  applySecurityPolicy,
+  bindSecurityReviewToRequest,
+  latestRecordedSecurityReview,
+  mergeSecurityPolicyChecks,
+  mergeSecurityReviewEvidence,
+  securityEvidenceSummaries,
+  SECURITY_PROTECTED_PATTERNS,
+  SECURITY_REVIEW_ARTIFACT_NAME,
+  staleSecurityReview,
+  validateSecurityReviewEvidence,
+  type SecurityReviewEvidence,
+  type SecurityReviewProvider,
+  type SecurityReviewRequest,
+} from "./security.js";
+import {
   applyDeterministicEvidence,
   bindVerificationEvidenceToRequest,
   mergeDeterministicEvidence,
@@ -118,6 +134,23 @@ export interface WorkflowOrchestratorOptions {
    * from one.
    */
   readonly verification?: VerificationProvider | null;
+  /**
+   * Where deterministic security review evidence comes from.
+   *
+   * Optional only so that a workflow which never reaches the security review, and the tests for
+   * everything before one, can be built without one. The stage has no model-only mode: reaching it
+   * without a provider is a structured `security_not_configured` refusal that never calls the
+   * executor, for the same reason a verification stage without a provider is refused. A stage whose
+   * only evidence is a model's description of a scan nobody performed is the behaviour this option
+   * exists to remove.
+   *
+   * The provider is constructed by whoever wires the kit up. It is never an agent, and it never
+   * receives a check, a path, or a verdict from one. The framework's own two change-shaped checks do
+   * not come from here at all: they are computed from the measured change set and merged into the
+   * record after the provider returns, so a provider that answered for them would be refused rather
+   * than believed.
+   */
+  readonly security?: SecurityReviewProvider | null;
   /**
    * The project the verification provider may run commands in. Defaults to `process.cwd()`, and is
    * resolved once at construction so that a bundle for the same directory reaches the identity check
@@ -390,6 +423,7 @@ export class WorkflowOrchestrator {
   readonly #store: FeatureSessionStore;
   readonly #executor: StageExecutor;
   readonly #verification: VerificationProvider | null;
+  readonly #security: SecurityReviewProvider | null;
   readonly #projectRoot: string;
   readonly #workspace: ProjectWorkspaceProvider | null;
   readonly #maxFixAttempts: number;
@@ -398,6 +432,7 @@ export class WorkflowOrchestrator {
     this.#store = options.store;
     this.#executor = options.executor;
     this.#verification = options.verification ?? null;
+    this.#security = options.security ?? null;
     this.#projectRoot = resolve(options.projectRoot ?? process.cwd());
     this.#workspace = options.workspace ?? null;
     this.#maxFixAttempts = resolveMaxFixAttempts(options.maxFixAttempts);
@@ -719,6 +754,17 @@ export class WorkflowOrchestrator {
       return this.#result({ ...base, status: "rejected", state: fromState, error: evidence.error });
     }
 
+    // The security gate is collected immediately after the verification evidence and before anything
+    // else, for the same reason: it describes the tree as the stage is about to see it, and the only
+    // project code that runs in this method is the verification provider's, which a previous stage
+    // already had reasons to trust. It runs in the stage's own directory, reads the same change set
+    // the scope check will judge, and its record is the one the fixer is later given.
+    const security = await this.#collectSecurityReview(session, stage, workspace);
+
+    if (!security.ok) {
+      return this.#result({ ...base, status: "rejected", state: fromState, error: security.error });
+    }
+
     const context = await this.#gatherContext(featureId, contextPlan);
 
     if (!context.ok) {
@@ -755,7 +801,7 @@ export class WorkflowOrchestrator {
       if (!prepared.guard.allowed) {
         return await this.#escalateFix(
           session,
-          { ...base, verification: evidence.bundle },
+          { ...base, verification: evidence.bundle, security: security.evidence },
           prepared.guard,
           null,
           fixAttemptsExhausted(originStage, prepared.guard.attempt, prepared.guard.maxAttempts),
@@ -771,6 +817,7 @@ export class WorkflowOrchestrator {
           status: "rejected",
           state: fromState,
           verification: evidence.bundle,
+          security: security.evidence,
           error: orchestrationError(
             "workspace_not_configured",
             `Stage "fixing" would run for "${originStage}" with no workspace provider, so nothing could measure what the repair changed. A repair the framework cannot measure is not a repair the workflow can accept, so it is refused here instead of being recorded as one that changed nothing.`,
@@ -797,6 +844,7 @@ export class WorkflowOrchestrator {
       outputs: definition.outputs,
       fixReturnState: stage === "fixing" ? (session.machine.fixReturnState ?? null) : null,
       verification: evidence.bundle,
+      security: security.evidence,
       fix: fix?.contract ?? null,
       workspace: {
         workspaceId: workspace.workspaceId,
@@ -855,6 +903,7 @@ export class WorkflowOrchestrator {
           status: "rejected",
           state: fromState,
           verification: evidence.bundle,
+          security: security.evidence,
           error: orchestrationError(
             "workspace_unavailable",
             `The workspace could not be read to decide whether fix attempt ${String(fix.attempt)} was acceptable: ${observed.message}`,
@@ -873,6 +922,7 @@ export class WorkflowOrchestrator {
           status: "rejected",
           state: fromState,
           verification: evidence.bundle,
+          security: security.evidence,
           error: after.error,
         });
       }
@@ -935,6 +985,7 @@ export class WorkflowOrchestrator {
         status: scopeStatus(scope.error),
         state: fromState,
         verification: evidence.bundle,
+        security: security.evidence,
         scope: scope.evidence,
         error: scope.error,
       });
@@ -947,6 +998,7 @@ export class WorkflowOrchestrator {
         status: "executor_error",
         state: fromState,
         verification: evidence.bundle,
+        security: security.evidence,
         scope: scope.evidence,
         error: executorFailure,
       });
@@ -961,6 +1013,7 @@ export class WorkflowOrchestrator {
         status: "rejected",
         state: fromState,
         verification: evidence.bundle,
+        security: security.evidence,
         scope: scope.evidence,
         error: orchestrationError(validation.code, validation.message),
       });
@@ -976,18 +1029,36 @@ export class WorkflowOrchestrator {
       evidence.bundle === null
         ? ({ outcome: outcome.outcome, override: "none", findings: [] } as const)
         : applyDeterministicEvidence(evidence.bundle, outcome.outcome, featureId);
-    const effective =
-      applied.override === "none" ? outcome : { ...outcome, outcome: applied.outcome };
-    const extraFindings: readonly ReviewFinding[] = applied.findings;
+
+    // The security record is applied on top of that, and after it rather than beside it, for one
+    // reason: it is the narrower question. Verification asks whether the project works; security asks
+    // whether the change that made it work is one that should exist. A stage whose change is refused on
+    // security grounds cannot be repaired by fixing a failing test, so the security verdict is the one
+    // that has to survive, and composing the two outcomes in this order keeps a `needs_fix` a
+    // `needs_fix` whichever of them asked for it.
+    const appliedSecurity =
+      security.evidence === null
+        ? ({ outcome: applied.outcome, override: "none", findings: [] } as const)
+        : applySecurityEvidence(security.evidence, applied.outcome, featureId);
+
+    // The two applications compose into one, and the resolution order matters in exactly one case: a
+    // stage that has both records. Where only one exists, whichever it is decides alone — so the record
+    // that is absent must not silently become the decision, which is why the absent case resolves to the
+    // verification application rather than to the raw outcome.
+    const resolved = security.evidence === null ? applied : appliedSecurity;
+    const effective = resolved.override === "none" ? outcome : { ...outcome, outcome: resolved.outcome };
+    const extraFindings: readonly ReviewFinding[] = [...applied.findings, ...appliedSecurity.findings];
     const reported: ResultExtras = {
       ...base,
       executedStages: [stage],
       findings: [...outcome.findings, ...extraFindings],
-      evidence:
-        evidence.bundle === null
-          ? outcome.evidence
-          : [...outcome.evidence, ...verificationEvidenceSummaries(evidence.bundle)],
+      evidence: [
+        ...outcome.evidence,
+        ...(evidence.bundle === null ? [] : verificationEvidenceSummaries(evidence.bundle)),
+        ...(security.evidence === null ? [] : securityEvidenceSummaries(security.evidence)),
+      ],
       verification: evidence.bundle,
+      security: security.evidence,
       scope: scope.evidence,
     };
 
@@ -1044,12 +1115,14 @@ export class WorkflowOrchestrator {
           artifacts.push({
             name: artifact.name,
             content:
-              // Only the verification artifact carries evidence. Merging it into whatever else the
-              // stage produced would put one attempt's exit codes into an unrelated document, and the
-              // next attempt would append to the wrong place.
+              // Only two artifacts carry a framework-owned record. Merging one into whatever else the
+              // stage produced would put this attempt's measurements into an unrelated document, and
+              // the next attempt would append to the wrong place.
               artifact.name === VERIFICATION_ARTIFACT_NAME
                 ? mergeDeterministicEvidence(composed.content, stage, evidence.bundle)
-                : composed.content,
+                : artifact.name === SECURITY_REVIEW_ARTIFACT_NAME
+                  ? mergeSecurityReviewEvidence(composed.content, security.evidence)
+                  : composed.content,
           });
         }
 
@@ -1375,7 +1448,30 @@ export class WorkflowOrchestrator {
       return { ok: true, evidence };
     }
 
-    const enforced = await this.#restore(workspace, verdict.unauthorized, stage);
+    // The security review is the one stage whose whole job is to look at changes it is not allowed to
+    // make itself, so restoring them before anyone reads them would destroy the evidence it exists to
+    // produce. Protected paths are therefore excluded from the set handed to the restore below when
+    // this is the security review, and only then.
+    //
+    // This is deliberately not a widening of scope: it subtracts from what gets restored rather than
+    // adding to what is allowed, and every other stage restores these paths exactly as before. The gate
+    // is also not the only thing standing between a protected edit and a feature. Two others hold
+    // independently of it, which is why this is a carve-out with a stated downside rather than an
+    // opening: every stage other than this one refuses to write a protected path in the first place,
+    // and the framework-owned `protected_configuration_changed` check is merged into the record after
+    // the provider returns, so the edit still fails the stage. What this changes is only that the
+    // failure arrives as a security finding naming the path, instead of a silent restore that leaves
+    // the reviewer describing a clean tree.
+    const protectedUnauthorized =
+      stage === "security_review"
+        ? verdict.unauthorized.filter((entry) =>
+            SECURITY_PROTECTED_PATTERNS.some((pattern) => matchesScopePattern(entry.path, pattern)),
+          )
+        : [];
+    const restorable = verdict.unauthorized.filter(
+      (entry) => !protectedUnauthorized.some((held) => held.path === entry.path),
+    );
+    const enforced = await this.#restore(workspace, restorable, stage);
 
     if (!enforced.ok) {
       return {
@@ -1392,6 +1488,21 @@ export class WorkflowOrchestrator {
       recordedAt: enforced.enforcement.enforcedAt,
       measured: true,
     }, scope.patterns);
+
+    if (protectedUnauthorized.length > 0) {
+      return {
+        ok: false,
+        evidence: record,
+        error: orchestrationError(
+          "scope_violation",
+          `Stage "${stage}" changed protected path(s): ${protectedUnauthorized.map((entry) => entry.path).join(", ")}. The security review exists to report exactly this, so the changes were left in place to be read rather than restored; the record names them, and the stage result was discarded. ${
+            enforced.enforcement.restored.length > 0 || enforced.enforcement.removed.length > 0
+              ? `The other unauthorized path(s) were returned to the approved baseline: ${[...enforced.enforcement.restored, ...enforced.enforcement.removed].join(", ")}.`
+              : "No other unauthorized path(s) were present."
+          } A protected configuration change is not made approvable by amending the plan; a human has to decide whether the edit should exist at all.`,
+        ),
+      };
+    }
 
     if (enforced.enforcement.unsafePaths.length > 0) {
       return {
@@ -1728,6 +1839,12 @@ export class WorkflowOrchestrator {
     const artifact = trigger.value;
     const target = stage === null ? null : failureTargetFrom(artifact, stage);
     const evidence = stage === null ? null : latestRecordedEvidence(artifact, stage);
+    // For a fix loop triggered by the security gate, this is the record that decided the failure, and
+    // `evidence` is null for the same reason `security` is null everywhere else: the two artifacts are
+    // written by different stages and a loop has exactly one origin. Reading both would mean the fixer
+    // was handed two records and had to guess which one the stage had actually failed on.
+    const security =
+      workStageForOrigin(originStage) === "security_review" ? latestRecordedSecurityReview(artifact) : null;
 
     const contract: FixerInputContract = {
       featureId,
@@ -1735,8 +1852,9 @@ export class WorkflowOrchestrator {
       failedVerification: verificationForOrigin(originStage),
       target,
       deterministicEvidence: evidence,
-      failureReason: failureReasonFrom(originStage, evidence, target),
-      suspectedFiles: stage === null ? [] : suspectedFilesFrom(artifact, stage),
+      securityEvidence: security,
+      failureReason: failureReasonFrom(originStage, evidence, target, security),
+      suspectedFiles: stage === null ? [] : suspectedFilesFrom(artifact, stage, security),
       approvedScope: scope.patterns,
       revision: session.revision,
       implementationFingerprint: evidence?.implementationFingerprint ?? null,
@@ -1921,6 +2039,149 @@ export class WorkflowOrchestrator {
     }
 
     return { ok: true, bundle: bound.bundle };
+  }
+
+  /**
+   * Asks the deterministic security provider for this stage's record and refuses one it cannot verify.
+   *
+   * The shape of this is the verification provider's, and deliberately so: there is no fallback path,
+   * because a security review reached without a provider is a stage whose only evidence is a model's
+   * description of a scan nobody performed. A provider failure, a malformed record, a record that
+   * contradicts its own checks, and a well-formed record for a different tree are all the same answer,
+   * which is no.
+   *
+   * Four things happen after the provider returns, in this order, and the order is the point:
+   *
+   * 1. It is validated, so a corrupt or self-contradictory record never reaches the executor.
+   * 2. It is bound to this request — revision, root, workspace, change-set fingerprint, and the exact
+   *    path list — so a record about some other tree cannot be applied to this one.
+   * 3. The framework's own two change-shaped checks are merged in. They are computed here, from the
+   *    change set the workspace provider just measured, and they are not negotiable by anything the
+   *    provider said. This is why a protected-path change is a failure even if a provider declared
+   *    every one of its own checks passed.
+   * 4. Freshness against the last recorded fix is checked, so a cached answer restamped with the
+   *    current revision cannot decide whether a repair worked.
+   *
+   * The change set is measured here rather than reused from a later inspection because the review has
+   * to describe the tree the stage is about to read, and the stage has not run yet: taking a reading
+   * after the model has had the files would be a review of what the model did rather than of what it
+   * was asked to do.
+   */
+  async #collectSecurityReview(
+    session: FeatureSession,
+    stage: WorkStage,
+    workspace: ProjectWorkspace,
+  ): Promise<
+    | { readonly ok: true; readonly evidence: SecurityReviewEvidence | null }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    if (stage !== "security_review") {
+      return { ok: true, evidence: null };
+    }
+
+    if (this.#security === null) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "security_not_configured",
+          `The "${stage}" stage requires a security review provider and none is configured, so there is no deterministic record of the change to review. It is refused rather than passed on the reviewer's word.`,
+        ),
+      };
+    }
+
+    const inspected = await this.#inspect(session, workspace, stage);
+
+    if (!inspected.ok) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "workspace_unavailable",
+          `The change set to review could not be measured for stage "${stage}": ${inspected.message}`,
+        ),
+      };
+    }
+
+    const scope = await this.#readApprovedScope(session);
+
+    if (!scope.ok) {
+      return { ok: false, error: scope.error };
+    }
+
+    // The previously recorded review is read so the provider can tell a new finding from one that
+    // survived a fix, and so the record itself can be read as a series rather than a single answer.
+    // An absent artifact is the ordinary first-run case, not an error.
+    const previous = await this.#readOptionalArtifact(session.featureId, SECURITY_REVIEW_ARTIFACT_NAME);
+
+    if (!previous.ok) {
+      return { ok: false, error: previous.error };
+    }
+
+    const request: SecurityReviewRequest = {
+      featureId: session.featureId,
+      stage,
+      revision: session.revision,
+      projectRoot: workspace.workingDirectory,
+      workspaceId: workspace.workspaceId,
+      changes: inspected.inspection.changes,
+      changedPaths: approvedPathsOf(inspected.inspection.changes),
+      approvedPatterns: scope.patterns,
+      protectedPatterns: SECURITY_PROTECTED_PATTERNS,
+      workspaceFingerprint: inspected.inspection.fingerprint,
+      previousReview: latestRecordedSecurityReview(previous.value),
+    };
+
+    let raw: unknown;
+
+    try {
+      raw = await this.#security.review(request);
+    } catch (error) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "security_provider_failed",
+          `The security review provider failed for stage "${stage}": ${describeError(error)}`,
+        ),
+      };
+    }
+
+    const validated = validateSecurityReviewEvidence(raw);
+
+    if (!validated.ok) {
+      return { ok: false, error: orchestrationError(validated.code, validated.message) };
+    }
+
+    const bound = bindSecurityReviewToRequest(validated.evidence, request);
+
+    if (!bound.ok) {
+      return { ok: false, error: orchestrationError(bound.code, bound.message) };
+    }
+
+    const merged = mergeSecurityPolicyChecks(
+      bound.evidence,
+      applySecurityPolicy({
+        changes: inspected.inspection.changes,
+        approvedPatterns: scope.patterns,
+        protectedPatterns: SECURITY_PROTECTED_PATTERNS,
+      }),
+    );
+
+    const history = await this.#readFixHistory(session.featureId);
+
+    if (!history.ok) {
+      return { ok: false, error: history.error };
+    }
+
+    const lastFix = latestFixEntry(history.entries, stage);
+
+    if (lastFix !== null) {
+      const stale = staleSecurityReview(merged, lastFix);
+
+      if (stale !== null) {
+        return { ok: false, error: stale };
+      }
+    }
+
+    return { ok: true, evidence: merged };
   }
 
   async #verifyApproval(

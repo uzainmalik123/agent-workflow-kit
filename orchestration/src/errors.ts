@@ -4,6 +4,7 @@ export type OrchestrationFailureClass =
   | "executor"
   | "persistence"
   | "verification"
+  | "security"
   | "workspace";
 
 export type OrchestrationErrorCode =
@@ -36,6 +37,11 @@ export type OrchestrationErrorCode =
   | "verification_evidence_invalid"
   | "verification_evidence_mismatch"
   | "stale_verification_evidence"
+  | "security_not_configured"
+  | "security_provider_failed"
+  | "security_evidence_invalid"
+  | "security_evidence_mismatch"
+  | "stale_security_evidence"
   | "workspace_not_configured"
   | "workspace_unavailable"
   | "workspace_baseline_missing"
@@ -90,6 +96,11 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     verification_evidence_invalid: "verification",
   verification_evidence_mismatch: "verification",
   stale_verification_evidence: "verification",
+  security_not_configured: "security",
+  security_provider_failed: "security",
+  security_evidence_invalid: "security",
+  security_evidence_mismatch: "security",
+  stale_security_evidence: "security",
   workspace_not_configured: "workspace",
   workspace_unavailable: "workspace",
   workspace_baseline_missing: "workspace",

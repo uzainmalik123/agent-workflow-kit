@@ -18,6 +18,7 @@ import {
   type ChildProcessRequest,
 } from "@agent-workflow-kit/project";
 import { afterEach, describe, expect, it } from "vitest";
+import { createFakeSecurityProvider } from "../fixtures/security-provider.js";
 
 const roots: string[] = [];
 
@@ -1145,6 +1146,7 @@ describe("freshness through the orchestrator, against a real project", () => {
       store,
       executor,
       verification: provider,
+      security: createFakeSecurityProvider(),
       projectRoot: project.root,
     });
 

@@ -27,6 +27,7 @@ export function testFixerContract(
       description: "The parser rejects malformed input instead of coercing it.",
     },
     deterministicEvidence: null,
+    securityEvidence: null,
     failureReason:
       'The deterministic lint check "lint" is failed (pnpm lint). The formatter disagrees with two files.',
     suspectedFiles: ["src/parser.ts"],

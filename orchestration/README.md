@@ -27,7 +27,7 @@ await orchestrator.failFeature(featureId);
 - `createFeature` creates the session in `draft` and, when a request is supplied, writes `request.md`. It never transitions.
 - `runNext` performs **at most one** work stage. It never loops, never approves anything, and never calls a second stage in the same call.
 - `approvePlan` / `approvePush` / `failFeature` apply the corresponding legal state-machine event. `approvePlan` also records the approval checkpoint; `approvePush` only moves the session to `committing`, no Git work exists.
-- `maxFixAttempts` bounds one repair loop per origin stage and defaults to `MAX_FIX_ATTEMPTS`. `workspace` and `verification` are optional; without them the framework records that it measured nothing rather than passing for a clean run. See [Fixer trust model](#fixer-trust-model).
+- `maxFixAttempts` bounds one repair loop per origin stage and defaults to `MAX_FIX_ATTEMPTS`. `workspace`, `verification`, and `security` are optional; without them the framework records that it measured nothing rather than passing for a clean run. See [Fixer trust model](#fixer-trust-model) and [Security review](#security-review).
 - Usage and storage errors on `createFeature` and on the initial `load` of `runNext` propagate as `PersistenceError`. Everything the orchestrator decides is returned as an `OrchestrationResult`.
 
 Every decision the orchestrator makes is a single persistence mutation carrying the revision it read, so a caller may drive the same feature from several processes and a losing writer is told so instead of overwriting the winner.
@@ -307,11 +307,50 @@ The workspace is opened once per stage and closed when the stage ends, including
 
 Every post-approval stage records a `WorkspaceScopeEvidence` alongside the result: the approved commit and patterns, every observed path, every unauthorized path, what was restored, removed, or left unsafe, the staged paths, the `HEAD`, and a fingerprint of the tree. It is evidence of what the framework saw, not an approval, and `measured` is there so an unmeasured record cannot pass for a clean one.
 
+## Security review
+
+`security_review` is a gate between `runtime_verification` and `final_gate`, and it is cleared by a deterministic record rather than by an opinion. `security` is optional in the same way `verification` is: absent from a workflow that never reaches the stage, and a refusal when the stage is reached without one.
+
+```ts
+const orchestrator = createWorkflowOrchestrator({ store, executor, security });
+```
+
+```ts
+interface SecurityReviewProvider {
+  review(request: SecurityReviewRequest): Promise<SecurityReviewEvidence>;
+}
+```
+
+Before the executor runs, the framework asks the provider for a record of the change set and then does four things to it, in this order:
+
+1. **Validates** it. Structural rules for the persisted artifact, plus two semantic ones: a status has to be the one its own checks support, and a provider may not answer for the framework's own checks.
+2. **Binds** it to the request — stage, revision, resolved root, workspace identity, workspace fingerprint, changed paths, and approved scope. A well-formed record is easy to produce for the wrong tree, and a `pass` for the wrong tree is the one answer that cannot announce itself.
+3. **Merges** the framework's own two checks, computed from the measured change set: `protected_configuration_changed` and `dependency_configuration_out_of_scope`. These are not negotiable by anything the provider said.
+4. **Checks freshness** against the last recorded fix, so a cached answer restamped with the current revision cannot decide whether a repair worked.
+
+The record is applied to the stage outcome whatever the executor returns:
+
+| record | reviewer returned | result |
+| --- | --- | --- |
+| `fail` | `success` | `needs_fix` — the gate overrules the reviewer |
+| `inconclusive` | `success` | `inconclusive` — the stage stops for a human |
+| `fail` | `failed` or `needs_fix` | reported, not overruled |
+
+This is the only stage in the workflow where a return value is discarded outright, and it is discarded in the direction that is harder to be wrong about. A `needs_fix` enters `WorkflowState.Fixing` with `fixReturnState: SecurityReview` and comes back here rather than to the final gate, carrying `FixerInputContract.securityEvidence` — the record that decided the failure, and `deterministicEvidence: null`, because a loop has exactly one origin.
+
+Records are appended under `deterministic_evidence.security_review` in the `security_review` artifact, the same framework-owned key the verification evidence uses. `validateSecurityReviewEvidence` is applied to what a provider returns; `validateStoredSecurityReview` is applied on read-back and accepts both halves of the record, so a persisted record containing the merged framework checks is still readable.
+
+One deliberate exception to the scope policy lives here: protected paths are **reported, not restored**, during this stage, because restoring them would destroy the evidence the gate exists to produce. The stage result is discarded and the refusal names them; every other stage is unaffected, and the framework-owned check fails the stage regardless of what the provider said.
+
+Full detail, including the nine checks, who decides each, and the stated limits, is in [`docs/security-review.md`](../docs/security-review.md).
+
 ## Result contract
 
-`OrchestrationResult` always reports `status`, `failureClass`, `fromState`, `state`, `committed`, `executedStages` (0 or 1), `stage`, `role`, `event`, `artifacts`, `action`, `fixReturnState`, `findings`, `evidence`, `fix`, and `error`.
+`OrchestrationResult` always reports `status`, `failureClass`, `fromState`, `state`, `committed`, `executedStages` (0 or 1), `stage`, `role`, `event`, `artifacts`, `action`, `fixReturnState`, `findings`, `evidence`, `verification`, `security`, `scope`, `fix`, and `error`.
 
 `fix` is a `FixOutcomeSummary` and is null on every result that is not about a repair. On a `fixing` stage it carries the origin stage, the attempt, the limit, the outcome, the measured `changedPaths`, and the rejection codes — so a caller learns why a repair was refused without reopening `fixes.json`, and learns it from the same record the audit trail holds.
+
+`security` is the deterministic security record for the run, and is null on every result that never reached the gate. That is not the same as an absent provider: reaching the gate without one is a `rejected` result, not a null field.
 
 | status | meaning | transition |
 | --- | --- | --- |
@@ -331,7 +370,7 @@ Every post-approval stage records a `WorkspaceScopeEvidence` alongside the resul
 | `persistence_error` | durable storage prevented or obscured progress | see below |
 | `terminal` | the feature is `complete` or `failed` | none |
 
-Failures are classified instead of collapsed: `workflow` (a legal-decision problem, including a reported stage failure), `executor` (a throw or an unusable result), and `persistence` (storage refused the write or could not keep up). Only `failFeature` moves a feature to the terminal `failed` state; no exception and no stage result can terminate a feature.
+Failures are classified instead of collapsed: `workflow` (a legal-decision problem, including a reported stage failure), `executor` (a throw or an unusable result), `verification` and `security` (a deterministic gate was reached and could not produce a trustworthy record), `workspace` (the change set could not be measured), and `persistence` (storage refused the write or could not keep up). Only `failFeature` moves a feature to the terminal `failed` state; no exception and no stage result can terminate a feature.
 
 ## Concurrency
 

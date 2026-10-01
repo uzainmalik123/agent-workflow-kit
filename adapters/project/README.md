@@ -342,6 +342,52 @@ unsatisfiable. A deferred runtime stage is also not a pass: the orchestrator ove
 `failed` or `blocked` runtime stage needs no overrule: it is a real failure and it goes back to the
 fixer.
 
+## Security review
+
+`createProjectSecurityReviewProvider` implements the orchestration layer's `SecurityReviewProvider`
+port, and answers with a record rather than a verdict. It is the same shape of contract as the
+verification provider, and for the same reason: the orchestrator has to be able to check what came
+back, so nothing here is trusted on the strength of having produced it.
+
+```ts
+const security = createProjectSecurityReviewProvider({ projectRoot });
+const orchestrator = createWorkflowOrchestrator({ store, executor, workspace, verification, security });
+```
+
+The provider scans the changed paths it was given and nothing else. It reads at most 2 MB per file,
+refuses to follow a symlink out of the project, and reports `inconclusive` rather than `pass` for
+anything it could not read — a link, a file above the ceiling, a path that vanished mid-scan. A
+review that could not look at part of the change says so instead of reporting a clean one.
+
+Seven checks are decided here, all path-and-content shaped and all bounded to the change set:
+
+| check | what it finds |
+| --- | --- |
+| `hardcoded_secret` | credential-shaped literals — provider token prefixes, AWS key ids, GitHub and Slack tokens, private key headers, named secret assignments |
+| `credential_file` | a `.env`, `.npmrc`, keystore, or similar, outside the approved scope |
+| `unexpected_executable` | an added path that is executable on disk, carries a script suffix, or opens with a shebang |
+| `package_manager_hook` | a lifecycle script, a hook payload, or a remote dependency specification in an added manifest |
+| `shell_execution` | `eval` of a string, `new Function` from a string, a backtick with interpolation, a pipe into an interpreter |
+| `command_restriction_weakened` | `--no-verify`, a negated matcher, or a bypass flag in an added file |
+| `permission_broadening` | `write-all`, or a privileged trigger, in an added workflow definition |
+
+Two checks are **not** implemented here, and are the framework's to decide from the change set
+alone: `protected_configuration_changed` and `dependency_configuration_out_of_scope`. A provider that
+reports either one is refused rather than believed.
+
+Placeholders are not secrets. `YOUR_API_KEY_HERE`, `example`, `changeme`, `<your-token>`, and
+`process.env.API_KEY` are all recognised as non-credentials, because a scan that flags the project's
+own test fixtures is a scan whose findings get ignored.
+
+Two limits are worth stating. The scanner reads **current contents, not a diff**: a credential-shaped
+string in a modified file may predate the feature, and the reason on a failed check says so for
+exactly the paths that were modified rather than added. And a pass means no known shape was found —
+the checks are regular expressions over plausible patterns, so they will miss a secret that does not
+look like one, and they are a floor rather than a certification.
+
+See [`docs/security-review.md`](../../docs/security-review.md) for the gate's full contract,
+including who decides each check and what happens when it fails.
+
 ## Not in this milestone
 
 No dependency installation, no lifecycle scripts, no Git, no free-form command templates, no

@@ -125,4 +125,11 @@ export {
 } from "./provider.js";
 export type { ProjectVerificationProviderOptions } from "./provider.js";
 
+export {
+  createProjectSecurityReviewProvider,
+  ProjectSecurityReviewProvider,
+  SECURITY_SCAN_CEILING,
+} from "./security.js";
+export type { ProjectSecurityReviewProviderOptions } from "./security.js";
+
 export { MAX_MANIFEST_BYTES, resolveInsideRoot } from "./fs-safe.js";

@@ -19,6 +19,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakeOpenCodeTransport, renderFencedJson } from "../fixtures/opencode-transport.js";
 import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
+import { createFakeSecurityProvider } from "../fixtures/security-provider.js";
 import { testWorkspaceContext } from "../fixtures/workspace.js";
 import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 
@@ -111,6 +112,7 @@ async function createHarness(
       options.verification === null
         ? null
         : (options.verification ?? createFakeVerificationProvider()),
+    security: createFakeSecurityProvider(),
     projectRoot: root,
     workspace,
   });

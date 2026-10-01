@@ -9,6 +9,7 @@ import type { FeatureArtifactName, FixAttemptOutcome } from "@agent-workflow-kit
 import type { OrchestrationError, OrchestrationFailureClass } from "./errors.js";
 import type { FixRejectionCode } from "./fix-policy.js";
 import type { HumanAction, StageRole, WorkStage } from "./stages.js";
+import type { SecurityReviewEvidence } from "./security.js";
 import type { VerificationEvidenceBundle } from "./verification.js";
 import type { WorkspaceScopeEvidence } from "./workspace.js";
 
@@ -73,6 +74,12 @@ export interface OrchestrationResult {
    */
   readonly verification: VerificationEvidenceBundle | null;
   /**
+   * The deterministic security record collected for this run, when the stage was the security review
+   * and a provider was configured. Absent from a run that never reached one, which is not the same as
+   * an absent provider — that case is refused rather than reported as an absent record.
+   */
+  readonly security: SecurityReviewEvidence | null;
+  /**
    * The deterministic scope record for this run, when the stage ran in an isolated workspace. Path
    * names only, so it is safe to persist, print, and pass to a reviewer as context.
    */
@@ -97,6 +104,7 @@ export interface OrchestrationResultInput {
   readonly findings?: readonly ReviewFinding[];
   readonly evidence?: readonly VerificationEvidence[];
   readonly verification?: VerificationEvidenceBundle | null;
+  readonly security?: SecurityReviewEvidence | null;
   readonly scope?: WorkspaceScopeEvidence | null;
   readonly fix?: FixOutcomeSummary | null;
   readonly error?: OrchestrationError | null;
@@ -122,6 +130,7 @@ export function buildOrchestrationResult(input: OrchestrationResultInput): Orche
     findings: input.findings ?? [],
     evidence: input.evidence ?? [],
     verification: input.verification ?? null,
+    security: input.security ?? null,
     scope: input.scope ?? null,
     fix: input.fix ?? null,
     error,

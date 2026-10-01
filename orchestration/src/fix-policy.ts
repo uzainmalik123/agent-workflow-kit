@@ -12,6 +12,11 @@ import {
   type VerificationStage,
 } from "./verification.js";
 import {
+  securityAffectedPaths,
+  securityFailureReason,
+  type SecurityReviewEvidence,
+} from "./security.js";
+import {
   approvedPathsOf,
   isProtectedWorkspacePath,
   matchesScopePattern,
@@ -119,6 +124,16 @@ export interface FixerInputContract {
   readonly target: FixFailureTarget | null;
   /** The bundle that decided the failure, verbatim, or null when the origin stage produced none. */
   readonly deterministicEvidence: VerificationEvidenceBundle | null;
+  /**
+   * The security record that decided the failure, verbatim, or null when the origin stage produced none.
+   *
+   * A fix triggered by the security gate carries one here and nothing in `deterministicEvidence`, which
+   * is the point of the field. The two evidences answer different questions and have different
+   * remedies: a failing verification wants a line changed, while a failed security check wants the
+   * feature that introduced it to be smaller. A fixer given both would have to guess which question it
+   * was answering, so it is handed exactly the record that decided.
+   */
+  readonly securityEvidence: SecurityReviewEvidence | null;
   readonly failureReason: string;
   /** Repository-relative paths the failing stage named, when it named any. */
   readonly suspectedFiles: readonly string[];
@@ -578,8 +593,23 @@ export function failureTargetFrom(artifact: unknown, stage: WorkStage): FixFailu
   return null;
 }
 
-/** Paths the failing stage named, from either its results or its findings. */
-export function suspectedFilesFrom(artifact: unknown, stage: WorkStage): readonly string[] {
+/**
+ * Paths the failing stage named, from either its results or its findings.
+ *
+ * A security record's own paths come first, and they displace the artifact's entirely when present.
+ * The artifact is what the stage wrote about itself, which for a security review is a report; the record
+ * is what the scanner measured, and naming a path the reviewer chose to mention would point a fixer at
+ * the wrong file. The two are never mixed, so a fixer is always pointed at one origin.
+ */
+export function suspectedFilesFrom(
+  artifact: unknown,
+  stage: WorkStage,
+  security: SecurityReviewEvidence | null = null,
+): readonly string[] {
+  if (security !== null) {
+    return securityAffectedPaths(security);
+  }
+
   const section = originSection(artifact, stage);
 
   if (section === null) {
@@ -621,7 +651,17 @@ export function failureReasonFrom(
   originStage: FixReturnState,
   bundle: VerificationEvidenceBundle | null,
   target: FixFailureTarget | null,
+  security: SecurityReviewEvidence | null = null,
 ): string {
+  // The security record is preferred over the model's account, and over the acceptance criterion,
+  // for the same reason the deterministic check is: a named path and a named regex are facts about the
+  // tree, while "this feature touched the wrong kind of file" is an interpretation. It is preferred over
+  // the bundle too, but not because it is more important — because a fix loop triggered by the security
+  // gate has no bundle, so the comparison is only ever one or the other in practice.
+  if (security !== null) {
+    return securityFailureReason(security);
+  }
+
   const failing = bundle?.checks.find(
     (check) => check.status === "failed" || check.status === "blocked" || check.status === "timed_out",
   );

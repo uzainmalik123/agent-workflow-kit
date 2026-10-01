@@ -18,6 +18,7 @@ import {
 import { FakeStageExecutor, findingFor } from "../fixtures/stage-executor.js";
 import { createFakeWorkspaceProvider } from "../fixtures/workspace-provider.js";
 import { createFakeVerificationProvider } from "../fixtures/verification-provider.js";
+import { createFakeSecurityProvider } from "../fixtures/security-provider.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 const fixedTimestamp = "2026-04-05T06:07:08.000Z";
@@ -42,7 +43,7 @@ async function makeRoot(): Promise<string> {
 function createHarness(root: string): Harness {
   const store = createFeatureSessionStore(root, { clock: fixedClock });
   const executor = new FakeStageExecutor();
-  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider() , workspace: createFakeWorkspaceProvider() }) };
+  return { store, executor, orchestrator: createWorkflowOrchestrator({ store, executor, verification: createFakeVerificationProvider(), security: createFakeSecurityProvider(), workspace: createFakeWorkspaceProvider() }) };
 }
 
 function contextNames(request: StageExecutionRequest | undefined): readonly string[] {
@@ -153,6 +154,7 @@ describe("durable fix history", () => {
       store: harness.store,
       executor: silent,
       verification: createFakeVerificationProvider(),
+      security: createFakeSecurityProvider(),
     });
     const result = await withoutReport.runNext("F-001");
 
