@@ -24,6 +24,15 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { buildPlanApproval, digestArtifactText, verifyPlanApproval } from "./approval.js";
 import { describeError, orchestrationError, type OrchestrationError } from "./errors.js";
+import {
+  criterionClaimsFrom,
+  criteriaFromSpec,
+  evaluateFinalGate,
+  type FinalGateFixInput,
+  type FinalGateResult,
+  type FinalGateScopeInput,
+  type FinalGateVerificationInput,
+} from "./final-gate.js";
 import { appendFixHistoryEntry, parseFixHistory } from "./fix-history.js";
 import {
   evaluateFixIntegrity,
@@ -107,6 +116,7 @@ import {
   verificationEvidenceSummaries,
   VERIFICATION_ARTIFACT_NAME,
   VERIFICATION_STAGE_BY_WORK_STAGE,
+  VERIFICATION_WORK_STAGES,
   type VerificationEvidenceBundle,
   type VerificationProvider,
   type VerificationRequest,
@@ -194,6 +204,10 @@ type ContextOutcome =
 
 type ComposeOutcome =
   | { readonly ok: true; readonly content: unknown }
+  | { readonly ok: false; readonly error: OrchestrationError };
+
+type FinalGateOutcome =
+  | { readonly ok: true; readonly result: FinalGateResult }
   | { readonly ok: false; readonly error: OrchestrationError };
 
 interface CommitInput {
@@ -319,6 +333,78 @@ function emptyInspection(workspace: ProjectWorkspace, fallbackCollectedAt: strin
     fingerprint: createHash("sha256").update("empty", "utf8").digest("hex"),
     collectedAt: workspace.baseline?.capturedAt ?? fallbackCollectedAt,
   };
+}
+
+/**
+ * Why the final gate refused, in the words the person reading the failure will get.
+ *
+ * Written from the gate's own structured result rather than from the facts that produced it, so the
+ * error and the `finalGate` field cannot disagree: this message quotes the gate's own blocker, and
+ * that blocker is also the one the route was taken from. The route is named in full because "route"
+ * on its own tells a reader nothing — what matters is which stage's evidence would have to be redone.
+ */
+function finalGateRefusalMessage(gate: FinalGateResult): string {
+  const first = gate.blockers[0];
+
+  if (first === undefined) {
+    return `The final gate could not certify this feature: ${gate.verification} verification, ${gate.security} security, ${gate.scope} scope, ${gate.approval} approval. Nothing was executed and the session stayed in "final_gate".`;
+  }
+
+  const others = gate.blockers.length - 1;
+
+  return `The final gate refused to certify this feature, and "final_gate" was not executed: ${first.message}${
+    others > 0 ? ` ${String(others)} further blocker(s) are recorded on the result: ${gate.blockers.slice(1).map((blocker) => blocker.code).join(", ")}.` : ""
+  } Route: ${first.route}. Nothing was written and the session stayed in "final_gate".`;
+}
+
+/**
+ * One recorded fix attempt, reduced to the facts the final gate decides freshness from.
+ *
+ * `maxAttempts` is the session's current limit rather than a value from the entry, because the entry
+ * does not carry one: the gate asks "did the loop still have room left when it spent its last
+ * attempt", and the answer is about the policy in force now. The attempt number is the entry's own.
+ */
+function finalGateFixInput(entry: FixHistoryEntry | null, maxAttempts: number): FinalGateFixInput | null {
+  if (entry === null) {
+    return null;
+  }
+
+  return {
+    originStage: entry.fixReturnState,
+    attempt: entry.attempt,
+    maxAttempts,
+    recordedAt: entry.recordedAt,
+    revisionBefore: entry.revisionBefore,
+  };
+}
+
+/**
+ * Whether the checks recorded after a fix are the checks that fix was measured against.
+ *
+ * The fix guard hashed the verification configuration before it ran, because that is the point at
+ * which "unchanged since the failure" is a fact. Comparing the newest bundle's configuration against
+ * that hash asks the complementary question: whether the evidence now describes the same checks. A
+ * difference means the command set moved under the repair, so a passing run proves something other
+ * than what the repair was asked to satisfy.
+ *
+ * A side that cannot be computed compares as "no change". The configuration digest is null when the
+ * stage recorded no bundle, and a fix that never had one to hash has nothing to compare — refusing on
+ * that absence would block a feature for a repair to a stage the gate is not judging.
+ */
+function verificationConfigurationChanged(
+  verification: unknown,
+  workStage: WorkStage,
+  entry: FixHistoryEntry | null,
+): boolean {
+  const recorded = entry?.integrity.verificationConfigSha256 ?? null;
+
+  if (recorded === null) {
+    return false;
+  }
+
+  const newest = verificationConfigurationDigest(verification, workStage);
+
+  return newest !== null && newest !== recorded;
 }
 
 /**
@@ -730,12 +816,17 @@ export class WorkflowOrchestrator {
   async #runStageInWorkspace(
     session: FeatureSession,
     stage: WorkStage,
-    base: ResultExtras,
+    initialExtras: ResultExtras,
     definition: (typeof STAGE_DEFINITIONS)[WorkStage],
     contextPlan: StageContextPlan,
     workspace: ProjectWorkspace,
     baseline: WorkspaceBaseline | null,
   ): Promise<OrchestrationResult> {
+    // Reassigned once, by the final gate below, when the gate passes: a passing gate is part of what
+    // this stage did, so its answer belongs on the result rather than in a variable that only the
+    // refusing branches could see.
+    let base: ResultExtras = initialExtras;
+
     const featureId = session.featureId;
     const fromState = session.machine.state;
 
@@ -763,6 +854,37 @@ export class WorkflowOrchestrator {
 
     if (!security.ok) {
       return this.#result({ ...base, status: "rejected", state: fromState, error: security.error });
+    }
+
+    // The final gate runs here: after this run's deterministic evidence and before the agent that
+    // would write the summary is involved at all. Position is the whole argument. A gate invoked after
+    // the summarizer had written its artifact would be a reviewer of prose; invoked before, it is the
+    // last thing that can say no, and it says it by not running the stage.
+    //
+    // A refusal is not a failure of the feature and not a mutation of the session. Nothing is
+    // committed, the state stays in `FinalGate`, and `executedStages` stays empty, because no stage
+    // opinion was recorded: the whole content of the refusal is that the recorded evidence was not
+    // good enough, which is a fact about what came before rather than something this stage produced.
+    // The route in the result names where that repair belongs; there is no transition back from here,
+    // so the gate reports the earlier stage rather than pretending to move to it.
+    if (stage === "final_gate") {
+      const gate = await this.#evaluateFinalGate(session, stage, workspace, baseline);
+
+      if (!gate.ok) {
+        return this.#result({ ...base, status: "rejected", state: fromState, error: gate.error });
+      }
+
+      if (gate.result.status !== "passed") {
+        return this.#result({
+          ...base,
+          status: gate.result.status === "failed" ? "stage_failed" : "inconclusive",
+          state: fromState,
+          finalGate: gate.result,
+          error: orchestrationError("final_gate_blocked", finalGateRefusalMessage(gate.result)),
+        });
+      }
+
+      base = { ...base, finalGate: gate.result };
     }
 
     const context = await this.#gatherContext(featureId, contextPlan);
@@ -2203,6 +2325,191 @@ export class WorkflowOrchestrator {
         ),
       };
     }
+  }
+
+  /**
+   * Reads everything the final gate decides from, and asks it.
+   *
+   * This is the only place in the framework that decides whether a feature may be summarized, and it
+   * is deliberately the only one that does no work of its own: every input is read from an artifact the
+   * framework already wrote, or measured from the tree the gate is standing in. Nothing is re-run. That
+   * restriction is what makes the gate's answer worth having — a fourth verification stage would have
+   * none of the freshness guarantees the first three have, and a gate that re-ran the tests it is
+   * judging would be able to overwrite the record it exists to check.
+   *
+   * The one exception is the scope measurement, which is taken fresh rather than read, because no
+   * artifact holds it: `scope_review` writes a model's document, and the framework's own scope evidence
+   * lives on the stage result rather than in the store. Measuring it here is also what makes "the tree
+   * moved since the last check" a finding the gate can report instead of one nobody looks for.
+   *
+   * Every read is sequential because each is a condition on the next, and the persistence failures are
+   * returned rather than folded into a verdict: a store that cannot be read is an operational problem,
+   * not evidence that the feature is unready, and calling it the second would send a feature back for
+   * work it does not need.
+   */
+  async #evaluateFinalGate(
+    session: FeatureSession,
+    stage: WorkStage,
+    workspace: ProjectWorkspace,
+    baseline: WorkspaceBaseline | null,
+  ): Promise<FinalGateOutcome> {
+    const featureId = session.featureId;
+
+    const spec = await this.#readOptionalArtifact(featureId, "spec");
+
+    if (!spec.ok) {
+      return spec;
+    }
+
+    const verification = await this.#readOptionalArtifact(featureId, VERIFICATION_ARTIFACT_NAME);
+
+    if (!verification.ok) {
+      return verification;
+    }
+
+    const security = await this.#readOptionalArtifact(featureId, SECURITY_REVIEW_ARTIFACT_NAME);
+
+    if (!security.ok) {
+      return security;
+    }
+
+    const fixes = await this.#readFixHistory(featureId);
+
+    if (!fixes.ok) {
+      return fixes;
+    }
+
+    const approved = await this.#readApprovedScope(session);
+
+    if (!approved.ok) {
+      return approved;
+    }
+
+    const stages: FinalGateVerificationInput[] = [];
+
+    for (const workStage of VERIFICATION_WORK_STAGES) {
+      const verificationStage = VERIFICATION_STAGE_BY_WORK_STAGE[workStage];
+
+      if (verificationStage === undefined) {
+        continue;
+      }
+
+      const entry = latestFixEntry(fixes.entries, workStage);
+
+      stages.push({
+        stage: workStage,
+        verification: verificationStage,
+        bundle: latestRecordedEvidence(verification.value, workStage),
+        fix: finalGateFixInput(entry, this.#maxFixAttempts),
+        configurationChanged: verificationConfigurationChanged(verification.value, workStage, entry),
+        claims: criterionClaimsFrom(verification.value, workStage),
+      });
+    }
+
+    const scope = await this.#measureFinalGateScope(session, stage, workspace, baseline, approved.patterns);
+    const securityEvidence = latestRecordedSecurityReview(security.value);
+
+    return {
+      ok: true,
+      result: evaluateFinalGate({
+        featureId,
+        state: session.machine.state,
+        revision: session.revision,
+        fingerprint: scope.fingerprint ?? "",
+        criteria: criteriaFromSpec(spec.value),
+        verification: stages,
+        security: {
+          evidence: securityEvidence,
+          fix: finalGateFixInput(latestFixEntry(fixes.entries, "security_review"), this.#maxFixAttempts),
+        },
+        scope,
+        // The approval freeze was re-verified in `#runStage` before this method was reached, and a
+        // missing or invalidated approval was refused there rather than passed on. The gate still
+        // takes the fact as an input rather than assuming it, so that a caller assembling the input
+        // itself — and so that the check is a fact about the input instead of a fact about this
+        // method's position in the call chain.
+        approval: {
+          status: "intact",
+          reason: "The plan-approval digests were re-verified against the persisted artifacts before this stage ran.",
+        },
+        fix: {
+          attempts: fixes.entries.length,
+          latest: finalGateFixInput(fixes.entries.at(-1) ?? null, this.#maxFixAttempts),
+        },
+      }),
+    };
+  }
+
+  /**
+   * The framework's own scope measurement, taken while the gate runs.
+   *
+   * Read-only on purpose, and that is the difference from `#enforceScope`: enforcement restores the
+   * paths nobody approved, which is right for a stage that is about to write and wrong for a gate that
+   * is about to refuse. A gate that deleted the evidence of a scope violation while explaining it
+   * would leave the next run with nothing to find. So the paths are named in the result instead.
+   */
+  async #measureFinalGateScope(
+    session: FeatureSession,
+    stage: WorkStage,
+    workspace: ProjectWorkspace,
+    baseline: WorkspaceBaseline | null,
+    approvedPatterns: readonly string[],
+  ): Promise<FinalGateScopeInput> {
+    const inspection = await this.#inspect(session, workspace, stage);
+
+    if (!inspection.ok) {
+      return {
+        basis: "unmeasurable",
+        insideApprovedScope: false,
+        integrityOk: false,
+        fingerprint: null,
+        unauthorizedPaths: [],
+        reason: inspection.message,
+      };
+    }
+
+    // No adapter means the stages ran in the human's own checkout, where the framework writes nothing
+    // of its own and therefore has no change set that could be outside the approved scope. This is a
+    // supported configuration rather than a finding, so it does not block.
+    if (this.#workspace === null) {
+      return {
+        basis: "not_measured",
+        insideApprovedScope: true,
+        integrityOk: true,
+        fingerprint: inspection.inspection.fingerprint,
+        unauthorizedPaths: [],
+        reason:
+          "No isolated-workspace adapter is configured, so the framework has no change set of its own to judge against the approved scope.",
+      };
+    }
+
+    if (baseline === null) {
+      return {
+        basis: "unmeasurable",
+        insideApprovedScope: false,
+        integrityOk: false,
+        fingerprint: inspection.inspection.fingerprint,
+        unauthorizedPaths: [],
+        reason:
+          "The workspace has no captured baseline, so no later comparison describes the approved starting point.",
+      };
+    }
+
+    const integrity = evaluateWorkspaceIntegrity(inspection.inspection, baseline);
+    const verdict = evaluateWorkspaceScope(inspection.inspection, { approvedPatterns });
+
+    return {
+      basis: "measured",
+      insideApprovedScope: verdict.ok,
+      integrityOk: integrity.ok,
+      fingerprint: inspection.inspection.fingerprint,
+      unauthorizedPaths: verdict.ok ? [] : verdict.unauthorized.map((entry) => entry.path),
+      reason: !integrity.ok
+        ? integrity.reason
+        : verdict.ok
+          ? `The change set is fingerprinted ${inspection.inspection.fingerprint} and touches nothing the approved plan does not describe.`
+          : `The change set touches ${String(verdict.unauthorized.length)} path(s) the approved plan does not describe.`,
+    };
   }
 
   async #gatherContext(

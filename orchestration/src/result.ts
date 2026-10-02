@@ -7,6 +7,7 @@ import type {
 } from "@agent-workflow-kit/core";
 import type { FeatureArtifactName, FixAttemptOutcome } from "@agent-workflow-kit/persistence";
 import type { OrchestrationError, OrchestrationFailureClass } from "./errors.js";
+import type { FinalGateResult } from "./final-gate.js";
 import type { FixRejectionCode } from "./fix-policy.js";
 import type { HumanAction, StageRole, WorkStage } from "./stages.js";
 import type { SecurityReviewEvidence } from "./security.js";
@@ -84,6 +85,12 @@ export interface OrchestrationResult {
    * names only, so it is safe to persist, print, and pass to a reviewer as context.
    */
   readonly scope: WorkspaceScopeEvidence | null;
+  /**
+   * The final gate's answer, when this run was one. Present on a passing `final_gate` run, on a
+   * refusing one, and null everywhere else — the field records that the gate ran, so a caller that
+   * finds it null knows the question was never put rather than that the answer was yes.
+   */
+  readonly finalGate: FinalGateResult | null;
   readonly fix: FixOutcomeSummary | null;
   readonly error: OrchestrationError | null;
 }
@@ -106,6 +113,7 @@ export interface OrchestrationResultInput {
   readonly verification?: VerificationEvidenceBundle | null;
   readonly security?: SecurityReviewEvidence | null;
   readonly scope?: WorkspaceScopeEvidence | null;
+  readonly finalGate?: FinalGateResult | null;
   readonly fix?: FixOutcomeSummary | null;
   readonly error?: OrchestrationError | null;
 }
@@ -132,6 +140,7 @@ export function buildOrchestrationResult(input: OrchestrationResultInput): Orche
     verification: input.verification ?? null,
     security: input.security ?? null,
     scope: input.scope ?? null,
+    finalGate: input.finalGate ?? null,
     fix: input.fix ?? null,
     error,
   };

@@ -37,6 +37,7 @@ export type OrchestrationErrorCode =
   | "verification_evidence_invalid"
   | "verification_evidence_mismatch"
   | "stale_verification_evidence"
+  | "final_gate_blocked"
   | "security_not_configured"
   | "security_provider_failed"
   | "security_evidence_invalid"
@@ -96,6 +97,7 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     verification_evidence_invalid: "verification",
   verification_evidence_mismatch: "verification",
   stale_verification_evidence: "verification",
+  final_gate_blocked: "workflow",
   security_not_configured: "security",
   security_provider_failed: "security",
   security_evidence_invalid: "security",

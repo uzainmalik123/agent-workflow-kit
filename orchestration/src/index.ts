@@ -47,6 +47,47 @@ export type {
 export { digestArtifactText } from "./approval.js";
 export type { ApprovalOutcome, ApprovalVerification } from "./approval.js";
 
+export {
+  criterionClaimsFrom,
+  criteriaFromSpec,
+  evaluateFinalGate,
+  FINAL_GATE_APPROVAL_STATUSES,
+  FINAL_GATE_BLOCKERS,
+  FINAL_GATE_ESCALATION,
+  FINAL_GATE_FIXER_STATUSES,
+  FINAL_GATE_SCOPE_BASES,
+  FINAL_GATE_SCOPE_STATUSES,
+  FINAL_GATE_SECURITY_STATUSES,
+  FINAL_GATE_STATUSES,
+  FINAL_GATE_VERIFICATION_STATUSES,
+  MAX_FINAL_GATE_CRITERIA,
+} from "./final-gate.js";
+export type {
+  FinalGateApprovalInput,
+  FinalGateApprovalStatus,
+  FinalGateBlocker,
+  FinalGateBlockerCode,
+  FinalGateCriterionClaim,
+  FinalGateCriterionInput,
+  FinalGateCriterionResult,
+  FinalGateEvidenceReference,
+  FinalGateFixInput,
+  FinalGateFixerInput,
+  FinalGateFixerStatus,
+  FinalGateInput,
+  FinalGateResult,
+  FinalGateRoute,
+  FinalGateScopeBasis,
+  FinalGateScopeInput,
+  FinalGateScopeStatus,
+  FinalGateSecurityInput,
+  FinalGateSecurityStatus,
+  FinalGateStageResult,
+  FinalGateStatus,
+  FinalGateVerificationInput,
+  FinalGateVerificationStatus,
+} from "./final-gate.js";
+
 export { appendFixHistoryEntry, parseFixHistory } from "./fix-history.js";
 export type { FixAttemptRecord, FixHistoryOutcome, FixHistoryRead } from "./fix-history.js";
 
