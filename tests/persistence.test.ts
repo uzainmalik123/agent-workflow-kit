@@ -166,7 +166,7 @@ describe("FeatureSessionStore sessions", () => {
       createdAt: fixedTimestamp,
       updatedAt: fixedTimestamp,
       machine: { state: WorkflowState.Draft },
-      approvals: { plan: null },
+      approvals: { plan: null, push: null },
     });
     expect(created.artifacts.request).toEqual({
       filename: FEATURE_ARTIFACT_FILENAMES.request,
@@ -701,7 +701,7 @@ describe("FeatureSessionStore contract", () => {
       createdAt: fixedTimestamp,
       updatedAt: fixedTimestamp,
       machine: { state: WorkflowState.Draft },
-      approvals: { plan: null },
+      approvals: { plan: null, push: null },
       artifacts: {
         request: { filename: "request.md", status: "missing" },
         grill: { filename: "grill.json", status: "missing" },
@@ -714,6 +714,7 @@ describe("FeatureSessionStore contract", () => {
         verification: { filename: "verification.json", status: "missing" },
         security_review: { filename: "security-review.json", status: "missing" },
         final_summary: { filename: "final-summary.md", status: "missing" },
+        final_gate: { filename: "final-gate.json", status: "missing" },
         fixes: { filename: "fixes.json", status: "missing" },
       },
     };

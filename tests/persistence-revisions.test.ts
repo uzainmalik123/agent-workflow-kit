@@ -70,7 +70,7 @@ describe("feature session revisions", () => {
 
     expect(session.revision).toBe(0);
     expect(session.schemaVersion).toBe(FEATURE_SESSION_SCHEMA_VERSION);
-    expect(session.approvals).toEqual({ plan: null });
+    expect(session.approvals).toEqual({ plan: null, push: null });
   });
 
   it("records the request artifact as its own revision", async () => {
@@ -79,7 +79,7 @@ describe("feature session revisions", () => {
 
     expect(session.revision).toBe(1);
     expect(session.schemaVersion).toBe(FEATURE_SESSION_SCHEMA_VERSION);
-    expect(session.approvals).toEqual({ plan: null });
+    expect(session.approvals).toEqual({ plan: null, push: null });
   });
 
   it("increments by exactly one per authoritative mutation and never skips", async () => {

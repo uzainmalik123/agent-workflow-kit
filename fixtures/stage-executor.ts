@@ -40,14 +40,17 @@ export function findingFor(
   return { featureId, severity, message };
 }
 
+/**
+ * The generic document a stage writes for an artifact it was not configured with.
+ *
+ * `final_summary` has no branch here, and cannot have one: the summary is composed by the framework from
+ * the recorded artifacts, so no executor produces it. A stage configured with that artifact would have
+ * its result rejected, which is what `final_summary` declaring no output slot means in practice.
+ */
 function defaultContent(
   request: StageExecutionRequest,
   name: FeatureArtifactName,
 ): unknown {
-  if (name === "final_summary") {
-    return `# ${request.feature.title}\n\n- feature: ${request.feature.featureId}\n- completed stages: ${request.state}\n`;
-  }
-
   if (name === "verification") {
     const kind = evidenceKindByStage[request.stage] ?? "static";
 

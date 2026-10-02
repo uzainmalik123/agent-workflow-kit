@@ -23,16 +23,19 @@ import {
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { buildPlanApproval, digestArtifactText, verifyPlanApproval } from "./approval.js";
+import { buildPushApproval, PUSH_APPROVAL_REVISION_OFFSET } from "./push-approval.js";
 import { describeError, orchestrationError, type OrchestrationError } from "./errors.js";
 import {
   criterionClaimsFrom,
   criteriaFromSpec,
   evaluateFinalGate,
+  recordedFinalGateFrom,
   type FinalGateFixInput,
   type FinalGateResult,
   type FinalGateScopeInput,
   type FinalGateVerificationInput,
 } from "./final-gate.js";
+import { buildFinalSummary, type FinalSummaryInput } from "./final-summary.js";
 import { appendFixHistoryEntry, parseFixHistory } from "./fix-history.js";
 import {
   evaluateFixIntegrity,
@@ -639,7 +642,11 @@ export class WorkflowOrchestrator {
           throw new StageFinalizeError(approval.error);
         }
 
-        const approvals: FeatureApprovals = { plan: approval.record };
+        const approvals: FeatureApprovals = {
+          plan: approval.record,
+          push: session.approvals.push,
+        };
+
         return { approvals };
       },
     });
@@ -727,8 +734,290 @@ export class WorkflowOrchestrator {
     };
   }
 
-  async approvePush(featureId: string): Promise<OrchestrationResult> {
-    return this.#applyGate(featureId, "approve_push", "gate_approved");
+  /**
+   * Records the human's publishing approval, or refuses to.
+   *
+   * This is the last boundary the framework owns, and the only one that is about the human rather than
+   * about the work. `approve_plan` says "build this"; this says "publish this", and the second cannot
+   * be inferred from the first: a plan that was approved is a plan nobody has yet seen implemented, and
+   * an implementation that passed the gate is a tree nobody has yet been asked about. So this method
+   * records something, refuses loudly when it cannot, and never treats a missing approval as a
+   * provisional one — a session in `awaiting_push_approval` with no record in it is a session that has
+   * not been approved, and the state machine will say so.
+   *
+   * The checks, in order, are all about whether the evidence is still current:
+   *
+   * - The recorded gate must exist and be readable. A summary composed from a document the framework
+   *   cannot parse is a summary of nothing, and this milestone deliberately persists the gate so that
+   *   there is something to refuse.
+   * - The session revision must be exactly two past the gate's. That is the distance a summary written
+   *   from that gate is recorded at, and any other distance means something was recorded in between.
+   * - The tree must fingerprint the way it did when the gate passed. The fingerprint is measured here,
+   *   through the same workspace and the same provider the gate measured through, rather than copied
+   *   from the gate — a check that cannot fail is not a check.
+   * - No approval may already exist. A second approval would be recorded against evidence the first one
+   *   did not cover, which is exactly the claim this record exists to prevent.
+   *
+   * `options.actor` is recorded verbatim when given. Nothing derives it, and nothing requires it: an
+   * unnamed approver is a real situation, and a name written by the framework would be worse than none.
+   */
+  async approvePush(
+    featureId: string,
+    options?: { readonly actor?: string | null },
+  ): Promise<OrchestrationResult> {
+    const session = await this.#store.load(featureId);
+    const base: ResultExtras = { featureId, fromState: session.machine.state };
+    const actor = options?.actor ?? null;
+
+    // The state is asked before the evidence is read, not after. Which state the session is in decides
+    // whether an approval is a thing that can exist at all, and that question is the workflow
+    // machine's to answer; a session sitting in `planning` has not earned a publishing approval by any
+    // amount of good evidence, so the refusal names the illegal transition rather than the first piece
+    // of missing evidence it happened to find.
+    const preview = previewMachine(session, "approve_push");
+
+    if (!preview.ok) {
+      return this.#result({
+        ...base,
+        status: "rejected",
+        state: session.machine.state,
+        event: "approve_push",
+        error: preview.error,
+      });
+    }
+
+    if (session.approvals.push !== null) {
+      return this.#result({
+        ...base,
+        status: "rejected",
+        state: session.machine.state,
+        error: orchestrationError(
+          "push_approval_already_granted",
+          `Feature "${featureId}" already records a publishing approval at revision ${String(session.approvals.push.approvedRevision)}, so it cannot be approved again.`,
+        ),
+      });
+    }
+
+    const gate = await this.#readRecordedFinalGate(session);
+
+    if (!gate.ok) {
+      return this.#result({ ...base, status: "rejected", state: session.machine.state, error: gate.error });
+    }
+
+    if (gate.result.status !== "passed") {
+      return this.#result({
+        ...base,
+        status: "rejected",
+        state: session.machine.state,
+        error: orchestrationError(
+          "final_gate_blocked",
+          finalGateRefusalMessage(gate.result),
+        ),
+      });
+    }
+
+    // The measurement is the expensive part and the only part that can be done outside the mutation, so
+    // it happens before the lock is taken and is re-checked inside it. The workspace is opened here for
+    // the same reason `approvePlan` captures a baseline before its commit: a provider call must never
+    // be made while the per-feature lock is held.
+    const measured = await this.#measureForPushApproval(session);
+
+    if (!measured.ok) {
+      return this.#result({ ...base, status: "rejected", state: session.machine.state, error: measured.error });
+    }
+
+    try {
+      return await this.#commit({
+        featureId,
+        session,
+        event: "approve_push",
+        successStatus: "gate_approved",
+        extras: base,
+        prepare: async (reader) => {
+          const reverified = await this.#readRecordedFinalGate(reader.session);
+
+          if (!reverified.ok) {
+            throw new StageFinalizeError(reverified.error);
+          }
+
+          const current = recordedFinalGateFrom(await reader.readArtifact("final_gate"));
+
+          if (!current.ok || current.result.revision !== reverified.result.revision) {
+            throw new StageFinalizeError(
+              current.ok
+                ? orchestrationError(
+                    "push_approval_stale",
+                    `The recorded final gate moved from revision ${String(reverified.result.revision)} to ${String(current.result.revision)} while the approval was in flight.`,
+                  )
+                : orchestrationError("final_gate_not_recorded", `The recorded final gate could not be read: ${current.reason}.`),
+            );
+          }
+
+          const approval = await buildPushApproval(reader, {
+            gate: current.result,
+            gateSha256: digestArtifactText(await reader.readArtifactText("final_gate") ?? ""),
+            fingerprint: measured.fingerprint,
+            actor,
+          });
+
+          if (!approval.ok) {
+            throw new StageFinalizeError(approval.error);
+          }
+
+          const approvals: FeatureApprovals = {
+            plan: reader.session.approvals.plan,
+            push: approval.record,
+          };
+
+          return { approvals };
+        },
+      });
+    } finally {
+      await this.#closeWorkspace(measured.workspace);
+    }
+  }
+
+  /**
+   * The gate as it is recorded on disk, for a stage or an approval that must be able to point at one.
+   *
+   * Reads the persisted artifact rather than re-evaluating anything. That is the distinction this
+   * milestone turns on: a re-evaluation would be a fresh opinion, and an opinion produced at approval
+   * time would approve whatever the framework happened to think then, rather than what the gate
+   * certified while the work was in front of the human. The refusal names the reason the document could
+   * not be used, because "no gate" and "a gate that cannot be read" are different operator problems and
+   * only one of them is fixed by running the gate again.
+   */
+  async #readRecordedFinalGate(
+    session: FeatureSession,
+  ): Promise<
+    | { readonly ok: true; readonly result: FinalGateResult }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    const featureId = session.featureId;
+
+    let value: unknown;
+
+    try {
+      value = await this.#store.readArtifact(featureId, "final_gate");
+    } catch (error) {
+      if (isArtifactMissing(error)) {
+        return {
+          ok: false,
+          error: orchestrationError(
+            "final_gate_not_recorded",
+            `No final gate result is recorded for feature "${featureId}". The gate must pass and be recorded before a summary can be written or an approval given.`,
+          ),
+        };
+      }
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "persistence_failed",
+          `The recorded final gate could not be read: ${describeError(error)}`,
+        ),
+      };
+    }
+
+    const recorded = recordedFinalGateFrom(value);
+
+    if (!recorded.ok) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "final_gate_not_recorded",
+          `The recorded final gate for "${featureId}" cannot be used: ${recorded.reason}.`,
+        ),
+      };
+    }
+
+    if (recorded.result.featureId !== featureId) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "final_gate_not_recorded",
+          `The recorded final gate belongs to "${recorded.result.featureId}", not to "${featureId}".`,
+        ),
+      };
+    }
+
+    return { ok: true, result: recorded.result };
+  }
+
+  /**
+   * Reads the tree the way the gate read it, so the two can be compared.
+   *
+   * The workspace is opened through the provider rather than measured in the operator's checkout, for
+   * the reason every post-approval stage opens one: the approved work lives in the worktree forked
+   * from the approved commit, and the fingerprint the gate recorded is a digest of the change set in
+   * that worktree. Measuring anywhere else would produce a different number for a tree nobody approved,
+   * and the refusal would fire on every call.
+   *
+   * The workspace is closed by the caller, which holds it across the commit so that the lease covers
+   * the whole approval rather than only the measurement.
+   */
+  async #measureForPushApproval(
+    session: FeatureSession,
+  ): Promise<
+    | {
+        readonly ok: true;
+        readonly workspace: ProjectWorkspace;
+        readonly fingerprint: string;
+      }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    const opened = await this.#openWorkspace(session, "final_summary");
+
+    if (!opened.ok) {
+      return { ok: false, error: opened.error };
+    }
+
+    if (opened.baseline === null) {
+      // Unreachable for a post-approval stage, and treated as a refusal rather than as a downgrade: the
+      // fingerprint a gate records is only meaningful against the worktree it forked, and a measurement
+      // taken without a baseline would be of a different tree.
+      await this.#closeWorkspace(opened.workspace);
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "workspace_unavailable",
+          "The publishing approval could not be bound to an approved baseline, so the tree it would approve cannot be identified.",
+        ),
+      };
+    }
+
+    const inspection = await this.#inspect(session, opened.workspace, "final_summary");
+
+    if (!inspection.ok) {
+      await this.#closeWorkspace(opened.workspace);
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "workspace_unavailable",
+          `The working tree could not be read to decide whether the publishing approval is still current: ${inspection.message}`,
+        ),
+      };
+    }
+
+    if (inspection.inspection.fingerprint.length === 0) {
+      await this.#closeWorkspace(opened.workspace);
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "push_approval_stale",
+          "The working tree produced no fingerprint, so it cannot be compared with the one the final gate decided against.",
+        ),
+      };
+    }
+
+    return {
+      ok: true,
+      workspace: opened.workspace,
+      fingerprint: inspection.inspection.fingerprint,
+    };
   }
 
   async failFeature(featureId: string): Promise<OrchestrationResult> {
@@ -826,6 +1115,12 @@ export class WorkflowOrchestrator {
     // this stage did, so its answer belongs on the result rather than in a variable that only the
     // refusing branches could see.
     let base: ResultExtras = initialExtras;
+
+    // Set only when a gate passed and the stage that ran it is going to be committed, and read in the
+    // `prepare` below to write `final-gate.json`. A gate that passed but whose stage then failed or was
+    // sent back to the fixer records nothing, because a recorded verdict nobody is about to act on is
+    // not the verdict the next stage should find.
+    let recordedGate: FinalGateResult | null = null;
 
     const featureId = session.featureId;
     const fromState = session.machine.state;
@@ -1094,6 +1389,34 @@ export class WorkflowOrchestrator {
       };
     }
 
+    // The summary is composed from a measurement, so the stage takes its own reading of the tree and
+    // hands the same one to the scope check below rather than paying for a second provider call. It is
+    // taken after the executor ran, for the same reason the fix path takes its reading there: a
+    // measurement taken before would attribute the framework's own writes to nobody and the agent's to
+    // nothing, and the freshness check below has to compare the gate's fingerprint against the tree as
+    // it is at the moment the summary is written.
+    let summaryMeasurement: WorkspaceInspection | null = null;
+
+    if (stage === "final_summary" && this.#workspace !== null) {
+      const observed = await this.#inspect(session, workspace, stage);
+
+      if (!observed.ok) {
+        return this.#result({
+          ...base,
+          executedStages: [stage],
+          status: "rejected",
+          state: fromState,
+          error: orchestrationError(
+            "workspace_unavailable",
+            `The working tree could not be read to write the final summary: ${observed.message}`,
+          ),
+        });
+      }
+
+      summaryMeasurement = observed.inspection;
+      measured = observed.inspection;
+    }
+
     // The scope check runs for a stage that returned and for a stage that threw, because a transport
     // failure, a timeout, or a model that abandoned the run halfway are precisely the runs that leave a
     // half-written file behind. Its verdict outranks the executor's: a stage that changed a path no
@@ -1196,6 +1519,13 @@ export class WorkflowOrchestrator {
       });
     }
 
+    // Only a stage that is actually committing a success records its gate. A stage that sent itself
+    // back to the fixer keeps the tree moving, and a verdict about the tree it started from is not the
+    // verdict the next run should find waiting for it.
+    if (effective.outcome === "success" && stage === "final_gate") {
+      recordedGate = base.finalGate ?? null;
+    }
+
     // Finalization is the only mutation a stage result can cause. It runs without any lock held
     // while the executor works, and the store re-checks the revision inside the lock, so a stale
     // result can neither write its artifacts nor apply its event to a later state.
@@ -1248,9 +1578,166 @@ export class WorkflowOrchestrator {
           });
         }
 
+        // The passing gate is persisted in the same mutation that moves the session past it, so a session
+        // in `final_summary` always finds a verdict to read and a session in `final_gate` never has one
+        // written for a decision that did not commit. Written as the whole result rather than a summary
+        // of it because the summary stage and the approval both need the revision and the fingerprint
+        // out of it, and a reduced copy would be a second thing to keep in step with the first.
+        if (recordedGate !== null) {
+          artifacts.push({ name: "final_gate", content: recordedGate });
+        }
+
+        // The summary is composed here, inside the mutation that records it, from the artifacts this
+        // commit is about to replace rather than from copies read earlier. That is what makes it a
+        // reading of the recorded state: there is no window in which the summary describes artifacts
+        // that the same mutation then changed.
+        if (stage === "final_summary") {
+          const summary = await this.#composeFinalSummary(
+            reader,
+            summaryMeasurement,
+            scope.evidence,
+          );
+
+          if (!summary.ok) {
+            throw new StageFinalizeError(summary.error);
+          }
+
+          artifacts.push({ name: "final_summary", content: summary.document });
+        }
+
         return { artifacts };
       },
     });
+  }
+
+  /**
+   * The document a human is asked to read before approving publishing.
+   *
+   * Three things are refused here, and each is a case where a summary would be a lie rather than an
+   * early draft:
+   *
+   * - No usable recorded gate. Without one there is no verdict to report and no evidence to be fresh
+   *   against, so the stage is refused instead of writing a summary of the artifacts that happen to be
+   *   on disk.
+   * - A session revision that is not `gate.revision + 2`. The gate was decided against one revision,
+   *   its own commit became the next, and this summary is the commit after that. A summary at any other
+   *   revision was written from a different set of artifacts than the ones this commit is recording.
+   * - A working tree whose fingerprint has moved since the gate measured it. A summary that lists
+   *   changed files is a claim about specific paths in a specific tree; when the tree has moved, those
+   *   lines are stale before anybody reads them, so the summary is not written at all rather than
+   *   written wrong.
+   *
+   * Everything it does read comes from `reader`, so the composition is derived from the persisted
+   * records at their current revision rather than from values carried across the mutation.
+   */
+  async #composeFinalSummary(
+    reader: FeatureMutationReader,
+    inspection: WorkspaceInspection | null,
+    scope: WorkspaceScopeEvidence | null,
+  ): Promise<
+    | { readonly ok: true; readonly document: string }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    const session = reader.session;
+    const gate = await this.#readRecordedFinalGate(session);
+
+    if (!gate.ok) {
+      return { ok: false, error: gate.error };
+    }
+
+    if (gate.result.status !== "passed") {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "final_gate_blocked",
+          `The recorded final gate is "${gate.result.status}", not "passed", so no summary of certified work can be written.`,
+        ),
+      };
+    }
+
+    const expectedRevision = gate.result.revision + PUSH_APPROVAL_REVISION_OFFSET;
+
+    if (reader.nextRevision !== expectedRevision) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "final_gate_evidence_stale",
+          `The recorded final gate was decided at revision ${String(gate.result.revision)}, so the summary written from it belongs at revision ${String(expectedRevision)}; this stage would record it at revision ${String(reader.nextRevision)}. Something was recorded between the gate and the summary, so the summary would not describe the artifacts this commit is writing.`,
+        ),
+      };
+    }
+
+    if (inspection === null) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "final_gate_evidence_stale",
+          "The final summary needs a measured change set and none was taken, so its changed-files and plan-step sections would be empty rather than accurate.",
+        ),
+      };
+    }
+
+    if (inspection.fingerprint !== gate.result.fingerprint) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "final_gate_evidence_stale",
+          `The working tree now fingerprints as ${inspection.fingerprint}, but the recorded final gate was decided against ${gate.result.fingerprint}. A summary written now would describe a tree the gate never certified, so none was written. Re-run the final gate and then the summary.`,
+        ),
+      };
+    }
+
+    const fixes = await this.#readFixHistory(session.featureId);
+
+    if (!fixes.ok) {
+      return { ok: false, error: fixes.error };
+    }
+
+    const approved = await this.#readApprovedScope(session);
+
+    if (!approved.ok) {
+      return { ok: false, error: approved.error };
+    }
+
+    const input: FinalSummaryInput = {
+      featureId: session.featureId,
+      title: session.title,
+      revision: reader.nextRevision,
+      fingerprint: inspection.fingerprint,
+      spec: await this.#readOptionalArtifactContent(session.featureId, "spec"),
+      plan: await this.#readOptionalArtifactContent(session.featureId, "plan"),
+      gate: gate.result,
+      security: await this.#readOptionalArtifactContent(
+        session.featureId,
+        SECURITY_REVIEW_ARTIFACT_NAME,
+      ),
+      fixes: fixes.entries,
+      changes: inspection.changes,
+      scope: {
+        measured: scope?.measured ?? false,
+        approvedPatterns: scope?.approvedPatterns ?? approved.patterns,
+        unauthorizedPaths: scope?.unauthorizedPaths ?? [],
+      },
+    };
+
+    return { ok: true, document: buildFinalSummary(input) };
+  }
+
+  /**
+   * One artifact's parsed content, or null when it does not exist.
+   *
+   * Null rather than a refusal, because every artifact the summary reads is one the stage's context
+   * plan already required to exist; this is the second read, not the first, and its job is to give the
+   * renderer something to work with. A summary that states "not recorded" for a section is more honest
+   * than a stage that refuses to run over a document the gate has already ruled on.
+   */
+  async #readOptionalArtifactContent(
+    featureId: string,
+    name: FeatureArtifactName,
+  ): Promise<unknown> {
+    const read = await this.#readOptionalArtifact(featureId, name);
+
+    return read.ok ? read.value : null;
   }
 
   /**

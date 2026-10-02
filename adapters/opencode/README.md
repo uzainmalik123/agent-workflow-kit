@@ -59,6 +59,8 @@ There are exactly two profiles, because the only capability difference between t
 | `final_gate` | `final_gate_reviewer` | `agentflow-read` | read only |
 | `final_summary` | `summarizer` | `agentflow-read` | read only |
 
+The `summarizer` produces no artifact: `final-summary.md` is composed by the framework from the persisted artifacts, so the role reports what the evidence supports rather than writing a second account of it for a human to choose between.
+
 Nine roles are read only. Only the `implementer` and the `fixer` may change a project file, and the `fixer` is the only role that repairs a reported finding.
 
 Each role has its own purpose, responsibilities, prohibitions, and deliverables. The definitions in `roles.ts` are the single source, and the per-stage prompt is rendered from them.

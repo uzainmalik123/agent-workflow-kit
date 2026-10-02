@@ -914,6 +914,65 @@ export function evaluateFinalGate(input: FinalGateInput): FinalGateResult {
 /* Helpers                                                                                        */
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * The recorded gate a later stage reads back, and the reasons a document cannot stand in for one.
+ *
+ * A gate result is persisted so that the stages after it have something to point at: the summary is
+ * written only from a recorded pass, and a publishing approval names the exact verdict it was given
+ * for. Reading it back therefore cannot be optimistic. A document that declares another schema
+ * version, names another feature, carries a status that is not one of the three, or omits the revision
+ * and fingerprint the later checks compare against is refused — because a summary composed from a
+ * result nobody can re-derive would be a summary of nothing.
+ */
+export type RecordedFinalGateOutcome =
+  | { readonly ok: true; readonly result: FinalGateResult }
+  | { readonly ok: false; readonly reason: string };
+
+export function recordedFinalGateFrom(value: unknown): RecordedFinalGateOutcome {
+  if (!isRecord(value)) {
+    return { ok: false, reason: "the recorded result is not an object" };
+  }
+
+  if (value["schemaVersion"] !== 1) {
+    return { ok: false, reason: "the recorded result declares another schema version" };
+  }
+
+  const featureId = textField(value["featureId"]);
+  const state = value["state"];
+  const status = value["status"];
+  const revision = value["revision"];
+  const fingerprint = value["fingerprint"];
+
+  if (featureId === null) {
+    return { ok: false, reason: "the recorded result names no feature" };
+  }
+
+  if (state !== WorkflowState.FinalGate) {
+    return { ok: false, reason: `the recorded result was decided in "${String(state)}", not "final_gate"` };
+  }
+
+  if (!isFinalGateStatus(status)) {
+    return { ok: false, reason: "the recorded result carries an unknown status" };
+  }
+
+  if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 0) {
+    return { ok: false, reason: "the recorded result carries no revision" };
+  }
+
+  if (fingerprint !== undefined && typeof fingerprint !== "string") {
+    return { ok: false, reason: "the recorded result carries an unusable fingerprint" };
+  }
+
+  // The rest of the result is presentation the later stages read for the summary. A field that is
+  // missing there costs a line of the summary, not the gate's standing, so the checks above are the
+  // ones that decide whether this document is a gate result at all.
+  return { ok: true, result: value as unknown as FinalGateResult };
+}
+
+function isFinalGateStatus(value: unknown): value is FinalGateStatus {
+  return value === "passed" || value === "failed" || value === "inconclusive";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

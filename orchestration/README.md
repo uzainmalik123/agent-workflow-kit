@@ -20,13 +20,14 @@ const orchestrator = createWorkflowOrchestrator({ store, executor, maxFixAttempt
 await orchestrator.createFeature({ featureId, title, request?, slug? });
 await orchestrator.runNext(featureId);
 await orchestrator.approvePlan(featureId);
-await orchestrator.approvePush(featureId);
+await orchestrator.approvePush(featureId, { actor });   // actor is optional and recorded verbatim
 await orchestrator.failFeature(featureId);
 ```
 
 - `createFeature` creates the session in `draft` and, when a request is supplied, writes `request.md`. It never transitions.
 - `runNext` performs **at most one** work stage. It never loops, never approves anything, and never calls a second stage in the same call.
-- `approvePlan` / `approvePush` / `failFeature` apply the corresponding legal state-machine event. `approvePlan` also records the approval checkpoint; `approvePush` only moves the session to `committing`, no Git work exists.
+- `approvePlan` / `approvePush` / `failFeature` apply the corresponding legal state-machine event. Each records a durable checkpoint rather than only moving the session, and no Git work exists yet: `committing` is a state the workflow has reached, not a thing that happened. See [Approvals](#approvals).
+- `approvePush` records a `PushApprovalRecord` bound to the summary it was given, the gate that certified it, and the working-tree fingerprint measured at that moment. It refuses rather than records anything when the evidence is stale, and it never refreshes an approval.
 - `maxFixAttempts` bounds one repair loop per origin stage and defaults to `MAX_FIX_ATTEMPTS`. `workspace`, `verification`, and `security` are optional; without them the framework records that it measured nothing rather than passing for a clean run. See [Fixer trust model](#fixer-trust-model) and [Security review](#security-review).
 - Usage and storage errors on `createFeature` and on the initial `load` of `runNext` propagate as `PersistenceError`. Everything the orchestrator decides is returned as an `OrchestrationResult`.
 
@@ -76,13 +77,18 @@ interface StageExecutionResult {
 | `runtime_verification` | `runtime_verification` | `verifier` | `verification` | `advance` | yes |
 | `fixing` | `fixing` | `fixer` | `fixes` (fix report) | `complete_fix` | no |
 | `security_review` | `security_review` | `security_reviewer` | `security_review` | `advance` | yes |
-| `final_gate` | `final_gate` | `final_gate_reviewer` | none | `advance` | no |
-| `final_summary` | `final_summary` | `summarizer` | `final_summary` | `advance` | no |
+| `final_gate` | `final_gate` | `final_gate_reviewer` | `final_gate` (framework) | `advance` | no |
+| `final_summary` | `final_summary` | `summarizer` | `final_summary` (framework) | `advance` | no |
 | `awaiting_push_approval` | human gate | none | none | `approve_push` | no |
 | `committing`, `pushing` | deferred | none | none | none | no |
 | `complete`, `failed` | terminal | none | none | none | no |
 
-`final_gate` produces no artifact: the storage layer owns the controlled filenames, and no slot exists for a gate record. `fixing` produces exactly one: the fixer report, which the orchestrator records in the controlled `fixes.json` history rather than letting a stage write it.
+Two artifacts are framework-written rather than agent-written, and neither appears in a stage's `outputs`:
+
+- `final_gate` is the passing `FinalGateResult`, written in the same mutation as the `advance` out of `final_gate`. It exists so that the stages after it — the summary and the approval — have a verdict to point at rather than re-deriving one, and so that a summary can be refused when no usable verdict is recorded.
+- `final_summary` is composed from the recorded artifacts by `buildFinalSummary`, in the same mutation that records it. The `summarizer` role still runs read-only with its context, and has no slot to write.
+
+`fixing` produces exactly one: the fixer report, which the orchestrator records in the controlled `fixes.json` history rather than letting a stage write it.
 
 ### Context routing
 
@@ -240,7 +246,13 @@ Entries are append-only: a later fix never rewrites an earlier one, `sequence` c
 
 ## Human gates
 
-`awaiting_plan_approval` and `awaiting_push_approval` return `status: "awaiting_human"` with `action: "approve_plan"` or `action: "approve_push"`, execute no stage, and commit nothing. Only the explicit `approvePlan` / `approvePush` calls apply the approval event, and an approval that is not legal in the current state is rejected as `illegal_transition`.
+`awaiting_plan_approval` and `awaiting_push_approval` return `status: "awaiting_human"` with `action: "approve_plan"` or `action: "approve_push"`, execute no stage, and commit nothing. Only the explicit `approvePlan` / `approvePush` calls apply the approval event, and an approval that is not legal in the current state is rejected as `illegal_transition` — including a publishing approval requested from any state other than `awaiting_push_approval`, which is refused before any evidence is even read.
+
+## Approvals
+
+There are two checkpoints, and they are not the same decision.
+
+`approvePlan` records that a human agreed to build something. `approvePush` records that a human looked at what was built and agreed to publish it. Nothing implies the second: reaching `awaiting_push_approval`, having a summary, having passed a gate, and having approved the plan are four different facts, and none of them is an approval.
 
 ### Plan approval checkpoint
 
@@ -264,6 +276,55 @@ Every stage that runs after the approval (`implementation` and everything downst
 | an approved artifact no longer matches its digest | `approval_invalidated` |
 
 A rejected approval never runs a stage, never stores a result, and leaves the checkpoint untouched: the orchestrator never re-approves on the caller's behalf. A human must approve again, which is only reachable by driving the feature back through the gate.
+
+### Publishing approval
+
+```ts
+interface PushApprovalRecord {
+  decision: "approved";            // a refusal is not a record, so nothing else is possible
+  featureId: string;
+  approvedAt: string;
+  approvedRevision: number;
+  actor: string | null;            // recorded verbatim; never derived, never required
+  summarySha256: string;           // digest of the exact bytes of final-summary.md
+  summaryRevision: number;
+  workingTreeFingerprint: string;  // measured at approval time
+  finalGateStatus: "passed";
+  finalGateRevision: number;
+  finalGateFingerprint: string;    // the tree the gate decided against
+  finalGateSha256: string;
+}
+```
+
+The record is written in the same mutation as the `approve_push` event, so there is no window in which the session is in `committing` without a record of why, or in which a record exists for a transition that was refused. It is bound to specific evidence, and each binding is checked:
+
+| refusal | what it means |
+| --- | --- |
+| `final_gate_not_recorded` | No readable `final-gate.json`. There is no verdict to rely on, and one is not reconstructed on demand. |
+| `final_gate_blocked` | The recorded gate did not pass. |
+| `push_approval_stale` | The session revision is not the gate's plus the summary's (`PUSH_APPROVAL_REVISION_OFFSET`), or the tree no longer fingerprints as the gate found it. |
+| `push_approval_already_granted` | An approval is already recorded. A second one would be recorded against evidence the first did not cover. |
+
+Nothing here re-runs the gate or re-reads the work to decide whether it is good. The gate's answer is already recorded, and re-litigating it would give an approval a veto nobody asked it to review. The only recovery from a refusal is a new gate, a new summary, and a new approval; an approval is never silently refreshed, because a record that moves to follow the work is not a record of anything.
+
+### Final summary
+
+`final-summary.md` is the document a human is asked to read before deciding whether to publish, and it is composed by the framework from the recorded artifacts — not by a model. The `summarizer` role still runs read-only with its context; it simply has no output slot, so there is no second account of the same evidence for a human to be asked to choose between.
+
+Deterministic and read-only in one property: `buildFinalSummary` takes parsed artifacts and a measured change set and returns a string. It reads no filesystem, runs no command, holds no clock, and writes nothing, so the same records always produce the same document and composing one cannot change any of them.
+
+It may run only from a recorded passing gate, and writes `final-gate.json` back before the summary does:
+
+| refusal | what it means |
+| --- | --- |
+| `final_gate_not_recorded` | No readable recorded gate, so there is no verdict to report and no evidence to be fresh against. |
+| `final_gate_blocked` | The recorded gate did not pass. |
+| `final_gate_evidence_stale` | The session revision is not the gate's plus the summary's, or the tree no longer fingerprints as the gate found it. A summary listing changed files is a claim about specific paths in a specific tree; when the tree has moved it is not written at all rather than written wrong. |
+
+The document carries the feature identity, a description from the specification, the approved requirements, each plan step with what the measurement could support about it, the changed files with the category each was measured in, the per-stage verification results, the security and scope results, the fixer history, the current revision, the current working-tree fingerprint, and the gate result. Two rules govern what may appear in it:
+
+- Nothing is invented. A section whose source is absent says `not recorded`, and an unmeasured tree says so rather than reading as an empty digest. In particular a plan step is never called complete: nothing in the records says so, so the summary reports which of the step's approved files the change set contains and leaves the judgement to the human.
+- Everything is bounded. Every list is capped at `MAX_SUMMARY_ITEMS` and says how many entries it elided rather than silently dropping them.
 
 ## Workspace isolation
 

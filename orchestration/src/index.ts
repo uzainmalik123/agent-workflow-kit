@@ -47,6 +47,9 @@ export type {
 export { digestArtifactText } from "./approval.js";
 export type { ApprovalOutcome, ApprovalVerification } from "./approval.js";
 
+export { buildPushApproval, PUSH_APPROVAL_REVISION_OFFSET } from "./push-approval.js";
+export type { PushApprovalEvidence, PushApprovalOutcome } from "./push-approval.js";
+
 export {
   criterionClaimsFrom,
   criteriaFromSpec,
@@ -61,6 +64,7 @@ export {
   FINAL_GATE_STATUSES,
   FINAL_GATE_VERIFICATION_STATUSES,
   MAX_FINAL_GATE_CRITERIA,
+  recordedFinalGateFrom,
 } from "./final-gate.js";
 export type {
   FinalGateApprovalInput,
@@ -86,7 +90,16 @@ export type {
   FinalGateStatus,
   FinalGateVerificationInput,
   FinalGateVerificationStatus,
+  RecordedFinalGateOutcome,
 } from "./final-gate.js";
+
+export {
+  buildFinalSummary,
+  MAX_SUMMARY_ITEMS,
+  MAX_SUMMARY_TEXT,
+  SUMMARY_STEP_STATUSES,
+} from "./final-summary.js";
+export type { FinalSummaryInput, SummaryStepStatus } from "./final-summary.js";
 
 export { appendFixHistoryEntry, parseFixHistory } from "./fix-history.js";
 export type { FixAttemptRecord, FixHistoryOutcome, FixHistoryRead } from "./fix-history.js";

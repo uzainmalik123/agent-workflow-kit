@@ -25,13 +25,13 @@ is restored from the approved commit or deleted. The trust model is described in
 
 - `session.json` is the authoritative session document.
 - `events.jsonl` is the append-only workflow event log.
-- `request.md`, `grill.json`, `spec.json`, `plan.json`, `plan-review.json`, `implementation.json`, `code-review.json`, `scope-review.json`, `verification.json`, `fixes.json`, `security-review.json`, and `final-summary.md` are the controlled feature artifacts.
+- `request.md`, `grill.json`, `spec.json`, `plan.json`, `plan-review.json`, `implementation.json`, `code-review.json`, `scope-review.json`, `verification.json`, `fixes.json`, `security-review.json`, `final-gate.json`, and `final-summary.md` are the controlled feature artifacts.
 
 A session document references artifacts by filename and status; artifact contents stay in their own files.
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 4,
   "featureId": "F-001",
   "slug": "google-oauth-api",
   "title": "Google OAuth / API",
@@ -39,7 +39,7 @@ A session document references artifacts by filename and status; artifact content
   "updatedAt": "2026-01-02T03:04:05.000Z",
   "revision": 3,
   "machine": { "state": "draft" },
-  "approvals": { "plan": null },
+  "approvals": { "plan": null, "push": null },
   "artifacts": {
     "request": { "filename": "request.md", "status": "missing" },
     "plan": { "filename": "plan.json", "status": "missing" }
@@ -47,7 +47,7 @@ A session document references artifacts by filename and status; artifact content
 }
 ```
 
-`revision` starts at `0` and increases by exactly one per successful mutation. `approvals.plan` holds the frozen plan approval checkpoint, or `null` before a plan is approved:
+`revision` starts at `0` and increases by exactly one per successful mutation. `approvals.plan` holds the frozen plan approval checkpoint, or `null` before a plan is approved, and `approvals.push` holds the publishing approval, or `null` before one is recorded. Both are present from the start; the second one was added in schema version 4 alongside the `final_gate` artifact:
 
 ```json
 {
@@ -64,6 +64,31 @@ A session document references artifacts by filename and status; artifact content
 ```
 
 The digests cover the exact persisted bytes of `spec.json`, `plan.json`, and `plan-review.json`. The store owns storage and hashing mechanics only: it does not decide when an approval is required or what a valid approval means.
+
+A publishing approval is stored the same way, and is bound to evidence by digest and fingerprint rather than by revision alone:
+
+```json
+{
+  "approvals": {
+    "push": {
+      "decision": "approved",
+      "featureId": "F-001",
+      "approvedAt": "2026-01-02T03:04:05.000Z",
+      "approvedRevision": 12,
+      "actor": null,
+      "summarySha256": "…",
+      "summaryRevision": 12,
+      "workingTreeFingerprint": "…",
+      "finalGateStatus": "passed",
+      "finalGateRevision": 10,
+      "finalGateFingerprint": "…",
+      "finalGateSha256": "…"
+    }
+  }
+}
+```
+
+Only `decision: "approved"` is representable: a refusal is not a record, so the store cannot be asked to remember that someone declined. The orchestrator builds this from the evidence it measured and refuses rather than storing it when any of it is stale.
 
 ### Public API
 

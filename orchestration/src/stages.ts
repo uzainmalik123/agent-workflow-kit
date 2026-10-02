@@ -243,12 +243,22 @@ export const STAGE_DEFINITIONS: Readonly<Record<WorkStage, StageDefinition>> = {
     successEvent: "advance",
     fixable: false,
   },
+  /**
+   * The summary is written by the framework, not by the role.
+   *
+   * The summarizer still runs, read-only, with the same context it always had — it is the stage that
+   * can see that a plan step is only half implemented, and its judgement is worth having. What it no
+   * longer does is write `final-summary.md`. A document a human approves publishing is the framework's
+   * own reading of records it wrote and measured, so this stage declares no output slot at all and the
+   * orchestrator composes the artifact from the recorded gate in `prepare`, where it is composed from
+   * the same commit that writes it. See `buildFinalSummary` in `final-summary.ts`.
+   */
   final_summary: {
     stage: "final_summary",
     access: "read_only",
     state: WorkflowState.FinalSummary,
     role: "summarizer",
-    outputs: [document("final_summary")],
+    outputs: [],
     context: {
       required: [
         "spec",

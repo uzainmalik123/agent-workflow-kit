@@ -320,7 +320,9 @@ These are the acceptance criteria. A reduction that breaks one of them is not a 
 11. No agent shell authority: `shell` is denied on both profiles, proven against a hostile
     repository by finding F2.
 12. A read-only stage cannot write, proven against a hostile repository by finding F2.
-13. No push before `approve_push`.
+13. No push before `approve_push`, and no `approve_push` without a recorded approval bound to the summary,
+    the passing gate, and the measured tree: the human gates are reachable by the event alone, the
+    approval itself is a stored record, and reaching one is never evidence of approving the other.
 14. Stage artifacts are written through the executor's declared output slots; a model never chooses
     a filename or a merge strategy.
 15. A response cannot claim success when deterministic evidence failed or blocked.

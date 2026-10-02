@@ -254,7 +254,7 @@ describe("orchestrator full flow", () => {
       stage: "final_gate",
       role: "final_gate_reviewer",
       state: WorkflowState.FinalSummary,
-      artifacts: [],
+      artifacts: ["final_gate"],
     });
 
     expect(await orchestrator.runNext("F-001")).toMatchObject({

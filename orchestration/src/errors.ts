@@ -38,6 +38,10 @@ export type OrchestrationErrorCode =
   | "verification_evidence_mismatch"
   | "stale_verification_evidence"
   | "final_gate_blocked"
+  | "final_gate_not_recorded"
+  | "final_gate_evidence_stale"
+  | "push_approval_stale"
+  | "push_approval_already_granted"
   | "security_not_configured"
   | "security_provider_failed"
   | "security_evidence_invalid"
@@ -98,6 +102,10 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
   verification_evidence_mismatch: "verification",
   stale_verification_evidence: "verification",
   final_gate_blocked: "workflow",
+    final_gate_not_recorded: "workflow",
+    final_gate_evidence_stale: "workspace",
+    push_approval_stale: "workflow",
+    push_approval_already_granted: "workflow",
   security_not_configured: "security",
   security_provider_failed: "security",
   security_evidence_invalid: "security",

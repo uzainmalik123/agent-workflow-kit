@@ -9,6 +9,7 @@ import {
   type FeatureArtifactReferences,
   type FeatureSession,
   type PlanApprovalRecord,
+  type PushApprovalRecord,
 } from "./contracts.js";
 import { isFeatureId, isCanonicalFeatureSlug } from "./names.js";
 import { WorkflowStateMachine, validateWorkspaceBaseline } from "@agent-workflow-kit/core";
@@ -166,6 +167,109 @@ function validatePlanApproval(value: unknown): PlanApprovalRecord {
   };
 }
 
+function validateApprovalRevision(value: unknown, fieldName: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      `Session push approval ${fieldName} must be a non-negative integer.`,
+    );
+  }
+
+  return value;
+}
+
+function validateFingerprint(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      `Session push approval ${fieldName} must be a non-empty fingerprint.`,
+    );
+  }
+
+  return value;
+}
+
+function validatePushApproval(value: unknown): PushApprovalRecord {
+  if (!isRecord(value)) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session push approval must be an object or null.",
+    );
+  }
+
+  if (value["decision"] !== "approved") {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      'Session push approval must record the decision "approved". A refusal is not a record.',
+    );
+  }
+
+  const approvedAt = value["approvedAt"];
+
+  if (!isTimestamp(approvedAt)) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session push approval must contain a valid approvedAt timestamp.",
+    );
+  }
+
+  const featureId = value["featureId"];
+
+  if (typeof featureId !== "string" || featureId.length === 0) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session push approval must name the feature it approves.",
+    );
+  }
+
+  const approvedRevision = validateApprovalRevision(value["approvedRevision"], "approvedRevision");
+  const summaryRevision = validateApprovalRevision(value["summaryRevision"], "summaryRevision");
+  const finalGateRevision = validateApprovalRevision(value["finalGateRevision"], "finalGateRevision");
+  const actor = value["actor"];
+
+  if (actor !== undefined && actor !== null && (typeof actor !== "string" || actor.length === 0)) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      "Session push approval actor must be a non-empty string or null.",
+    );
+  }
+
+  if (value["finalGateStatus"] !== "passed") {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      'Session push approval may only record a final gate that "passed".',
+    );
+  }
+
+  // The working-tree fingerprints are deliberately the two digests here that are not required to be a
+  // SHA-256: they are whatever the workspace adapter measures, and this layer does not own that
+  // format. They are required to be non-empty because an unmeasured tree is not something an approval
+  // can be bound to.
+  const workingTreeFingerprint = validateFingerprint(
+    value["workingTreeFingerprint"],
+    "workingTreeFingerprint",
+  );
+  const finalGateFingerprint = validateFingerprint(
+    value["finalGateFingerprint"],
+    "finalGateFingerprint",
+  );
+
+  return {
+    decision: "approved",
+    featureId,
+    approvedAt,
+    approvedRevision,
+    actor: actor === undefined || actor === null ? null : actor,
+    summarySha256: validateSha256(value["summarySha256"], "push approval summarySha256"),
+    summaryRevision,
+    workingTreeFingerprint,
+    finalGateStatus: "passed",
+    finalGateRevision,
+    finalGateFingerprint,
+    finalGateSha256: validateSha256(value["finalGateSha256"], "push approval finalGateSha256"),
+  };
+}
+
 function validateApprovals(value: unknown): FeatureApprovals {
   if (value === undefined) {
     throw new PersistenceError(
@@ -178,13 +282,22 @@ function validateApprovals(value: unknown): FeatureApprovals {
     throw new PersistenceError("INVALID_SESSION", "Session approvals must be an object.");
   }
 
-  const plan = value["plan"];
+  const unexpected = Object.keys(value).filter((key) => key !== "plan" && key !== "push");
 
-  if (plan === undefined || plan === null) {
-    return { plan: null };
+  if (unexpected.length > 0) {
+    throw new PersistenceError(
+      "INVALID_SESSION",
+      `Session approvals contains an unknown approval: "${unexpected[0] ?? ""}".`,
+    );
   }
 
-  return { plan: validatePlanApproval(plan) };
+  const plan = value["plan"];
+  const push = value["push"];
+
+  return {
+    plan: plan === undefined || plan === null ? null : validatePlanApproval(plan),
+    push: push === undefined || push === null ? null : validatePushApproval(push),
+  };
 }
 
 function validateMachineSnapshot(value: unknown): WorkflowMachineSnapshot {

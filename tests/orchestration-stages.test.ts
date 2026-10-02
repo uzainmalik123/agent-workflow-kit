@@ -164,7 +164,7 @@ describe("stage definitions", () => {
       fixing: ["fixes"],
       security_review: ["security_review"],
       final_gate: [],
-      final_summary: ["final_summary"],
+      final_summary: [],
     });
   });
 

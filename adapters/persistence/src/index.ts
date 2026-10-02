@@ -26,6 +26,7 @@ export type {
   FixHistoryEntry,
   FixIntegrityRecord,
   PlanApprovalRecord,
+  PushApprovalRecord,
 } from "./contracts.js";
 export { PersistenceError } from "./errors.js";
 export type { PersistenceErrorCode, PersistenceErrorOptions } from "./errors.js";

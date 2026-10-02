@@ -6,7 +6,16 @@ import type {
   WorkspaceBaseline,
 } from "@agent-workflow-kit/core";
 
-export const FEATURE_SESSION_SCHEMA_VERSION = 3 as const;
+/**
+ * Version 4 records the final gate's answer as a controlled artifact and the explicit publishing
+ * approval as a second durable checkpoint.
+ *
+ * Both are additions a reader of an older document cannot supply: `final_gate` is now a name every
+ * session must carry a reference for, and `approvals.push` is the field a publishing approval writes.
+ * A document written before this version is therefore refused rather than read as a feature that
+ * passed no gate, which is the correct direction to be wrong in.
+ */
+export const FEATURE_SESSION_SCHEMA_VERSION = 4 as const;
 export type FeatureSessionSchemaVersion = typeof FEATURE_SESSION_SCHEMA_VERSION;
 
 export const FEATURE_ARTIFACT_NAMES = [
@@ -20,6 +29,7 @@ export const FEATURE_ARTIFACT_NAMES = [
   "scope_review",
   "verification",
   "security_review",
+  "final_gate",
   "final_summary",
   "fixes",
 ] as const;
@@ -39,6 +49,7 @@ export const FEATURE_ARTIFACT_FILENAMES = {
   scope_review: "scope-review.json",
   verification: "verification.json",
   security_review: "security-review.json",
+  final_gate: "final-gate.json",
   final_summary: "final-summary.md",
   fixes: "fixes.json",
 } as const satisfies Record<FeatureArtifactName, string>;
@@ -76,8 +87,52 @@ export interface PlanApprovalRecord {
   readonly baseline: WorkspaceBaseline | null;
 }
 
+/**
+ * Durable record of the explicit human approval that has to stand between a certified feature and
+ * anything that publishes it.
+ *
+ * Every field binds the approval to the exact evidence it was given for. `summarySha256` is the digest
+ * of the summary document's persisted bytes, so the record names the exact text a human read rather
+ * than the fact that some summary existed; `summaryRevision` is the session revision that carried it,
+ * so a session that moved on after the summary is visibly not the one that was approved;
+ * `workingTreeFingerprint` is the tree the summary was measured against, and `finalGate*` names the
+ * gate's verdict, revision, tree, and document digest together. A later stage that finds any of these
+ * disagreeing with what it is looking at knows the approval was given for something else, and an
+ * approval is never refreshed into agreement — a new gate, a new summary, and a new approval are the
+ * only way back.
+ *
+ * `decision` is the literal `"approved"` because a refusal is not a record: nothing durable changes
+ * when an approval is refused, so the document can only ever describe an approval that was granted.
+ * `actor` is whatever identifier the caller supplied and is evidence of nothing — this library has no
+ * identity system, and it will not pretend a string in a session file is an authenticated person.
+ */
+export interface PushApprovalRecord {
+  readonly decision: "approved";
+  /**
+   * The feature this approval is for, repeated here even though the record lives inside that feature's
+   * session.
+   *
+   * Redundant by construction, and kept anyway because this is the one record a person will read on
+   * its own — in a commit message, a support ticket, a later audit — and a digest of a summary with
+   * nothing saying which summary is a puzzle rather than evidence. It is written from the session it
+   * lives in, so it cannot name a different feature.
+   */
+  readonly featureId: string;
+  readonly approvedAt: string;
+  readonly approvedRevision: number;
+  readonly actor: string | null;
+  readonly summarySha256: string;
+  readonly summaryRevision: number;
+  readonly workingTreeFingerprint: string;
+  readonly finalGateStatus: "passed";
+  readonly finalGateRevision: number;
+  readonly finalGateFingerprint: string;
+  readonly finalGateSha256: string;
+}
+
 export interface FeatureApprovals {
   readonly plan: PlanApprovalRecord | null;
+  readonly push: PushApprovalRecord | null;
 }
 
 export interface FeatureSession {
@@ -223,6 +278,10 @@ export function createEmptyArtifactReferences(): FeatureArtifactReferences {
       filename: FEATURE_ARTIFACT_FILENAMES.security_review,
       status: "missing",
     },
+    final_gate: {
+      filename: FEATURE_ARTIFACT_FILENAMES.final_gate,
+      status: "missing",
+    },
     final_summary: {
       filename: FEATURE_ARTIFACT_FILENAMES.final_summary,
       status: "missing",
@@ -235,5 +294,5 @@ export function createEmptyArtifactReferences(): FeatureArtifactReferences {
 }
 
 export function createEmptyApprovals(): FeatureApprovals {
-  return { plan: null };
+  return { plan: null, push: null };
 }

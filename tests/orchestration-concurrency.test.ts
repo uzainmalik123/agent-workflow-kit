@@ -581,7 +581,7 @@ describe("human plan approval checkpoint", () => {
     // the way a hand-edited or older session file would be. The orchestrator must still refuse.
     await writeSessionDocument(store, "F-001", {
       ...session,
-      approvals: { plan: null },
+      approvals: { plan: null, push: null },
     });
 
     const harness = createHarness(store.repositoryRoot);

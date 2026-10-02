@@ -178,7 +178,7 @@ describe("approval metadata cannot be fabricated", () => {
 
     const after = await store.load("F-001");
 
-    expect(after.approvals).toEqual({ plan: null });
+    expect(after.approvals).toEqual({ plan: null, push: null });
   });
 
   it("accepts an approval only together with the event that earns it", async () => {
@@ -194,6 +194,7 @@ describe("approval metadata cannot be fabricated", () => {
       prepare: () => ({
         event: "approve_plan" as const,
         approvals: {
+          push: null,
           plan: {
             approvedAt: fixedTimestamp,
             approvedRevision: 5,
@@ -226,6 +227,7 @@ describe("approval metadata cannot be fabricated", () => {
       prepare: () => ({
         event: "approve_plan" as const,
         approvals: {
+          push: null,
           plan: {
             approvedAt: fixedTimestamp,
             approvedRevision: 0,
