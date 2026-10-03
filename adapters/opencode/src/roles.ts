@@ -329,7 +329,7 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
     ],
     prohibited: [
       "Do not modify any project file.",
-      "Do not claim a Git commit or push happened. Git integration is not implemented and the feature has not been pushed.",
+      "Do not claim a Git commit or push happened. This stage runs before the publishing approval exists, so nothing has been committed or pushed; if the framework later records a publish, read that record rather than describing a push yourself.",
       "Do not claim a command, test, or check ran unless an earlier stage recorded evidence that it did.",
       "Do not add opinions, praise, or plans that no recorded artifact supports.",
       "Do not present your own account as the final summary. The framework writes `final-summary.md` from the persisted artifacts; a second, differently-worded account of the same evidence is not something a human should be asked to choose between.",

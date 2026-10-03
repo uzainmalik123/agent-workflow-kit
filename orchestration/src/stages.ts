@@ -388,7 +388,16 @@ export const PASSIVE_ADVANCE_STATES: ReadonlySet<WorkflowState> = new Set([
   WorkflowState.SpecReady,
 ]);
 
-export const DEFERRED_WORK_STATES: ReadonlySet<WorkflowState> = new Set([
+/**
+ * The states whose work is publishing rather than a stage.
+ *
+ * These two are reached only by the explicit publishing approval and hold the two Git operations the
+ * framework performs for a feature: `committing` creates the branch and writes the commit, `pushing`
+ * pushes the commit that was recorded. They are deliberately not work stages — no role, no executor, no
+ * prompt, and nothing an agent can influence — and the set is named for what they are rather than for
+ * what they were before Git integration existed.
+ */
+export const PUBLISHING_STATES: ReadonlySet<WorkflowState> = new Set([
   WorkflowState.Committing,
   WorkflowState.Pushing,
 ]);

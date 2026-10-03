@@ -335,7 +335,7 @@ describe("a post-approval stage needs an isolated workspace", () => {
 
     expect(result.status).toBe("rejected");
     expect(result.error?.code).toBe("workspace_unavailable");
-    expect(result.error?.message).toContain("isolation this stage requires");
+    expect(result.error?.message).toContain("exactly the isolation this requires");
   });
 
   it("surfaces a lease refusal as its own code, so a concurrent run is not reported as a broken one", async () => {

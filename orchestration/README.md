@@ -26,7 +26,8 @@ await orchestrator.failFeature(featureId);
 
 - `createFeature` creates the session in `draft` and, when a request is supplied, writes `request.md`. It never transitions.
 - `runNext` performs **at most one** work stage. It never loops, never approves anything, and never calls a second stage in the same call.
-- `approvePlan` / `approvePush` / `failFeature` apply the corresponding legal state-machine event. Each records a durable checkpoint rather than only moving the session, and no Git work exists yet: `committing` is a state the workflow has reached, not a thing that happened. See [Approvals](#approvals).
+- `publishFeature` runs one publishing step: the first call commits and reports `committed`, the second pushes and reports `published`. It is the only entry point to `committing` and `pushing`, it runs no stage, and it never runs both steps in one call. See [Publishing](#publishing).
+- `approvePlan` / `approvePush` / `failFeature` apply the corresponding legal state-machine event. Each records a durable checkpoint rather than only moving the session. See [Approvals](#approvals).
 - `approvePush` records a `PushApprovalRecord` bound to the summary it was given, the gate that certified it, and the working-tree fingerprint measured at that moment. It refuses rather than records anything when the evidence is stale, and it never refreshes an approval.
 - `maxFixAttempts` bounds one repair loop per origin stage and defaults to `MAX_FIX_ATTEMPTS`. `workspace`, `verification`, and `security` are optional; without them the framework records that it measured nothing rather than passing for a clean run. See [Fixer trust model](#fixer-trust-model) and [Security review](#security-review).
 - Usage and storage errors on `createFeature` and on the initial `load` of `runNext` propagate as `PersistenceError`. Everything the orchestrator decides is returned as an `OrchestrationResult`.
@@ -59,7 +60,7 @@ interface StageExecutionResult {
 
 ## State -> stage -> artifact -> event
 
-`draft` and `spec_ready` are passive checkpoints, the two approval states are human gates, `committing` and `pushing` are deferred to Git integration, and `complete` and `failed` are terminal. The workflow graph already represents `Grill -> resolved specification -> Plan`: the `grill` stage emits `grill.json` **and** `spec.json` before the legal `advance` into `spec_ready`, and `spec_ready` executes no work. `WorkflowState` is unchanged by this package.
+`draft` and `spec_ready` are passive checkpoints, the two approval states are human gates, `committing` and `pushing` run publishing steps rather than work stages, and `complete` and `failed` are terminal. The workflow graph already represents `Grill -> resolved specification -> Plan`: the `grill` stage emits `grill.json` **and** `spec.json` before the legal `advance` into `spec_ready`, and `spec_ready` executes no work. `WorkflowState` is unchanged by this package.
 
 | state | stage | role | required artifacts | event on success | fixable |
 | --- | --- | --- | --- | --- | --- |
@@ -80,7 +81,8 @@ interface StageExecutionResult {
 | `final_gate` | `final_gate` | `final_gate_reviewer` | `final_gate` (framework) | `advance` | no |
 | `final_summary` | `final_summary` | `summarizer` | `final_summary` (framework) | `advance` | no |
 | `awaiting_push_approval` | human gate | none | none | `approve_push` | no |
-| `committing`, `pushing` | deferred | none | none | none | no |
+| `committing` | `publishFeature` (commit step) | none | `publish` (framework) | `publish_commit` | no |
+| `pushing` | `publishFeature` (push step) | none | `publish` (framework) | `publish_push` | no |
 | `complete`, `failed` | terminal | none | none | none | no |
 
 Two artifacts are framework-written rather than agent-written, and neither appears in a stage's `outputs`:
@@ -89,6 +91,8 @@ Two artifacts are framework-written rather than agent-written, and neither appea
 - `final_summary` is composed from the recorded artifacts by `buildFinalSummary`, in the same mutation that records it. The `summarizer` role still runs read-only with its context, and has no slot to write.
 
 `fixing` produces exactly one: the fixer report, which the orchestrator records in the controlled `fixes.json` history rather than letting a stage write it.
+
+A third framework-written artifact appears after the publishing approval rather than in a stage's `outputs`: `publish` is the record of what was published, written once as `committed` and rewritten as `pushed`. See [Publishing](#publishing).
 
 ### Context routing
 
@@ -368,6 +372,43 @@ The workspace is opened once per stage and closed when the stage ends, including
 
 Every post-approval stage records a `WorkspaceScopeEvidence` alongside the result: the approved commit and patterns, every observed path, every unauthorized path, what was restored, removed, or left unsafe, the staged paths, the `HEAD`, and a fingerprint of the tree. It is evidence of what the framework saw, not an approval, and `measured` is there so an unmeasured record cannot pass for a clean one.
 
+## Publishing
+
+Publishing is two steps, two states, and one approval that both of them re-check.
+
+`approvePush` moves the session to `committing`; `publishFeature` is the only thing that runs from there. The first call writes the commit and reports `committed`, the second pushes the commit that was recorded and reports `published`. Each call does one thing, so a failure is never ambiguous about what had already happened: a `rejected` result from `pushing` means the commit exists in the repository and nothing was sent, and a `rejected` result from `committing` means nothing was written at all. `runNext` does not publish anything and refuses to run a stage in these states — reaching `complete` requires the push to have been confirmed by a remote.
+
+Everything about *what* gets published is decided here, in the orchestration layer: the branch name, the commit message, the paths, the commit to push, and the remote. The port below is given a finished description of the work and asked to make it true, which keeps the half that has to understand a repository as small as the port allows. `publisher` is optional in the same way `workspace` is: a workflow that never reaches the states needs none, and a feature that reaches them without one is refused with `publisher_not_configured` rather than marked complete.
+
+### Before anything is written
+
+The approval is verified again at the commit step, not just at `approvePush`, because a summary that was approved twenty minutes ago and a tree that changed two minutes ago are two different subjects. Each of these is refused rather than reconciled:
+
+| what moved | refusal |
+| --- | --- |
+| the final summary's bytes | `publish_summary_mismatch` |
+| the gate verdict, its revision, its digest, or its fingerprint | `publish_approval_stale` |
+| the session revision the approval was recorded at | `publish_approval_stale` |
+| the working tree, in any path or category | `publish_tree_changed` |
+| a path outside the approved scope | `publish_scope_violation` |
+| an empty change set | `publish_change_set_empty` |
+| a repository whose `HEAD` is no longer the approved commit | `publish_tree_changed` |
+| a repair the gate has not re-tested | `publish_fix_unresolved` |
+
+An approval itself is never refreshed into agreement: a new gate, a new summary, and a new approval are the only way past any of these. The same approval is verified a second time inside the mutation lock that records the result, so a tree that moved between the check and the write cannot be published by a check that has already been overtaken.
+
+### What gets written
+
+The branch is `agentflow/<feature-id>-<12 hex digits>` derived from the feature id and the approval, so the same approval always names the same branch — which is what makes a retry find the branch it created rather than collide with one. A name outside that namespace, or a reserved name inside it, is `publish_branch_unsafe`.
+
+The commit message is `feat(<feature-id>): <title>` with trailers naming the feature, the summary and gate digests, the approval revision, and the actor who gave it. Those trailers are what a later attempt reads to decide whether a branch with that name is *this approval's* branch or somebody else's: if the tip carries them and sits directly on the approved commit it is reused, and otherwise it is `publish_branch_conflict`. Nothing is ever forced, so a branch that moved is `publish_branch_moved` and a remote that would need a force refuses the push.
+
+`publish.json` records the whole thing: the branch, the commit, every path the commit contains, the two revisions it moved through, and `committed` or `pushed`. It is written once as `committed` and rewritten only after a remote confirmed the push, so a record naming a remote that never received the branch does not exist. A publisher that throws is `publish_publisher_failed`; a refusal it reports is mapped to the codes in the table above and a caller can branch on the code without reading the message.
+
+### Publishing without a mechanism
+
+The orchestrator runs no Git command. `FeaturePublisher` is a port with two methods, `commitFeature` and `pushBranch`, and `GitFeaturePublisher` is the implementation in the workspace adapter — which builds the commit with plumbing and a temporary index, so publishing leaves the isolated worktree's `HEAD` where the workspace provider expects to find it and a failed attempt can be retried in the same workspace. See `adapters/workspace/README.md`.
+
 ## Security review
 
 `security_review` is a gate between `runtime_verification` and `final_gate`, and it is cleared by a deterministic record rather than by an opinion. `security` is optional in the same way `verification` is: absent from a workflow that never reaches the stage, and a refusal when the stage is reached without one.
@@ -423,6 +464,8 @@ Full detail, including the nine checks, who decides each, and the stated limits,
 | `gate_approved` | an approval was applied | `approve_plan` / `approve_push` |
 | `feature_failed` | an explicit failure decision was applied | `fail` |
 | `deferred` | the state has no work stage yet | none |
+| `committed` | the publishing commit step succeeded | `publish_commit` |
+| `published` | the push step succeeded | `publish_push` |
 | `stage_failed` | the executor reported `failed` | none |
 | `inconclusive` | the executor could not conclude; evidence is stored | none |
 | `executor_error` | the executor threw | none |
@@ -460,6 +503,6 @@ Artifacts are written before the transition, so durable state never claims progr
 
 ## Deferred
 
-No AI model, OpenCode, Freebuff, or third-party skill is used or simulated. A project command is run, but not by this package: it is run by a `VerificationProvider` implementation outside the orchestrator, and the orchestrator only collects, validates, enforces, and records the result. Git is likewise not run by this package: worktrees, leases, and restoration belong to a `ProjectWorkspaceProvider` outside it, and the orchestrator only decides, requests, and records. `runUntilBlocked()` is deliberately not implemented: it belongs on top of `runNext` once the one-stage guarantee is trusted in production use.
+No AI model, OpenCode, Freebuff, or third-party skill is used or simulated. A project command is run, but not by this package: it is run by a `VerificationProvider` implementation outside the orchestrator, and the orchestrator only collects, validates, enforces, and records the result. Git is likewise not run by this package: worktrees, leases, and restoration belong to a `ProjectWorkspaceProvider` outside it, and the commit and push belong to a `FeaturePublisher` outside it. The orchestrator decides the branch, the message, the paths, the commit, and the remote; it requests them, and records what came back. `runUntilBlocked()` is deliberately not implemented: it belongs on top of `runNext` once the one-stage guarantee is trusted in production use.
 
 A lock is a directory created with an exclusive `mkdir` plus an owner record carrying a token, the owner `pid`, and the host, so a lock left behind by a dead process on this machine can be taken over without any age-based guesswork. It is deliberately **not** a distributed lock: it serializes writers on one machine, a lock held by another host is respected rather than reclaimed, and cross-machine coordination is the caller's problem to solve.

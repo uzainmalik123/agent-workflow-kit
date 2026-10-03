@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { rm, rmdir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -683,15 +684,34 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The fingerprint the inspection port promises: a SHA-256 digest over a canonical serialization.
+ *
+ * The port documents this as a digest, and two stages enforce it — a verification record and a security
+ * record are both refused outright unless the fingerprint they carry is one, because a fingerprint that
+ * is not a digest can be compared by eye but not by hash and says nothing about the tree it came from.
+ * The previous version of this returned the joined description itself, which meant a feature run against
+ * a real repository could never pass verification or the security review: the evidence the provider was
+ * handed was rejected for not looking like the field the provider was told to fill in.
+ *
+ * Canonical means sorted in every list, renames included as endpoint pairs, so that two readings of the
+ * same tree hash the same however Git happened to order its output. The HEAD commit is in the digest
+ * rather than beside it: the same set of file changes measured against two different baselines is two
+ * different trees, and a fingerprint that could not tell them apart would not describe either.
+ */
 function fingerprintOfChanges(status: ParsedStatus, headCommit: string): string {
-  return [
-    headCommit,
-    ...status.modified.map((path) => `M ${path}`),
-    ...status.added.map((path) => `A ${path}`),
-    ...status.deleted.map((path) => `D ${path}`),
-    ...status.renamed.map((rename) => `R ${rename.from} -> ${rename.to}`),
-    ...status.untracked.map((path) => `? ${path}`),
-  ].join("\n");
+  const canonical = JSON.stringify({
+    head: headCommit,
+    added: [...status.added].sort(),
+    deleted: [...status.deleted].sort(),
+    modified: [...status.modified].sort(),
+    renamed: [...status.renamed]
+      .map((rename) => [rename.from, rename.to] as const)
+      .sort((left, right) => left[0].localeCompare(right[0])),
+    untracked: [...status.untracked].sort(),
+  });
+
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 /** Maps an adapter error onto the port's refusal vocabulary, which is what callers match on. */

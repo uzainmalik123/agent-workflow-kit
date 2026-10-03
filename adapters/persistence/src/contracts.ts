@@ -7,15 +7,18 @@ import type {
 } from "@agent-workflow-kit/core";
 
 /**
- * Version 4 records the final gate's answer as a controlled artifact and the explicit publishing
- * approval as a second durable checkpoint.
+ * Version 5 records what publishing did as a controlled artifact.
  *
- * Both are additions a reader of an older document cannot supply: `final_gate` is now a name every
- * session must carry a reference for, and `approvals.push` is the field a publishing approval writes.
- * A document written before this version is therefore refused rather than read as a feature that
- * passed no gate, which is the correct direction to be wrong in.
+ * Version 4 recorded the final gate's answer and the explicit publishing approval; this version adds
+ * `publish`, the one artifact a reader of an older document cannot supply and a feature that has
+ * actually shipped is expected to carry. The record itself is framework-written and names the branch,
+ * the commit, the remote, and the approval it was performed under, so a session file alone can answer
+ * "was this published, and on what evidence" without a repository and a remote in reach.
+ *
+ * A document written before this version is refused rather than read as a feature that published
+ * nothing, which is the correct direction to be wrong in.
  */
-export const FEATURE_SESSION_SCHEMA_VERSION = 4 as const;
+export const FEATURE_SESSION_SCHEMA_VERSION = 5 as const;
 export type FeatureSessionSchemaVersion = typeof FEATURE_SESSION_SCHEMA_VERSION;
 
 export const FEATURE_ARTIFACT_NAMES = [
@@ -32,6 +35,7 @@ export const FEATURE_ARTIFACT_NAMES = [
   "final_gate",
   "final_summary",
   "fixes",
+  "publish",
 ] as const;
 
 export type FeatureArtifactName = (typeof FEATURE_ARTIFACT_NAMES)[number];
@@ -52,6 +56,7 @@ export const FEATURE_ARTIFACT_FILENAMES = {
   final_gate: "final-gate.json",
   final_summary: "final-summary.md",
   fixes: "fixes.json",
+  publish: "publish.json",
 } as const satisfies Record<FeatureArtifactName, string>;
 
 export type FeatureArtifactFilename =
@@ -288,6 +293,10 @@ export function createEmptyArtifactReferences(): FeatureArtifactReferences {
     },
     fixes: {
       filename: FEATURE_ARTIFACT_FILENAMES.fixes,
+      status: "missing",
+    },
+    publish: {
+      filename: FEATURE_ARTIFACT_FILENAMES.publish,
       status: "missing",
     },
   };

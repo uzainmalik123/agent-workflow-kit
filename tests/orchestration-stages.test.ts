@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { WorkflowState } from "@agent-workflow-kit/core";
 import {
   createWorkflowOrchestrator,
-  DEFERRED_WORK_STATES,
   fixTriggerArtifact,
   humanActionForState,
   HUMAN_ACTIONS,
@@ -14,6 +13,7 @@ import {
   ORCHESTRATION_STATUSES,
   outputSpecFor,
   PASSIVE_ADVANCE_STATES,
+  PUBLISHING_STATES,
   resolveStageContextPlan,
   STAGE_BY_STATE,
   STAGE_DEFINITIONS,
@@ -89,7 +89,7 @@ describe("stage definitions", () => {
     expect(new Set(states).size).toBe(WORK_STAGES.length);
   });
 
-  it("partitions every workflow state into work, gate, passive, deferred, or terminal", () => {
+  it("partitions every workflow state into work, gate, passive, publishing, or terminal", () => {
     const classified = new Map<WorkflowState, string>();
 
     for (const state of everyState) {
@@ -103,8 +103,8 @@ describe("stage definitions", () => {
         categories.push("human_gate");
       }
 
-      if (DEFERRED_WORK_STATES.has(state)) {
-        categories.push("deferred");
+      if (PUBLISHING_STATES.has(state)) {
+        categories.push("publishing");
       }
 
       if (PASSIVE_ADVANCE_STATES.has(state)) {
@@ -123,14 +123,14 @@ describe("stage definitions", () => {
     expect(classified.get(WorkflowState.SpecReady)).toBe("passive_advance");
     expect(classified.get(WorkflowState.AwaitingPlanApproval)).toBe("human_gate");
     expect(classified.get(WorkflowState.AwaitingPushApproval)).toBe("human_gate");
-    expect(classified.get(WorkflowState.Committing)).toBe("deferred");
-    expect(classified.get(WorkflowState.Pushing)).toBe("deferred");
+    expect(classified.get(WorkflowState.Committing)).toBe("publishing");
+    expect(classified.get(WorkflowState.Pushing)).toBe("publishing");
     expect(classified.get(WorkflowState.Complete)).toBe("terminal");
     expect(classified.get(WorkflowState.Failed)).toBe("terminal");
     expect(classified.get(WorkflowState.Fixing)).toBe("work_stage");
   });
 
-  it("never treats a human gate or a deferred Git state as an executable stage", () => {
+  it("never treats a human gate or a publishing state as an executable stage", () => {
     for (const action of HUMAN_ACTIONS) {
       const state = everyState.find((candidate) => humanActionForState(candidate) === action);
 
@@ -138,7 +138,7 @@ describe("stage definitions", () => {
       expect(stageForState(state as WorkflowState)).toBeUndefined();
     }
 
-    for (const state of DEFERRED_WORK_STATES) {
+    for (const state of PUBLISHING_STATES) {
       expect(stageForState(state)).toBeUndefined();
     }
   });

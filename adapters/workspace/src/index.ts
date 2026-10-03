@@ -12,4 +12,15 @@ export {
   type WorkspaceSidecar,
 } from "./sidecar.js";
 export { assertRepositoryRelative, resolveInside, resolveRealPathInside } from "./paths.js";
-export { GIT_MAX_OUTPUT_BYTES, GIT_TIMEOUT_MS, runGit, tryGit, type GitOutcome, type GitResult } from "./git.js";
+export {
+  GIT_MAX_OUTPUT_BYTES,
+  GIT_TIMEOUT_MS,
+  runGit,
+  runPublishGit,
+  tryGit,
+  tryPublishGit,
+  type GitOutcome,
+  type GitRequest,
+  type GitResult,
+} from "./git.js";
+export { GitFeaturePublisher, PUBLISH_PUSH_TIMEOUT_MS } from "./publisher.js";

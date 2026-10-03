@@ -17,7 +17,7 @@ export {
   APPROVED_ARTIFACTS,
   APPROVAL_VERIFIED_STAGES,
   isApprovalVerifiedStage,
-  DEFERRED_WORK_STATES,
+  PUBLISHING_STATES,
   WRITE_CAPABLE_WORK_STAGES,
   fixTriggerArtifact,
   humanActionForState,
@@ -49,6 +49,49 @@ export type { ApprovalOutcome, ApprovalVerification } from "./approval.js";
 
 export { buildPushApproval, PUSH_APPROVAL_REVISION_OFFSET } from "./push-approval.js";
 export type { PushApprovalEvidence, PushApprovalOutcome } from "./push-approval.js";
+
+export {
+  BRANCH_UNIQUE_SUFFIX_LENGTH,
+  buildFeatureBranch,
+  buildFeatureCommitMessage,
+  commitCarriesOwnership,
+  commitTitleOf,
+  DEFAULT_PUBLISH_REMOTE,
+  isSafeBranchName,
+  MAX_BRANCH_NAME_LENGTH,
+  MAX_COMMIT_TITLE_LENGTH,
+  MAX_FEATURE_ID_LENGTH,
+  PUBLISHING_BRANCH_PREFIX,
+  PUBLISH_ARTIFACT_NAME,
+  publishApprovalReference,
+  publishRecordFrom,
+  publishRecordMatchesApproval,
+  PUBLISH_REFUSAL_CODES,
+  PUBLISH_REFUSAL_ERROR_CODE,
+  PUBLISH_STEPS,
+  unsafeBranchNameReason,
+  verifyPublishApproval,
+  verifyRemoteName,
+  withPushRecorded,
+} from "./publishing.js";
+export type {
+  BranchNameOutcome,
+  CommitMessageOutcome,
+  FeaturePublisher,
+  PublishApprovalEvidence,
+  PublishApprovalReference,
+  PublishApprovalVerdict,
+  PublishBranchOwnership,
+  PublishCommitOutcome,
+  PublishCommitRequest,
+  PublishPushOutcome,
+  PublishPushRequest,
+  PublishRecord,
+  PublishRecordVerdict,
+  PublishRefusalCode,
+  PublishStep,
+  RemoteNameOutcome,
+} from "./publishing.js";
 
 export {
   criterionClaimsFrom,

@@ -150,14 +150,78 @@ next run of the same feature reopens the same worktree at the same baseline and 
 run's work. The cost is a cache directory that grows until a human prunes it, which is visible and
 recoverable, rather than work that disappeared with no record of where it went.
 
+## Publishing
+
+`GitFeaturePublisher` implements the orchestrator's `FeaturePublisher` port: it writes the commit the
+orchestration layer described, and pushes the commit that was recorded. It makes no decisions. The branch
+name, the message, the paths, the commit, and the remote all arrive finished, and the only judgement it
+makes is about safety — and those refusals are refusals, not repairs.
+
+### The commit does not move `HEAD`
+
+The commit is assembled from plumbing in a temporary index rather than by `git switch -c`, `git add`,
+`git commit`:
+
+```
+GIT_INDEX_FILE=<temporary> git read-tree <approved commit>    the index starts as the approved tree
+GIT_INDEX_FILE=<temporary> git add -- <approved paths>         the change set, and nothing else
+GIT_INDEX_FILE=<temporary> git diff --cached --name-only      read back, compared to what was asked for
+GIT_INDEX_FILE=<temporary> git write-tree                     one tree
+git commit-tree <tree> -p <approved commit> -m …               one commit, on the approved commit
+git update-ref refs/heads/<branch> <commit> <zero>             one branch, created only if it is absent
+```
+
+`switch`, `checkout`, `branch`, and `reset` are absent from the publishing allowlist, so no publishing
+call *can* leave a worktree on a branch — which is what keeps the workspace provider's contract true: it
+refuses to reopen a worktree whose `HEAD` is no longer the approved commit, and a commit step that moved
+`HEAD` would have made its own workspace unusable, including on the retry a failed session write would
+need. The change stays in the worktree as an uncommitted modification, so a retry finds the same approved
+tree it started from.
+
+Two more checks stand between the pathspec and the commit. Paths that Git would read as something other
+than a literal name — absolute, `..`, a colon, a leading `-`, a glob character — are `path_unsafe` before
+anything runs. And the staged set is read back and compared to the paths that were asked for, so anything
+this adapter did not anticipate staging is refused rather than committed.
+
+`update-ref`'s third argument is what makes a retry safe: it is the value the ref must hold *before* the
+update, and the all-zero object name means "must not exist". When the branch does exist, the tip is read
+and judged rather than assumed: this approval's trailers plus a parent that is exactly the approved commit
+means it is this approval's commit and is reused; anything else is `branch_conflict`, and no ref is moved.
+A commit written with no `user.name` or `user.email` is refused, because the framework does not invent an
+authorship nobody chose.
+
+### The push names a commit, not a moving name
+
+`git push --porcelain <remote> <commit>:refs/heads/<branch>` — the recorded commit, to a remote the
+orchestrator named, with no force, no delete, no mirror, no prune, no tags, and no implicit refspec. The
+branch is checked against the recorded commit first, so a branch that moved after its commit was recorded
+is refused outright rather than pushed. The push runs from the repository root rather than from the
+worktree, since refs and objects are shared and a push has no reason to depend on where it was run from.
+
+`protocol.file.allow` is `user` for publishing where it is `never` for reading: a push needs a transport
+and the operator chooses it, while the `-c` override still stops a repository's own config from widening
+it. `push.default=nothing`, `push.recurseSubmodules=no`, and `push.followTags=false` are pinned for the
+same reason. A push that would need credentials fails instead of prompting — this process has no terminal
+to answer one on — and the whole thing is bounded by `PUBLISH_PUSH_TIMEOUT_MS`.
+
+### Two allowlists
+
+Reading and publishing have separate policies, checked on the argument vector rather than at the call
+site, so the publishing list contains nothing publishing does not need. The publishing list adds `diff` and
+`config` — one to read the temporary index back, the other to read `user.name` and `user.email` — and
+`commit-tree`, `update-ref`, and `push`, which are the only verbs in either list that write anything. It
+refuses `--force`, `--force-with-lease`, `--mirror`, `--delete`, `--prune`, `--tags`, `--set-upstream`,
+`--recurse-submodules`, `--all`, and a `+`-prefixed refspec.
+
 ## What the Git runner will not do
 
-`runGit` builds an argument array, passes it to `spawn` with `shell: false`, and scrubs the
+Both runners build an argument array, pass it to `spawn` with `shell: false`, and scrub the
 environment. There is no path in this package that builds a command string, and no path that shells
 out.
 
-- **A subcommand allowlist, not a denylist.** Only `rev-parse`, `ls-tree`, `status`, `worktree`,
-  `checkout`, and `rm` are runnable. The first four are reads or the worktree creation; `checkout` and
+- **A subcommand allowlist, not a denylist.** `runGit` runs only `rev-parse`, `ls-tree`, `status`,
+  `worktree`, `checkout`, and `rm`; `tryPublishGit` runs the read-only subset of those plus the verbs
+  [Publishing](#publishing) needs. The first four are reads or the worktree creation; `checkout` and
   `rm` exist only to restore one framework-named path and are always called after a `--` with a
   validated path. `commit`, `push`, `fetch`, `pull`, `reset`, `clean`, `rebase`, `merge`, `stash`,
   `branch`, `switch`, `update-ref`, `symbolic-ref`, `gc`, and `prune` are not in the list, so no
@@ -186,6 +250,12 @@ Every operation returns a discriminated result, and the refusal codes are specif
 `not_a_git_repository`, `head_unborn`, `tracked_workspace_dirty`, `baseline_missing`,
 `workspace_path_occupied`, `workspace_metadata_missing`, `workspace_registered_elsewhere`,
 `head_changed`, `lease_unavailable`, `workspace_failed`.
+
+Publishing has its own vocabulary alongside these: `branch_unsafe`, `path_unsafe`, `head_moved`,
+`identity_unconfigured`, `branch_conflict`, `branch_failed`, `branch_moved`, `commit_failed`,
+`commit_missing`, `remote_unavailable`, `push_rejected`, and `git_unavailable`. None of them is an
+exception and none of them repairs anything: a refusal leaves the repository exactly as it was, because a
+framework that fixed a publishing failure by moving a ref would be making the decision it refused to make.
 
 `head_changed` is worth its own code. A moved `HEAD` is not a scope violation, and reporting it as
 one would send whoever reads the record looking for a path problem that does not exist — while saying

@@ -9,6 +9,7 @@ import type { FeatureArtifactName, FixAttemptOutcome } from "@agent-workflow-kit
 import type { OrchestrationError, OrchestrationFailureClass } from "./errors.js";
 import type { FinalGateResult } from "./final-gate.js";
 import type { FixRejectionCode } from "./fix-policy.js";
+import type { PublishRecord } from "./publishing.js";
 import type { HumanAction, StageRole, WorkStage } from "./stages.js";
 import type { SecurityReviewEvidence } from "./security.js";
 import type { VerificationEvidenceBundle } from "./verification.js";
@@ -21,8 +22,9 @@ export const ORCHESTRATION_STATUSES = [
   "fix_requested",
   "awaiting_human",
   "gate_approved",
+  "committed",
+  "published",
   "feature_failed",
-  "deferred",
   "stage_failed",
   "inconclusive",
   "executor_error",
@@ -91,6 +93,12 @@ export interface OrchestrationResult {
    * finds it null knows the question was never put rather than that the answer was yes.
    */
   readonly finalGate: FinalGateResult | null;
+  /**
+   * What publishing did, when this run did it. Present on a run that wrote the commit and on a run that
+   * pushed it, and null everywhere else — so a caller that finds it null knows nothing was published,
+   * rather than that a record of publishing exists and describes nothing.
+   */
+  readonly publish: PublishRecord | null;
   readonly fix: FixOutcomeSummary | null;
   readonly error: OrchestrationError | null;
 }
@@ -114,6 +122,7 @@ export interface OrchestrationResultInput {
   readonly security?: SecurityReviewEvidence | null;
   readonly scope?: WorkspaceScopeEvidence | null;
   readonly finalGate?: FinalGateResult | null;
+  readonly publish?: PublishRecord | null;
   readonly fix?: FixOutcomeSummary | null;
   readonly error?: OrchestrationError | null;
 }
@@ -141,6 +150,7 @@ export function buildOrchestrationResult(input: OrchestrationResultInput): Orche
     security: input.security ?? null,
     scope: input.scope ?? null,
     finalGate: input.finalGate ?? null,
+    publish: input.publish ?? null,
     fix: input.fix ?? null,
     error,
   };

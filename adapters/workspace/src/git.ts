@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { isAbsolute } from "node:path";
 
 import { WorkspaceAdapterError } from "./errors.js";
 
@@ -27,47 +28,183 @@ export const GIT_TIMEOUT_MS = 30_000;
 /** Far more than any status or diff listing this adapter asks for. */
 export const GIT_MAX_OUTPUT_BYTES = 8_000_000;
 
-/**
- * The only git subcommands this adapter will run.
- *
- * An allowlist of verbs, not a denylist of them, because a denylist is a list of the dangerous things
- * someone thought of. Every verb below is a question, or the one operation that creates a workspace,
- * except `checkout` and `rm`, which exist only to put one framework-named path back and are always
- * called with `--` and a validated path after it.
- *
- * What is absent is the point. There is no call site that can issue `commit`, `push`, `fetch`, `pull`,
- * `reset`, `clean`, `rebase`, `merge`, `stash`, `update-ref`, `symbolic-ref`, `gc`, or `prune`, so no
- * argument a repository, a stage, or a future edit can reach can move a branch, rewrite history, or
- * delete anything the framework did not name itself. `branch` and `switch` are absent for the same
- * reason: this milestone creates a detached worktree and never a branch.
- */
-const ALLOWED_SUBCOMMANDS = new Set([
-  "rev-parse",
-  "ls-tree",
-  "status",
-  "worktree",
-  "checkout",
-  "rm",
-]);
-
-/** Arguments Git accepts that change what it does rather than what it reports. Refused outright. */
-const REFUSED_ARGUMENTS = [
+const READ_ONLY_CONFIG_OVERRIDES = [
   "-c",
-  "--config",
-  "--exec-path",
-  "--git-dir",
-  "--namespace",
-  "--super-prefix",
-  "--upload-pack",
-  "--receive-pack",
-  "--exec",
-];
+  "core.hooksPath=/dev/null",
+  "-c",
+  "include.path=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.untrackedCache=false",
+  "-c",
+  "gc.auto=0",
+  "-c",
+  "protocol.file.allow=never",
+] as const;
+
+/**
+ * The publishing overrides, which differ from the read-only ones in exactly two places.
+ *
+ * `protocol.file.allow` is `user` rather than `never` because a push needs a transport and the operator
+ * chooses it. `user` still means the *repository* cannot widen it: the `-c` override outranks anything
+ * in the repository's own config, so a config that sets `protocol.file.allow=always` to redirect a push
+ * at a local path is overridden, while the operator's own `origin` — ssh, https, or a local bare
+ * repository — pushes exactly as configured. `never` would have been safer and would have made the
+ * adapter unable to publish to a repository on the same machine, which is a deployment this framework
+ * has no reason to forbid.
+ *
+ * The `push.*` settings are pinned so that no repository configuration can widen what a push does. With
+ * no refspec ever left implicit (`push.default=nothing`), with submodules never pushed
+ * (`push.recurseSubmodules=no`), and with tags never followed (`push.followTags=false`), the only ref
+ * this runner can move is the explicit one in the argument vector.
+ */
+const PUBLISHING_CONFIG_OVERRIDES = [
+  ...READ_ONLY_CONFIG_OVERRIDES.slice(0, -2),
+  "-c",
+  "protocol.file.allow=user",
+  "-c",
+  "push.default=nothing",
+  "-c",
+  "push.recurseSubmodules=no",
+  "-c",
+  "push.followTags=false",
+] as const;
+
+/**
+ * What a runner is allowed to do.
+ *
+ * Two of them exist because there are two jobs, and they are kept apart deliberately. The read-only
+ * runner asks a repository questions. The publishing runner asks the same questions and then writes
+ * three things: a commit, a branch ref, and one remote ref. Merging them into one allowlist would mean
+ * either letting every `ls-tree` query reach `push`, or making the push refuse to ask; keeping them
+ * apart means the push is checked against a list that contains nothing it does not need.
+ *
+ * The policy is enforced on the argument vector, not on the call site, so it holds for the publishing
+ * adapter the same way it holds for the read-only one. A call site that wants `push --force` has to get
+ * past this list, and this list has no force in it.
+ */
+interface GitPolicy {
+  /** What the refusal messages call this runner, so a refusal says which one refused. */
+  readonly label: string;
+  readonly allowedSubcommands: ReadonlySet<string>;
+  readonly refusedArguments: readonly string[];
+  readonly refusedArgumentPrefixes: readonly string[];
+  readonly configOverrides: readonly string[];
+}
+
+/**
+ * The read-only policy: questions, plus the worktree lifecycle.
+ *
+ * `checkout` and `rm` are here only to put one framework-named path back, and are always called with
+ * `--` and a validated path after it. `branch` and `switch` are absent because nothing in the read-only
+ * job creates a branch or moves HEAD, and their absence is what lets the publishing policy say the same
+ * thing about its own work: publishing moves no HEAD either, so it does not need them either.
+ */
+const READ_ONLY_POLICY: GitPolicy = {
+  label: "workspace adapter",
+  allowedSubcommands: new Set(["rev-parse", "ls-tree", "status", "worktree", "checkout", "rm"]),
+  refusedArguments: [
+    "-c",
+    "--config",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--upload-pack",
+    "--receive-pack",
+    "--exec",
+  ],
+  refusedArgumentPrefixes: [],
+  configOverrides: READ_ONLY_CONFIG_OVERRIDES,
+};
+
+/**
+ * The publishing policy: the read-only verbs it needs, plus the ones that write a commit and a ref.
+ *
+ * Two absences are the point. There is no `switch`, `checkout`, `branch`, or `reset`, so no publishing
+ * call can move a worktree's HEAD — the invariant the workspace provider's open check rests on is kept
+ * by what this list omits rather than by what the code remembers to do. And there is no force, no
+ * deletion, no mirror, no prune, no tags, and no `--set-upstream`, so the only ref this policy can
+ * create or move is the one the orchestration layer named, and only additively.
+ *
+ * The refusals are listed by prefix as well as by name because Git's dangerous options have long,
+ * compound spellings (`--force-with-lease=<ref>`, `--receive-pack=<path>`) and a list of exact strings
+ * would be one edit away from a hole.
+ *
+ * `config` and `diff` are here for two jobs and not for browsing: `config --get user.name` is how the
+ * commit identity is *read*, never set, and `diff --cached` is how the temporary index is read back to
+ * confirm it holds the approved change set and nothing else. Both are read-only in the one shape this
+ * adapter calls them in, and neither can write a setting or a tree — `update-ref` and `commit-tree` are
+ * the only verbs here that write anything at all.
+ */
+const PUBLISHING_POLICY: GitPolicy = {
+  label: "publishing adapter",
+  allowedSubcommands: new Set([
+    "rev-parse",
+    "ls-tree",
+    "status",
+    "for-each-ref",
+    "log",
+    "cat-file",
+    "diff",
+    "config",
+    "remote",
+    "add",
+    "read-tree",
+    "write-tree",
+    "commit-tree",
+    "update-ref",
+    "push",
+  ]),
+  refusedArguments: [
+    "-c",
+    // `push --all` is "every branch", and `log --all` is every ref. `--all` is refused by spelling rather
+    // than per verb because the verbs that want it are the dangerous ones, and a call site that needs a
+    // whole-ref query has to say so in a list a reviewer can read.
+    "--all",
+    "--delete",
+    "--dry-run",
+    "--follow-tags",
+    "--force",
+    "--force-with-lease",
+    "--mirror",
+    "--prune",
+    "--recurse-submodules",
+    "--set-upstream",
+    "-u",
+    "--tags",
+    "-f",
+    "-d",
+  ],
+  refusedArgumentPrefixes: [
+    "--config",
+    "--delete",
+    "--exec",
+    "--force",
+    "--git-dir",
+    "--mirror",
+    "--namespace",
+    "--prune",
+    "--receive",
+    "--recurse-submodules",
+    "--set-git-dir",
+    "--set-upstream",
+    "--super-prefix",
+    "--tags",
+    "--upload",
+    "+",
+  ],
+  configOverrides: PUBLISHING_CONFIG_OVERRIDES,
+};
 
 export interface GitRequest {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal | null;
+  /** Values this adapter adds to the scrubbed environment. See {@link ADDABLE_ENVIRONMENT}. */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 export interface GitOutcome {
@@ -97,21 +234,6 @@ export interface GitOutcome {
  * cache — a stale `fsmonitor` or `untrackedCache` would let Git answer "nothing changed" about a tree
  * the agent just changed, which is the one answer this adapter must never be wrong about.
  */
-const CONFIG_OVERRIDES = [
-  "-c",
-  "core.hooksPath=/dev/null",
-  "-c",
-  "include.path=/dev/null",
-  "-c",
-  "core.fsmonitor=false",
-  "-c",
-  "core.untrackedCache=false",
-  "-c",
-  "gc.auto=0",
-  "-c",
-  "protocol.file.allow=never",
-] as const;
-
 /** Environment variables that would silently retarget or rewrite the repository Git talks about. */
 const SCRUBBED_ENVIRONMENT = [
   "GIT_DIR",
@@ -137,7 +259,22 @@ const SCRUBBED_ENVIRONMENT = [
   "GIT_ATTR_NOSYSTEM",
 ];
 
-function scrubbedEnvironment(): Record<string, string> {
+/**
+ * Environment variables a caller may add, with the values each may take.
+ *
+ * Scrubbing is the wrong tool for these two, and the distinction is worth stating: the scrubbed list
+ * exists because an *inherited* value would silently retarget the repository Git talks about, whereas
+ * `GIT_INDEX_FILE` and `GIT_TERMINAL_PROMPT` are values the adapter chooses on purpose and validates
+ * before passing. Each is still absent from the environment of a run that does not ask for it.
+ */
+const ADDABLE_ENVIRONMENT: Readonly<Record<string, (value: string) => boolean>> = {
+  /** A temporary index the adapter created, which is why the value must be an absolute path. */
+  GIT_INDEX_FILE: (value) => value.length > 0 && isAbsolute(value),
+  /** Zero or nothing: the only credential-prompt behaviour a non-interactive publish may have. */
+  GIT_TERMINAL_PROMPT: (value) => value === "0",
+};
+
+function scrubbedEnvironment(policy: GitPolicy, additions?: Readonly<Record<string, string>>): Record<string, string> {
   const environment: Record<string, string> = {};
 
   for (const [name, value] of Object.entries(process.env)) {
@@ -146,24 +283,45 @@ function scrubbedEnvironment(): Record<string, string> {
     }
   }
 
+  for (const [name, value] of Object.entries(additions ?? {})) {
+    const accepts = ADDABLE_ENVIRONMENT[name];
+
+    if (accepts === undefined || !accepts(value)) {
+      throw new WorkspaceAdapterError(
+        "git_failed",
+        `The ${policy.label} refuses to run git with ${name}=${JSON.stringify(value)}: it is not a value this adapter sets.`,
+      );
+    }
+
+    environment[name] = value;
+  }
+
   return environment;
 }
 
-function assertRefusedArgumentsAreAbsent(args: readonly string[]): void {
+function assertArgumentsAllowed(policy: GitPolicy, args: readonly string[]): void {
   const subcommand = args[0];
 
-  if (subcommand === undefined || !ALLOWED_SUBCOMMANDS.has(subcommand)) {
+  if (subcommand === undefined || !policy.allowedSubcommands.has(subcommand)) {
     throw new WorkspaceAdapterError(
       "git_failed",
-      `The workspace adapter refuses to run git with the subcommand "${subcommand ?? ""}": it runs only the commands that read a repository, create a worktree, or restore a path it was asked to restore.`,
+      `The ${policy.label} refuses to run git with the subcommand "${subcommand ?? ""}": it runs only ${
+        policy === PUBLISHING_POLICY
+          ? "the commands that read a repository, write one commit, and move one named ref"
+          : "the commands that read a repository, create a worktree, or restore a path it was asked to restore"
+      }.`,
     );
   }
 
   for (const argument of args) {
-    if (REFUSED_ARGUMENTS.includes(argument)) {
+    const refused =
+      policy.refusedArguments.includes(argument) ||
+      policy.refusedArgumentPrefixes.some((prefix) => argument.startsWith(prefix));
+
+    if (refused) {
       throw new WorkspaceAdapterError(
         "git_failed",
-        `The workspace adapter refuses to run git with the argument "${argument}": it changes what git does rather than what it reports, and this adapter only ever asks git questions.`,
+        `The ${policy.label} refuses to run git with the argument "${argument}": it changes what git does rather than what it reports, and this adapter only ever adds what it names itself.`,
       );
     }
   }
@@ -178,7 +336,29 @@ function assertRefusedArgumentsAreAbsent(args: readonly string[]): void {
  * will not pass, because that is a programming error rather than a repository's state.
  */
 export function runGit(request: GitRequest): Promise<GitOutcome> {
-  assertRefusedArgumentsAreAbsent(request.args);
+  return runGitWithPolicy(request, READ_ONLY_POLICY);
+}
+
+/**
+ * The same runner with the publishing policy.
+ *
+ * A separate entry point rather than an option, because the two policies exist for two different jobs
+ * and a caller that can choose its own policy is a caller that can choose the read-only one to push.
+ */
+export function runPublishGit(request: GitRequest): Promise<GitOutcome> {
+  return runGitWithPolicy(request, PUBLISHING_POLICY);
+}
+
+/**
+ * One git command, under a policy, to completion.
+ *
+ * It never throws for a git failure — a non-zero exit is a result the caller has to reason about,
+ * because "exit 1 because the object is not there" and "exit 1 because the index is broken" are
+ * different answers to the same command. It does throw for an argument this adapter has decided it will
+ * not pass, because that is a programming error rather than a repository's state.
+ */
+function runGitWithPolicy(request: GitRequest, policy: GitPolicy): Promise<GitOutcome> {
+  assertArgumentsAllowed(policy, request.args);
 
   return new Promise<GitOutcome>((resolvePromise) => {
     const startedAt = Date.now();
@@ -188,11 +368,11 @@ export function runGit(request: GitRequest): Promise<GitOutcome> {
     let timedOut = false;
     let spawnFailed = false;
 
-    const child = spawn("git", [...CONFIG_OVERRIDES, ...request.args], {
+    const child = spawn("git", [...policy.configOverrides, ...request.args], {
       cwd: request.cwd,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
-      env: scrubbedEnvironment(),
+      env: scrubbedEnvironment(policy, request.env),
     });
 
     const collect = (target: "stdout" | "stderr", chunk: string): void => {
@@ -292,7 +472,16 @@ function summarize(outcome: GitOutcome): string {
 }
 
 export async function tryGit(request: GitRequest): Promise<GitResult> {
-  const outcome = await runGit(request);
+  return tryGitWithPolicy(request, READ_ONLY_POLICY);
+}
+
+/** {@link tryGit} under the publishing policy. */
+export async function tryPublishGit(request: GitRequest): Promise<GitResult> {
+  return tryGitWithPolicy(request, PUBLISHING_POLICY);
+}
+
+async function tryGitWithPolicy(request: GitRequest, policy: GitPolicy): Promise<GitResult> {
+  const outcome = await runGitWithPolicy(request, policy);
 
   if (outcome.exitCode === 0 && !outcome.spawnFailed && !outcome.timedOut) {
     return { ok: true, stdout: outcome.stdout, stderr: outcome.stderr };

@@ -1,10 +1,10 @@
 import {
+  WorkflowState,
   WorkflowStateMachine,
   type FixReturnState,
   type ReviewFinding,
   type WorkflowEvent,
   type WorkflowMachineSnapshot,
-  type WorkflowState,
   type WorkspaceBaseline,
 } from "@agent-workflow-kit/core";
 import {
@@ -19,6 +19,7 @@ import {
   type FeatureSessionStore,
   type FixAttemptOutcome,
   type FixHistoryEntry,
+  type PushApprovalRecord,
 } from "@agent-workflow-kit/persistence";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
@@ -67,18 +68,36 @@ import {
 import { isRecord, validateStageExecutionResult } from "./result-validation.js";
 import {
   isApprovalVerifiedStage,
-  DEFERRED_WORK_STATES,
   fixTriggerArtifact,
   humanActionForState,
   isTerminalState,
   outputSpecFor,
   PASSIVE_ADVANCE_STATES,
+  PUBLISHING_STATES,
   resolveStageContextPlan,
   stageForState,
   STAGE_DEFINITIONS,
   type StageContextPlan,
   type WorkStage,
 } from "./stages.js";
+import {
+  buildFeatureBranch,
+  buildFeatureCommitMessage,
+  DEFAULT_PUBLISH_REMOTE,
+  publishApprovalReference,
+  PUBLISH_ARTIFACT_NAME,
+  publishRecordFrom,
+  publishRecordMatchesApproval,
+  PUBLISH_REFUSAL_ERROR_CODE,
+  verifyPublishApproval,
+  verifyRemoteName,
+  withPushRecorded,
+  type FeaturePublisher,
+  type PublishApprovalEvidence,
+  type PublishApprovalVerdict,
+  type PublishRecord,
+  type PublishStep,
+} from "./publishing.js";
 import {
   approvedPathsOf,
   approvedScopeFromPlan,
@@ -91,6 +110,7 @@ import {
   type OpenWorkspaceOutcome,
   type ProjectWorkspace,
   type ProjectWorkspaceProvider,
+  type WorkspaceAccessLevel,
   type WorkspaceInspection,
   type WorkspaceScopeEvidence,
   type WorkspaceUnauthorizedPath,
@@ -187,6 +207,31 @@ export interface WorkflowOrchestratorOptions {
    */
   readonly workspace?: ProjectWorkspaceProvider | null;
   /**
+   * The publishing port: the branch, the commit, and the push.
+   *
+   * Optional in the type, and refused at the point of use. An orchestrator without one can run every
+   * stage and hold a certified, approved, un-published feature, which is a coherent thing to want — a
+   * team that reviews diffs locally — so the absence is not an error. What it must never be is a
+   * framework that publishes something it was not given the means to publish: reaching `committing`
+   * without a publisher is a structured `publisher_not_configured` refusal that runs no Git, moves no
+   * state, and calls no executor.
+   *
+   * The publisher is constructed by whoever wires the kit up, and it is never an agent. No stage,
+   * artifact, or prompt can choose a branch, a remote, or a command: the orchestrator decides all three
+   * and hands the publisher an argv-shaped request.
+   */
+  readonly publisher?: FeaturePublisher | null;
+  /**
+   * The remote a push goes to.
+   *
+   * Defaults to {@link DEFAULT_PUBLISH_REMOTE}. It is a construction option rather than something a
+   * caller supplies per call, because which remote a feature is published to is a property of the
+   * project rather than of a decision made at one moment: a value that could change between the commit
+   * and the push would make the two steps disagree about where the work goes. A name that is not safe to
+   * put on a command line is refused before any Git runs.
+   */
+  readonly publishRemote?: string | null;
+  /**
    * How many times one fix loop may run before the framework stops and escalates.
    *
    * Defaults to `MAX_FIX_ATTEMPTS`. It is a construction option rather than a project setting because
@@ -219,6 +264,16 @@ interface CommitInput {
   readonly session: FeatureSession;
   readonly event?: WorkflowEvent;
   readonly prepare?: (reader: FeatureMutationReader) => Promise<FeatureMutationPlan>;
+  /**
+   * Result fields this commit produces, computed under the mutation's own lock.
+   *
+   * Publishing is why this exists. Its record carries the revision and the timestamp of the write that
+   * stored it, and those two are only known inside the mutation — so a result field built from the
+   * record cannot be assembled before the write, and reading it back afterwards would mean a second read
+   * of a document the framework has just written. The hook is given the same reader `prepare` is, in the
+   * same locked call, and its fields are merged over the caller's.
+   */
+  readonly decorate?: (reader: FeatureMutationReader) => Partial<ResultExtras>;
   readonly successStatus: OrchestrationStatus;
   readonly extras: ResultExtras;
 }
@@ -516,6 +571,8 @@ export class WorkflowOrchestrator {
   readonly #projectRoot: string;
   readonly #workspace: ProjectWorkspaceProvider | null;
   readonly #maxFixAttempts: number;
+  readonly #publisher: FeaturePublisher | null;
+  readonly #publishRemote: string;
 
   constructor(options: WorkflowOrchestratorOptions) {
     this.#store = options.store;
@@ -525,6 +582,8 @@ export class WorkflowOrchestrator {
     this.#projectRoot = resolve(options.projectRoot ?? process.cwd());
     this.#workspace = options.workspace ?? null;
     this.#maxFixAttempts = resolveMaxFixAttempts(options.maxFixAttempts);
+    this.#publisher = options.publisher ?? null;
+    this.#publishRemote = options.publishRemote ?? DEFAULT_PUBLISH_REMOTE;
   }
 
   get store(): FeatureSessionStore {
@@ -569,16 +628,12 @@ export class WorkflowOrchestrator {
       return this.#result({ ...base, status: "awaiting_human", state: fromState, action });
     }
 
-    if (DEFERRED_WORK_STATES.has(fromState)) {
-      return this.#result({
-        ...base,
-        status: "deferred",
-        state: fromState,
-        error: orchestrationError(
-          "git_integration_deferred",
-          `State "${fromState}" has no orchestrated work stage until Git integration is implemented.`,
-        ),
-      });
+    if (PUBLISHING_STATES.has(fromState)) {
+      // The two publishing states are the only place the workflow performs work no stage executor is
+      // involved in, and they run the same way a stage runs: one step, then stop. `runNext` therefore
+      // publishes here rather than reporting that publishing is unavailable, and `publishFeature` is the
+      // same call under a name that says what it is for.
+      return this.publishFeature(featureId);
     }
 
     if (PASSIVE_ADVANCE_STATES.has(fromState)) {
@@ -875,6 +930,547 @@ export class WorkflowOrchestrator {
     } finally {
       await this.#closeWorkspace(measured.workspace);
     }
+  }
+
+  /**
+   * Advances publishing by one step: the branch and commit, then the push.
+   *
+   * This is the only way anything leaves a machine in this framework, and it is deliberately the
+   * narrowest method in the orchestrator. It runs no executor, calls no agent, and takes no instruction
+   * from an artifact. What it does is decide, from the recorded session alone, whether the feature in
+   * front of it may be published, and then hand a publisher two facts it derived itself: a ref and a
+   * commit message.
+   *
+   * The checks are repeated immediately before the Git runs and again inside the mutation that records
+   * the result, which is redundant on purpose. A summary can be edited and a session can move between
+   * the moment a caller decides to publish and the moment a commit is written, and an approval that has
+   * quietly stopped describing what is on disk is exactly the case this milestone exists to refuse. The
+   * re-check inside the mutation runs under the per-feature lock with the revision as its precondition,
+   * so what it reads is what the write is about to replace.
+   *
+   * One step per call, like a stage. `committing` creates the branch and writes the commit and moves to
+   * `pushing`; `pushing` pushes the recorded commit and moves to `complete`. Nothing moves past
+   * `pushing` unless a remote accepted the commit that was recorded, and a refusal at either step leaves
+   * the feature exactly where it was, with the approval untouched.
+   */
+  async publishFeature(featureId: string): Promise<OrchestrationResult> {
+    const session = await this.#store.load(featureId);
+    const state = session.machine.state;
+    const base: ResultExtras = { featureId, fromState: state };
+
+    if (isTerminalState(state)) {
+      // `complete` after publishing is the ordinary case, and it is worth naming: a caller that asks
+      // twice is told the work is already published rather than given a refusal that sounds like a
+      // failure it should investigate.
+      if (state === WorkflowState.Complete) {
+        return this.#result({
+          ...base,
+          status: "rejected",
+          state,
+          error: orchestrationError(
+            "publish_already_published",
+            `Feature "${featureId}" is already complete. A second publish of one approval is refused: the framework will not push the same feature branch again, and will not record a second push for a session that has finished.`,
+          ),
+        });
+      }
+
+      return this.#result({ ...base, status: "terminal", state });
+    }
+
+    if (!PUBLISHING_STATES.has(state)) {
+      return this.#result({
+        ...base,
+        status: "rejected",
+        state,
+        error: orchestrationError(
+          "publish_state_invalid",
+          `Publishing runs in "committing" and "pushing", and feature "${featureId}" is in "${state}".` +
+            (state === WorkflowState.AwaitingPushApproval
+              ? " That is the human gate before it: an explicit approval is what reaches the commit step, and the framework never writes one."
+              : " Nothing is published from any other state, and a feature that is still being worked on has nothing approved to publish."),
+        ),
+      });
+    }
+
+    if (this.#publisher === null) {
+      return this.#result({
+        ...base,
+        status: "rejected",
+        state,
+        error: orchestrationError(
+          "publisher_not_configured",
+          `Feature "${featureId}" is approved to publish, but this orchestrator has no publisher configured. Nothing was published: configure a publishing adapter, or leave the feature at its certified state.`,
+        ),
+      });
+    }
+
+    const remote = verifyRemoteName(this.#publishRemote);
+
+    if (!remote.ok) {
+      return this.#result({ ...base, status: "rejected", state, error: remote.error });
+    }
+
+    const step: PublishStep = state === WorkflowState.Pushing ? "push" : "commit";
+    const evidence = await this.#readPublishEvidence(session, step);
+
+    if (!evidence.ok) {
+      return this.#result({ ...base, status: "rejected", state, error: evidence.error });
+    }
+
+    const approved = verifyPublishApproval(session, evidence.evidence);
+
+    if (!approved.ok) {
+      return this.#result({ ...base, status: "rejected", state, error: approved.error });
+    }
+
+    return step === "commit"
+      ? await this.#commitFeature(session, approved.approval, evidence.evidence, remote.remote, base)
+      : await this.#pushFeature(session, approved.approval, evidence.evidence, remote.remote, base);
+  }
+
+  /**
+   * Creates the branch and writes the commit, or refuses.
+   *
+   * Every check below happens with the workspace open and its change set measured, because the question
+   * each one asks is a question about that tree: is it still the tree the gate certified, is the index
+   * still the index the framework left empty, and does every path in it belong to this feature. The
+   * fingerprint is compared against the approval rather than against the gate, so a tree that moved after
+   * the gate was decided is caught here even if the gate document still claims otherwise.
+   *
+   * The paths handed to the publisher are the measured change set and nothing else. That is both the
+   * authorization and the specification: a path nobody approved cannot reach a commit, and a path that
+   * was approved but did not change cannot be committed by this step.
+   */
+  async #commitFeature(
+    session: FeatureSession,
+    approval: PushApprovalRecord,
+    evidence: PublishApprovalEvidence,
+    remote: string,
+    base: ResultExtras,
+  ): Promise<OrchestrationResult> {
+    const rejected = (error: OrchestrationError): OrchestrationResult =>
+      this.#result({ ...base, status: "rejected", state: session.machine.state, error });
+
+    const opened = await this.#openIsolatedWorkspace(session, {
+      label: "publishing",
+      access: "read_write",
+    });
+
+    if (!opened.ok) {
+      return rejected(opened.error);
+    }
+
+    try {
+      const inspection = await this.#inspect(session, opened.workspace, "publishing");
+
+      if (!inspection.ok) {
+        return rejected(
+          orchestrationError(
+            "workspace_unavailable",
+            `The working tree could not be read before committing: ${inspection.message}`,
+          ),
+        );
+      }
+
+      if (inspection.inspection.fingerprint !== approval.workingTreeFingerprint) {
+        return rejected(
+          orchestrationError(
+            "publish_approval_stale",
+            `The working tree now fingerprints as ${inspection.inspection.fingerprint}, but the approval was given for ${approval.workingTreeFingerprint}. Something wrote to the worktree after the human approved it, so the tree that would be committed is not the one they saw.`,
+          ),
+        );
+      }
+
+      // The integrity check is what says the worktree is still the approved tree with an untouched
+      // index. Both halves matter here: a HEAD that moved means a commit already exists inside the
+      // workspace, and a non-empty index means something staged content the framework did not stage.
+      const integrity = evaluateWorkspaceIntegrity(inspection.inspection, opened.baseline);
+
+      if (!integrity.ok) {
+        return rejected(orchestrationError("publish_tree_changed", integrity.reason));
+      }
+
+      const scope = await this.#readApprovedScope(session);
+
+      if (!scope.ok) {
+        return rejected(scope.error);
+      }
+
+      const verdict = evaluateWorkspaceScope(inspection.inspection, { approvedPatterns: scope.patterns });
+
+      if (!verdict.ok) {
+        const unauthorized = verdict.unauthorized.map((entry) => entry.path).sort();
+
+        return rejected(
+          orchestrationError(
+            "publish_scope_violation",
+            `Publishing refused: ${unauthorized.join(", ")} changed outside the approved plan, or is a path the framework protects. Nothing was committed and nothing was restored — the feature stays at "${session.machine.state}" for a human to look at.`,
+          ),
+        );
+      }
+
+      const paths = approvedPathsOf(inspection.inspection.changes);
+
+      if (paths.length === 0) {
+        return rejected(
+          orchestrationError(
+            "publish_change_set_empty",
+            `Feature "${session.featureId}" was approved to publish, but its worktree has no changes against the approved commit. There is nothing to commit, and the framework does not write an empty commit to make a push look like it did something.`,
+          ),
+        );
+      }
+
+      const branch = buildFeatureBranch({ featureId: session.featureId, approval });
+
+      if (!branch.ok) {
+        return rejected(branch.error);
+      }
+
+      const message = buildFeatureCommitMessage({
+        featureId: session.featureId,
+        title: session.title,
+        approval,
+      });
+
+      if (!message.ok) {
+        return rejected(message.error);
+      }
+
+      const publisher = this.#publisher;
+
+      if (publisher === null) {
+        return rejected(
+          orchestrationError(
+            "publisher_not_configured",
+            `Feature "${session.featureId}" is approved to publish, but this orchestrator has no publisher configured.`,
+          ),
+        );
+      }
+
+      let committed: Awaited<ReturnType<FeaturePublisher["commitFeature"]>>;
+
+      try {
+        committed = await publisher.commitFeature({
+          workspace: opened.workspace,
+          featureId: session.featureId,
+          branch: branch.branch,
+          commitMessage: message.message,
+          paths,
+          expectedHead: opened.baseline.baselineCommit,
+          ownership: { featureId: session.featureId, summarySha256: approval.summarySha256 },
+        });
+      } catch (error) {
+        // The port answers with a refusal rather than throwing, so a throw is an adapter that broke its
+        // own contract. It is still reported rather than propagated: this method's callers are a CLI and
+        // a plugin, and neither should be taken down by a git failure.
+        return rejected(
+          orchestrationError(
+            "publish_publisher_failed",
+            `The publisher failed while committing feature "${session.featureId}": ${describeError(error)}`,
+          ),
+        );
+      }
+
+      if (!committed.ok) {
+        return rejected(orchestrationError(PUBLISH_REFUSAL_ERROR_CODE[committed.code], committed.message));
+      }
+
+      const record = (reader: FeatureMutationReader): PublishRecord => ({
+        schemaVersion: 1,
+        featureId: session.featureId,
+        branch: branch.branch,
+        commit: committed.commit,
+        remote: null,
+        result: "committed",
+        paths,
+        revisionBefore: approval.approvedRevision,
+        revisionAfter: reader.nextRevision,
+        recordedAt: reader.timestamp,
+        pushedAt: null,
+        approval: publishApprovalReference(approval),
+      });
+
+      return await this.#commit({
+        featureId: session.featureId,
+        session,
+        event: "advance",
+        successStatus: "committed",
+        extras: base,
+        prepare: async (reader) => {
+          const reverified = await this.#verifyPublishApprovalInMutation(reader, evidence, "commit");
+
+          if (!reverified.ok) {
+            throw new StageFinalizeError(reverified.error);
+          }
+
+          return { artifacts: [{ name: PUBLISH_ARTIFACT_NAME, content: record(reader) }] };
+        },
+        decorate: (reader) => ({ publish: record(reader) }),
+      });
+    } finally {
+      await this.#closeWorkspace(opened.workspace);
+    }
+  }
+
+  /**
+   * Pushes the recorded commit, or refuses.
+   *
+   * The commit already exists by the time this runs, so the step reads it back rather than trusting its
+   * memory of it: the session file is what a later reader has, and a hand-edited or truncated record is
+   * a refusal rather than a guess. Two further checks belong here because they can only be made against
+   * the repository — the commit has to exist, and the branch has to still point at it. A branch that
+   * moved since the commit is refused rather than pushed over, and the pushed source is the recorded
+   * commit itself rather than the branch's name, so nothing can be substituted in between.
+   *
+   * The push runs from the repository rather than from the isolated worktree. The worktree's HEAD moved
+   * when the commit was written, and a push needs neither that HEAD nor any file in that worktree.
+   */
+  async #pushFeature(
+    session: FeatureSession,
+    approval: PushApprovalRecord,
+    evidence: PublishApprovalEvidence,
+    remote: string,
+    base: ResultExtras,
+  ): Promise<OrchestrationResult> {
+    const rejected = (error: OrchestrationError): OrchestrationResult =>
+      this.#result({ ...base, status: "rejected", state: session.machine.state, error });
+
+    let record: PublishRecord;
+
+    try {
+      const stored = await this.#store.readArtifact(session.featureId, PUBLISH_ARTIFACT_NAME);
+
+      const parsed = publishRecordFrom(stored);
+
+      if (!parsed.ok) {
+        return rejected(
+          orchestrationError(
+            "publish_record_invalid",
+            `The recorded publishing result for feature "${session.featureId}" cannot be used: ${parsed.reason}. Nothing was pushed.`,
+          ),
+        );
+      }
+
+      record = parsed.record;
+    } catch (error) {
+      if (isArtifactMissing(error)) {
+        return rejected(
+          orchestrationError(
+            "publish_record_missing",
+            `Feature "${session.featureId}" is in "pushing" but records no commit to push. The commit step writes that record, so its absence means the session was moved by something other than this framework. Nothing was pushed.`,
+          ),
+        );
+      }
+
+      return rejected(
+        orchestrationError(
+          "persistence_failed",
+          `The recorded commit to push could not be read: ${describeError(error)}`,
+        ),
+      );
+    }
+
+    if (!publishRecordMatchesApproval(record, approval)) {
+      return rejected(
+        orchestrationError(
+          "publish_approval_stale",
+          `The recorded commit ${record.commit} was recorded under a different approval than the one this feature currently records, so it is not known to be the approved tree. Nothing was pushed.`,
+        ),
+      );
+    }
+
+    if (record.result === "pushed") {
+      return rejected(
+        orchestrationError(
+          "publish_record_invalid",
+          `The recorded publishing result for feature "${session.featureId}" already reports a push to "${String(record.remote)}", yet the session is still in "pushing". A session that disagrees with its own record is refused rather than pushed again.`,
+        ),
+      );
+    }
+
+    const baseline = session.approvals.plan?.baseline ?? null;
+
+    if (baseline === null || resolve(baseline.repositoryRoot) !== this.#projectRoot) {
+      return rejected(
+        orchestrationError(
+          "workspace_baseline_missing",
+          `The approval for feature "${session.featureId}" names no repository this orchestrator is bound to, so there is nowhere to push from.`,
+        ),
+      );
+    }
+
+    const publisher = this.#publisher;
+
+    if (publisher === null) {
+      return rejected(
+        orchestrationError(
+          "publisher_not_configured",
+          `Feature "${session.featureId}" is approved to publish, but this orchestrator has no publisher configured.`,
+        ),
+      );
+    }
+
+    let pushed: Awaited<ReturnType<FeaturePublisher["pushBranch"]>>;
+
+    try {
+      pushed = await publisher.pushBranch({
+        repositoryRoot: baseline.repositoryRoot,
+        featureId: session.featureId,
+        branch: record.branch,
+        commit: record.commit,
+        remote,
+      });
+    } catch (error) {
+      return rejected(
+        orchestrationError(
+          "publish_publisher_failed",
+          `The publisher failed while pushing feature "${session.featureId}": ${describeError(error)}`,
+        ),
+      );
+    }
+
+    if (!pushed.ok) {
+      return rejected(orchestrationError(PUBLISH_REFUSAL_ERROR_CODE[pushed.code], pushed.message));
+    }
+
+    return this.#commit({
+      featureId: session.featureId,
+      session,
+      event: "advance",
+      successStatus: "published",
+      extras: base,
+      prepare: async (reader) => {
+        const reverified = await this.#verifyPublishApprovalInMutation(reader, evidence, "push");
+
+        if (!reverified.ok) {
+          throw new StageFinalizeError(reverified.error);
+        }
+
+        const current = publishRecordFrom(await reader.readArtifact(PUBLISH_ARTIFACT_NAME));
+
+        if (!current.ok || current.record.commit !== record.commit) {
+          throw new StageFinalizeError(
+            orchestrationError(
+              "publish_record_invalid",
+              `The recorded commit changed while the push was in flight, so the result of pushing ${record.commit} cannot be recorded against it. The push itself succeeded and is not retried.`,
+            ),
+          );
+        }
+
+        return {
+          artifacts: [
+            {
+              name: PUBLISH_ARTIFACT_NAME,
+              content: withPushRecorded(current.record, {
+                remote: pushed.remote,
+                at: reader.timestamp,
+                revisionAfter: reader.nextRevision,
+              }),
+            },
+          ],
+        };
+      },
+      decorate: (reader) => ({
+        publish: withPushRecorded(record, {
+          remote: pushed.remote,
+          at: reader.timestamp,
+          revisionAfter: reader.nextRevision,
+        }),
+      }),
+    });
+  }
+
+  /**
+   * The approval's evidence, read the way the gate and summary were recorded.
+   *
+   * Read as text rather than parsed and re-serialized, because the whole basis of the approval is the
+   * digest of the bytes a human read. A missing summary yields no digest to compare, which is the same
+   * answer as a changed one.
+   */
+  async #readPublishEvidence(
+    session: FeatureSession,
+    step: PublishStep,
+  ): Promise<
+    | { readonly ok: true; readonly evidence: PublishApprovalEvidence }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    const gate = await this.#readRecordedFinalGate(session);
+
+    if (!gate.ok) {
+      return { ok: false, error: gate.error };
+    }
+
+    let gateText: string | undefined;
+    let summaryText: string | undefined;
+
+    try {
+      gateText = await this.#store.readArtifactText(session.featureId, "final_gate");
+      summaryText = await this.#store.readArtifactText(session.featureId, "final_summary");
+    } catch (error) {
+      if (isArtifactMissing(error)) {
+        return {
+          ok: false,
+          error: orchestrationError(
+            "publish_summary_mismatch",
+            `The ${step} step of publishing cannot compare the approval against its evidence: the final gate or the final summary is not on disk. A publishing approval is a claim about specific documents, and both have to be there to check it against.`,
+          ),
+        };
+      }
+
+      return {
+        ok: false,
+        error: orchestrationError(
+          "persistence_failed",
+          `The publishing evidence could not be read: ${describeError(error)}`,
+        ),
+      };
+    }
+
+    return {
+      ok: true,
+      evidence: {
+        gate: gate.result,
+        gateSha256: digestArtifactText(gateText),
+        summarySha256: digestArtifactText(summaryText),
+        step,
+      },
+    };
+  }
+
+  /**
+   * The same approval check again, inside the mutation, against the session the write is about to replace.
+   *
+   * The revision guard would already reject a session that moved, so this is not about concurrency. It is
+   * about the documents: the approval names the bytes of the summary and of the gate, and reading them
+   * under the lock is the last moment at which those bytes are guaranteed to be the ones being acted on.
+   */
+  async #verifyPublishApprovalInMutation(
+    reader: FeatureMutationReader,
+    evidence: PublishApprovalEvidence,
+    step: PublishStep,
+  ): Promise<PublishApprovalVerdict> {
+    const gateValue = await reader.readArtifact("final_gate");
+    const recorded = recordedFinalGateFrom(gateValue);
+
+    if (!recorded.ok) {
+      return {
+        ok: false,
+        error: orchestrationError(
+          "final_gate_not_recorded",
+          `The recorded final gate could not be read while publishing: ${recorded.reason}.`,
+        ),
+      };
+    }
+
+    const gateText = await reader.readArtifactText("final_gate");
+    const summaryText = await reader.readArtifactText("final_summary");
+
+    return verifyPublishApproval(reader.session, {
+      gate: recorded.result,
+      gateSha256: digestArtifactText(gateText ?? ""),
+      summarySha256: digestArtifactText(summaryText ?? ""),
+      step,
+    });
   }
 
   /**
@@ -1783,12 +2379,38 @@ export class WorkflowOrchestrator {
       };
     }
 
+    return this.#openIsolatedWorkspace(session, {
+      label: `stage "${stage}"`,
+      access: STAGE_DEFINITIONS[stage].access,
+    });
+  }
+
+  /**
+   * Opens the approved, isolated workspace with an explicit access level.
+   *
+   * This is the whole of what a post-approval workspace is, with the caller's access level rather than a
+   * stage's: every stage's open and publishing's open are this one check, and the difference between
+   * them is only how much of the worktree the caller is about to be allowed to write.
+   *
+   * There is no pre-approval path here, deliberately. A workspace created before a plan is approved has
+   * no baseline to fork from, so the read-only fallback lives in {@link #openWorkspace} where that
+   * decision is made rather than here where it cannot be.
+   */
+  async #openIsolatedWorkspace(
+    session: FeatureSession,
+    input: { readonly label: string; readonly access: WorkspaceAccessLevel },
+  ): Promise<
+    | { readonly ok: true; readonly workspace: ProjectWorkspace; readonly baseline: WorkspaceBaseline }
+    | { readonly ok: false; readonly error: OrchestrationError }
+  > {
+    const label = input.label;
+
     if (this.#workspace === null) {
       return {
         ok: false,
         error: orchestrationError(
           "workspace_not_configured",
-          `Stage "${stage}" runs against an approved plan and needs an isolated workspace, but no workspace provider is configured. It is refused rather than run in the repository root, where a write would land in a human's working tree.`,
+          `${label} runs against an approved plan and needs an isolated workspace, but no workspace provider is configured. It is refused rather than run in the repository root, where a write would land in a human's working tree.`,
         ),
       };
     }
@@ -1800,7 +2422,7 @@ export class WorkflowOrchestrator {
         ok: false,
         error: orchestrationError(
           "workspace_baseline_missing",
-          `Stage "${stage}" runs against an approved plan, but the approval carries no repository baseline, so there is nothing to create an isolated workspace from. Re-approving the plan records one; the framework never reconstructs a baseline from the current working tree.`,
+          `${label} runs against an approved plan, but the approval carries no repository baseline, so there is nothing to create an isolated workspace from. Re-approving the plan records one; the framework never reconstructs a baseline from the current working tree.`,
         ),
       };
     }
@@ -1821,14 +2443,14 @@ export class WorkflowOrchestrator {
       opened = await this.#workspace.open({
         featureId: session.featureId,
         baseline,
-        access: STAGE_DEFINITIONS[stage].access,
+        access: input.access,
       });
     } catch (error) {
       return {
         ok: false,
         error: orchestrationError(
           "workspace_unavailable",
-          `The isolated workspace for stage "${stage}" could not be opened: ${describeError(error)}`,
+          `The isolated workspace for ${label} could not be opened: ${describeError(error)}`,
         ),
       };
     }
@@ -1838,7 +2460,7 @@ export class WorkflowOrchestrator {
         ok: false,
         error: orchestrationError(
           opened.code === "lease_unavailable" ? "workspace_lease_unavailable" : "workspace_unavailable",
-          `The isolated workspace for stage "${stage}" is unavailable: ${opened.message}`,
+          `The isolated workspace for ${label} is unavailable: ${opened.message}`,
         ),
       };
     }
@@ -1849,7 +2471,7 @@ export class WorkflowOrchestrator {
         ok: false,
         error: orchestrationError(
           "workspace_unavailable",
-          `The workspace provider returned the repository root as the working directory for a post-approval stage, which is exactly the isolation this stage requires.`,
+          `The workspace provider returned the repository root as the working directory for ${label}, which is exactly the isolation this requires.`,
         ),
       };
     }
@@ -1868,7 +2490,7 @@ export class WorkflowOrchestrator {
         ok: false,
         error: orchestrationError(
           "workspace_unavailable",
-          `The workspace provider opened a workspace for stage "${stage}" without reporting the baseline it was created from, so the framework cannot confirm it is the approved commit ${baseline.baselineCommit}.`,
+          `The workspace provider opened a workspace for ${label} without reporting the baseline it was created from, so the framework cannot confirm it is the approved commit ${baseline.baselineCommit}.`,
         ),
       };
     }
@@ -2149,10 +2771,17 @@ export class WorkflowOrchestrator {
     };
   }
 
+  /**
+   * One consistent read of a workspace, labelled for whoever is asking.
+   *
+   * The label is a string rather than a {@link WorkStage} because publishing reads a workspace too,
+   * and a refusal that said it could not inspect a workspace "for stage final_summary" while committing
+   * would describe a stage that was not running.
+   */
   async #inspect(
     session: FeatureSession,
     workspace: ProjectWorkspace,
-    stage: WorkStage,
+    label: string,
   ): Promise<
     | { readonly ok: true; readonly inspection: WorkspaceInspection }
     | { readonly ok: false; readonly message: string }
@@ -2170,14 +2799,14 @@ export class WorkflowOrchestrator {
     } catch (error) {
       return {
         ok: false,
-        message: `The workspace could not be inspected for stage "${stage}": ${describeError(error)}`,
+        message: `The workspace could not be inspected for stage "${label}": ${describeError(error)}`,
       };
     }
 
     if (!inspected.ok) {
       return {
         ok: false,
-        message: `The workspace could not be inspected for stage "${stage}": ${inspected.message}`,
+        message: `The workspace could not be inspected for stage "${label}": ${inspected.message}`,
       };
     }
 
@@ -3154,6 +3783,8 @@ export class WorkflowOrchestrator {
     const expectedRevision = baseRevision + 1;
     const baseMachine = session.machine;
     let expected: WorkflowMachineSnapshot | null = null;
+    // Held by the mutation rather than by the caller, because the fields it computes are the write's.
+    const box: { decorated: Partial<ResultExtras> | null } = { decorated: null };
 
     if (event !== undefined) {
       const preview = previewMachine(session, event);
@@ -3176,6 +3807,11 @@ export class WorkflowOrchestrator {
         expectedRevision: baseRevision,
         prepare: async (reader) => {
           const prepared = input.prepare === undefined ? {} : await input.prepare(reader);
+
+          if (input.decorate !== undefined) {
+            box.decorated = input.decorate(reader);
+          }
+
           return event === undefined ? prepared : { ...prepared, event };
         },
       });
@@ -3198,6 +3834,7 @@ export class WorkflowOrchestrator {
 
       return this.#result({
         ...extras,
+        ...(box.decorated ?? {}),
         status: input.successStatus,
         state: outcome.session.machine.state,
         fixReturnState: outcome.session.machine.fixReturnState ?? null,

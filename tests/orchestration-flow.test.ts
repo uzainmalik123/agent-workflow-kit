@@ -349,14 +349,18 @@ describe("orchestrator full flow", () => {
     const callsBeforeApproval = executor.callCount;
 
     await orchestrator.approvePush("F-001");
-    const deferred = await orchestrator.runNext("F-001");
 
-    expect(deferred).toMatchObject({
-      status: "deferred",
+    // An orchestrator with no publisher configured holds the feature at `committing` and says why. The
+    // gate that matters is the one above it: nothing reached `committing` without `approvePush`, and
+    // nothing below it runs an executor.
+    const withoutPublisher = await orchestrator.runNext("F-001");
+
+    expect(withoutPublisher).toMatchObject({
+      status: "rejected",
       state: WorkflowState.Committing,
       executedStages: [],
       committed: false,
-      error: { code: "git_integration_deferred", failureClass: "workflow" },
+      error: { code: "publisher_not_configured", failureClass: "workflow" },
     });
     expect(executor.callCount).toBe(callsBeforeApproval);
     expect((await store.load("F-001")).machine).toEqual({ state: WorkflowState.Committing });

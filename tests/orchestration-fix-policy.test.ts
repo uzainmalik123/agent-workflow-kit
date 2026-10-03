@@ -746,7 +746,7 @@ describe("where a fix is allowed to write", () => {
       status: "rejected",
       error: { code: "workspace_unavailable" },
     });
-    expect(result.error?.message).toContain("isolation this stage requires");
+    expect(result.error?.message).toContain("exactly the isolation this requires");
     expect(fixingCalls(harness)).toBe(0);
     // No attempt was made, so there is nothing to record. Writing an entry for a fixer that never ran
     // would put a line in the audit trail for a repair that never happened.

@@ -716,6 +716,7 @@ describe("FeatureSessionStore contract", () => {
         final_summary: { filename: "final-summary.md", status: "missing" },
         final_gate: { filename: "final-gate.json", status: "missing" },
         fixes: { filename: "fixes.json", status: "missing" },
+        publish: { filename: "publish.json", status: "missing" },
       },
     };
 
