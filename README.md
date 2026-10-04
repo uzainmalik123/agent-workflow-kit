@@ -1,33 +1,67 @@
 # Agent Workflow Kit
 
-Agent Workflow Kit provides a coding-agent-independent software development workflow that can be installed into arbitrary repositories.
+An agent-independent, deterministic software development workflow toolkit.
 
-Milestones 1–4 establish the repository, domain contracts, the deterministic in-memory lifecycle engine, repository-local persistent feature sessions, and the agent-independent workflow orchestrator. Milestone 4.1 hardens that orchestrator: optimistic revision concurrency, a frozen plan approval checkpoint, a durable fix history, and a fixer that is given a narrow contract, a bounded number of attempts, and an integrity check on everything it touched. Milestone 5 adds the first real agent adapter: `adapters/opencode/` drives a workflow stage with OpenCode, under eleven role definitions, least-privilege permissions in a framework-owned runtime directory outside the target repository, deterministic prompts, and a structured response protocol. Milestone 5.1 aligns that adapter with OpenCode V2 natively: the `permissions` rulesets, the `opencode run` invocation and its NDJSON event stream, a safe local capability probe, and an optional configuration smoke test. Milestone 6 adds deterministic project discovery and verification: `adapters/project/` classifies a repository, selects its own lint, typecheck, test, and build commands, and runs them outside any agent session, so a verification verdict is a process result rather than a model's opinion. Milestone 7 adds isolated execution: `adapters/workspace/` runs every post-approval stage in a detached Git worktree at the exact commit a human approved, reads the change set, puts unauthorized paths back, and holds a lease so two stages cannot share one worktree. After an explicit human publishing approval, `orchestration/` runs two publishing steps — one commit on a branch this framework names, then a push of that commit to a named remote — and `adapters/workspace/` implements both against Git, with no force and no history rewrite anywhere in it. The project still does not execute features on its own: no third-party agent integration, template, installer, or CLI behavior is implemented.
+This kit provides a gated workflow for coding agents. Features progress through explicit stages with human approvals, deterministic verification against a project's own commands, and isolated execution in Git worktrees. The workflow engine is separate from any specific agent, and decisions are based on measured evidence (exit codes, file changes, digests) rather than model opinions.
 
-## Workspace
+## Status
 
-The repository is a pnpm workspace:
+**What works today (verified):**
+- Deterministic workflow engine (`core/`) with 23 states, legal transitions, and fix return tracking.
+- Workflow orchestrator (`orchestration/`) with approval checkpoints, bounded fix loop (max 5 attempts), revision-guarded mutations, and publishing logic.
+- Persistence layer (`adapters/persistence/`) for repository-local feature sessions under `.agentflow/features/` with atomic writes and concurrency control.
+- Project discovery and verification (`adapters/project/`) that selects project commands (lint/typecheck/test/build/runtime) from manifests/config, runs them as separate processes, and produces deterministic evidence.
+- Isolated execution (`adapters/workspace/`) in detached Git worktrees at approved commits, with lease management, scope enforcement, and restoration of unauthorized changes.
+- OpenCode V2 adapter (`adapters/opencode/`) with role-based profiles (read/write), least-privilege permissions, structured JSON protocol, and configuration isolation outside the target repo.
 
-- `core/` contains the agent-independent domain model and public core package.
-- `orchestration/` maps workflow state to work, artifacts, and a legal transition; it depends on the core and on the persistence adapter.
-- `apps/cli/` reserves the future CLI package and its dependency on the core; it contains no CLI implementation yet.
-- `adapters/` is the boundary for agent adapters and project adapters; `adapters/persistence/` provides the repository-local session and artifact store, `adapters/project/` provides deterministic project discovery and command execution, `adapters/workspace/` provides isolated Git worktree execution, and `adapters/opencode/` provides the OpenCode agent adapter.
-- `integrations/` is the boundary for external-system integrations.
-- `templates/` will hold reusable workflow and project templates.
-- `fixtures/` contains deterministic sample data for tests, including a fake stage executor and a fake OpenCode transport, neither of which ever calls a model.
-- `tests/` contains cross-package contract and behavior tests.
+**Not implemented yet (unverified):**
+- CLI (`apps/cli/`) - package reserved but no implementation.
+- Installer or scaffolding.
+- Templates, third-party agent adapters (other than OpenCode), or external integrations beyond the defined ports.
+- End-to-end CLI usage example (no runnable CLI binary).
 
-The workspace configuration also reserves package locations below `adapters/`, `integrations/`, and `apps/` so those boundaries can grow independently.
+## How it works
 
-## Architecture
+The workflow progresses through stages with explicit approval gates, verification against the project's own commands, and isolated fixes.
 
-### Workflow core
+Lifecycle stages: Draft → Grilling → SpecReady → Planning → PlanReview → AwaitingPlanApproval → Implementing → CodeReview → ScopeReview → StaticVerification → TestVerification → RuntimeVerification → Fixing → SecurityReview → FinalGate → FinalSummary → AwaitingPushApproval → Committing → Pushing → Complete/Failed.
 
-The core owns stable workflow vocabulary, data contracts, and the deterministic lifecycle engine. It must remain independent of every coding agent and external system. It contains workflow contracts, the `WorkflowState` enum, and the pure `WorkflowStateMachine`; it does not execute features, orchestrate external work, or invoke tools.
+Key ideas in brief: plan/push approval gates, bounded fix loop (max 5 attempts) returning to origin state, deterministic verification from project commands, isolated worktrees at approved commits with lease/scope enforcement, security review with framework checks, and a two-step commit-then-push after push approval.
 
-### Deterministic state machine
+### State machine (simplified)
 
-`WorkflowStateMachine` starts in `draft` and accepts typed `WorkflowEvent` values. Automatic `advance` events follow only the main lifecycle path. The `approve_plan` and `approve_push` events are the only exits from their approval gates. `request_fix` records an eligible review or verification state, and `complete_fix` returns to that exact state. The `fail` event enters terminal `failed`; neither `complete` nor `failed` has an exit. The `snapshot` getter returns plain serializable state, and the constructor restores only validated snapshots. The engine performs no filesystem or persistence I/O.
+```mermaid
+flowchart TD
+  draft[DRAFT] -->|advance| grilling[GRILLING]
+  grilling -->|advance| spec_ready[SPEC_READY]
+  spec_ready -->|advance| planning[PLANNING]
+  planning -->|advance| plan_review[PLAN_REVIEW]
+  plan_review -->|advance| awaiting_plan[AWAITING_PLAN_APPROVAL]
+  awaiting_plan -->|approve_plan| implementing[IMPLEMENTING]
+  implementing -->|advance| code_review[CODE_REVIEW]
+  code_review -->|advance| scope_review[SCOPE_REVIEW]
+  scope_review -->|advance| static[STATIC_VERIFICATION]
+  static -->|advance| test[TEST_VERIFICATION]
+  test -->|advance| runtime[RUNTIME_VERIFICATION]
+  runtime -->|advance| security[SECURITY_REVIEW]
+  security -->|advance| final_gate[FINAL_GATE]
+  final_gate -->|advance| final_summary[FINAL_SUMMARY]
+  final_summary -->|advance| awaiting_push[AWAITING_PUSH_APPROVAL]
+  awaiting_push -->|approve_push| committing[COMMITTING]
+  committing -->|advance| pushing[PUSHING]
+  pushing -->|advance| complete[COMPLETE]
+  
+  plan_review & code_review & scope_review & static & test & runtime & security -->|request_fix| fixing[FIXING]
+  fixing -->|complete_fix| origin[returns to origin]
+  
+  subgraph terminal [Terminal]
+    complete
+    failed[FAILED]
+  end
+  fixing & awaiting_plan & awaiting_push -->|fail| failed
+```
+
+*(Fix returns to the recorded origin state.)*
 
 ### Persistent/session layer
 
@@ -101,16 +135,60 @@ Integrations connect the kit to external systems and services. They own external
 
 The dependency direction is intentionally one-way: outer layers may depend on core contracts; core never depends on a CLI, adapter, integration, or coding agent. The orchestrator sits above the core and the persistence adapter and is depended on only by adapters and the future CLI. The project, workspace, and OpenCode adapters sit above all three and are depended on by nothing.
 
-## Toolchain
+## Key ideas
 
-Use Node.js `^22.13.0 || ^24.0.0 || >=26.0.0` and pnpm `11.27.1`.
+- **Agent-independent core**: Workflow logic, contracts, and state machine live in `core/` with no agent SDK dependencies.
+- **Deterministic evidence over model opinions**: Project verification runs actual commands and records exit codes, streams, and tree fingerprints. Security review combines measured change sets with framework checks.
+- **Isolated worktrees**: Post-approval stages execute in detached Git worktrees at the approved commit. Unauthorized changes are detected and restored; leases prevent concurrent writes.
+- **Bounded, auditable fixes**: Fix attempts are capped per origin stage (default 5) with integrity checks against protected files, approved scope, and frozen artifacts. Refused fixes preserve evidence.
+- **Revision-guarded concurrency**: Optimistic locking with `expectedRevision` prevents race conditions; stale results are rejected as conflicts.
+- **Least-privilege agent execution**: OpenCode adapter uses V2 permission rulesets with framework-owned runtime config outside the target repository; only `implementer` and `fixer` get write access to project files.
+- **Explicit approvals**: Two human gates (plan and push) freeze artifacts/checkpoints before proceeding; publishing requires re-verifying the approved tree.
 
-## Commands
+## Quick start
+
+**Requirements:** Node.js `^22.13.0 || ^24.0.0 || >=26.0.0`, pnpm `11.27.1`
 
 ```sh
+# Install dependencies
 pnpm install --frozen-lockfile
+
+# Lint, typecheck, test, or run all
 pnpm lint
 pnpm typecheck
 pnpm test
-pnpm verify
+pnpm verify  # runs lint + typecheck + test
 ```
+
+These commands work in this repository as verified (1177 tests pass). There is no CLI binary or end-to-end example provided yet (unverified).
+
+## Repo layout
+
+```text
+core/              # Agent-independent domain model, state machine, contracts
+orchestration/     # Workflow coordinator, approval/fix/security/publishing logic
+adapters/
+  persistence/     # Repository-local sessions, artifacts, locks, events
+  project/         # Project discovery, command selection, verification evidence
+  workspace/       # Isolated Git worktrees, leases, scope enforcement
+  opencode/        # OpenCode V2 agent adapter
+apps/cli/          # Reserved (no implementation yet)
+integrations/      # Reserved for external integrations
+templates/         # Reserved
+fixtures/          # Deterministic test fixtures (no model calls)
+tests/             # Cross-package contract and behavior tests
+docs/              # Additional docs (security-review, milestone notes, etc.)
+```
+
+## Learn more
+
+- [adapters/README.md](adapters/README.md) - Adapter architecture and persistence details
+- [orchestration/README.md](orchestration/README.md) - Orchestrator API, fix loop, approvals, publishing
+- [adapters/workspace/README.md](adapters/workspace/README.md) - Worktree isolation, leases, scope restoration
+- [adapters/project/README.md](adapters/project/README.md) - Discovery, command policy, verification evidence
+- [adapters/opencode/README.md](adapters/opencode/README.md) - OpenCode V2 roles, permissions, transport
+- [docs/security-review.md](docs/security-review.md) - Security review gate details
+
+## License
+
+ISC (see `package.json`).
