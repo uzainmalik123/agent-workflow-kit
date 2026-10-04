@@ -182,7 +182,10 @@ describe("process runner", () => {
 
     const pending = run({
       executable: "/bin/sh",
-      args: ["-c", "sleep 5"],
+      // `exec` for the reason given below the deadline test: the signalled process has to be the one
+      // holding the captured pipes. This one was passing for a narrower reason — `abort()` runs before
+      // a slow shell has forked anything, so it won a race it was never in a position to rely on.
+      args: ["-c", "exec sleep 5"],
       cwd: project.root,
       signal: controller.signal,
       killGraceMs: 100,
@@ -194,6 +197,8 @@ describe("process runner", () => {
 
     expect(outcome.termination).toBe("cancelled");
     expect(statusForOutcome(outcome)).toBe("cancelled");
+    // A cancellation that waited out the command it cancelled would still be labelled correctly.
+    expect(outcome.durationMs).toBeLessThan(2_500);
   });
 
   it("returns a cancellation immediately when the signal is already aborted", async () => {
