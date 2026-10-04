@@ -939,6 +939,67 @@ describe("a real application", () => {
     expect(result.observations.join(" ")).toContain("exit code 3");
   });
 
+  it("is started without the operator's environment, and says what it can see", async () => {
+    // Runtime verification gets the same environment boundary a static command does, and this is the
+    // half that could regress independently: a supervised process has a different entry point and a
+    // different lifetime, so "the policy lives in the one launch" is a claim that has to be paid for.
+    const root = await makeProject(nodeProjectFiles);
+    const port = await freePort();
+    await writeFile(
+      join(root, "server.mjs"),
+      `process.stdout.write(JSON.stringify({ fake: process.env.AGENT_WORKFLOW_KIT_FAKE_CREDENTIAL ?? null, home: process.env.HOME ?? null }) + "\\n");\n${SERVER}`,
+      "utf8",
+    );
+
+    const previous = process.env["AGENT_WORKFLOW_KIT_FAKE_CREDENTIAL"];
+    process.env["AGENT_WORKFLOW_KIT_FAKE_CREDENTIAL"] = "not-a-real-secret-3f9c1ad2";
+
+    let result: Awaited<ReturnType<ProjectRuntimeVerificationProvider["verify"]>>;
+
+    try {
+      result = await new ProjectRuntimeVerificationProvider().verify(
+        requestFor({
+          command: { executable: "node", args: ["server.mjs", String(port)], cwd: root, script: null },
+          readiness: { url: `http://127.0.0.1:${String(port)}/health`, timeoutMs: 10_000 },
+          checks: [
+            {
+              kind: "http",
+              id: "health",
+              method: "GET",
+              path: "/health",
+              url: `http://127.0.0.1:${String(port)}/health`,
+              expectedStatus: 200,
+              expectedBodyFragment: null,
+              timeoutMs: null,
+            },
+          ],
+          timeoutMs: 20_000,
+        }),
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env["AGENT_WORKFLOW_KIT_FAKE_CREDENTIAL"];
+      } else {
+        process.env["AGENT_WORKFLOW_KIT_FAKE_CREDENTIAL"] = previous;
+      }
+    }
+
+    // The application started, answered, and was stopped: the credential is absent from a run that
+    // genuinely happened rather than from a run that never got as far as executing anything.
+    expect(result.status).toBe("passed");
+    expect(result.diagnostics.readiness).toMatchObject({ reached: true, status: 200 });
+    expect(result.diagnostics.process.stdoutExcerpt).not.toContain("not-a-real-secret-3f9c1ad2");
+
+    const reported = JSON.parse(result.diagnostics.process.stdoutExcerpt) as {
+      readonly fake: string | null;
+      readonly home: string | null;
+    };
+
+    expect(reported.fake).toBeNull();
+    expect(reported.home).toBeNull();
+    expect(await waitForPort(port, async () => await portIsFree(port))).toBe(true);
+  });
+
   it("is killed as a whole group, so a wrapper cannot leave the port bound", async () => {
     const root = await makeProject(nodeProjectFiles);
     const port = await freePort();

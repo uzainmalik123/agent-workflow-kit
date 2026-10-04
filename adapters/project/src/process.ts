@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { buildChildEnvironment } from "./child-environment.js";
 
 /**
  * The one deterministic process runner in this repository.
@@ -14,7 +15,11 @@ import { spawn } from "node:child_process";
  *   head and the tail of what was produced so evidence stays a fixed size;
  * - a timeout and an `AbortSignal`, both of which terminate the child and are reported as such
  *   rather than as a pass;
- * - an environment that is inherited because a toolchain needs `PATH`, and never described. No
+ * - an environment that is *not* inherited. A command here is read out of the repository and runs
+ *   as the operator, so copying the operator's environment would hand every credential in it to
+ *   every repository the kit is pointed at. The child gets an allowlist — the executable search
+ *   `PATH` and a handful of variables a toolchain needs to behave the same way — and asking for the
+ *   host environment is a decision a caller has to make by name. See `child-environment.ts`. No
  *   error message, evidence record, or excerpt in this repository contains an environment value, and
  *   an argument list is never repeated into an error message.
  *
@@ -69,8 +74,26 @@ export interface ChildProcessRequest {
   readonly captureHeadChars?: number;
   readonly captureTailChars?: number;
   readonly killGraceMs?: number;
-  /** Inherits `process.env` unless this is `false`. Never described in any result. */
+  /**
+   * Hands the child the whole host `process.env`, or nothing from it but `env`. Off unless this is
+   * `true`.
+   *
+   * The default — field absent — is the allowlisted environment, and that is the direction of the
+   * default on purpose: every other command this runner starts is repository-controlled, and the
+   * environment is where the operator's credentials are. Inheritance is here for framework wiring that
+   * runs the operator's own tooling and genuinely needs it — the OpenCode transport's stage runs need
+   * the model credential the host holds — which is a decision about framework-owned code and therefore
+   * belongs in framework code, never in anything a repository can write. `false` is for framework
+   * wiring that has already built the environment it wants. Never described in any result.
+   */
   readonly inheritEnv?: boolean;
+  /**
+   * Environment entries the framework supplies for this run, merged over the allowlisted host values.
+   *
+   * These are stated by the caller rather than requested by the repository: nothing in
+   * `agent-workflow.config.json` can populate this field, and a command there that tries to is
+   * refused as an unknown field. See `child-environment.ts`.
+   */
   readonly env?: Readonly<Record<string, string>>;
 }
 
@@ -201,7 +224,10 @@ class BoundedCapture {
   }
 
   capture(): ProcessStreamCapture {
-    const kept = this.#head.length + this.#tail.length;
+    // The window is bounded in characters and the count is in bytes, so the two have to be converted
+    // before they are compared: `✓` is one character and three bytes, and a stream of nothing but
+    // those would otherwise be reported as truncated no matter how much of it was kept.
+    const kept = Buffer.byteLength(this.#head, "utf8") + Buffer.byteLength(this.#tail, "utf8");
     const truncated = kept < this.#bytes;
 
     if (this.#tail.length === 0) {
@@ -255,10 +281,11 @@ const groupsAreSignalled = process.platform !== "win32";
  * Starts a process and hands back the handles for watching it and for stopping it.
  *
  * This is the one `spawn` call in this repository, and every property of the boundary lives here: no
- * shell, a working directory passed as data, bounded captures, a byte ceiling that stops a runaway
- * rather than growing this process, a signal that terminates instead of reporting, and an outcome that
- * is always a value. The two public entry points below differ only in whether they wait, so neither
- * can become the weaker of the two.
+ * shell, a working directory passed as data, an environment that is built from an allowlist rather
+ * than copied from the host, bounded captures, a byte ceiling that stops a runaway rather than
+ * growing this process, a signal that terminates instead of reporting, and an outcome that is always
+ * a value. The two public entry points below differ only in whether they wait, so neither can become
+ * the weaker of the two.
  */
 function launchChild(
   request: Omit<ChildProcessRequest, "timeoutMs">,
@@ -303,9 +330,20 @@ function launchChild(
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
     ...(killProcessGroup ? { detached: true } : {}),
-    ...(request.inheritEnv === false
-      ? { env: { ...request.env } }
-      : { env: { ...process.env, ...request.env } }),
+    // The environment is a build, not a copy. Absent `inheritEnv` is an allowlist rather than the host,
+    // which is the opposite of the default it had when every caller relied on inheritance, and that
+    // inversion is the fix: a repository-controlled command is no longer handed the operator's
+    // credentials by the simple act of existing. Both entry points reach this one function, so a
+    // verification command and a runtime application get the same environment. An explicit `false` is a
+    // caller saying it has already decided the environment and that the allowlist is not it — the
+    // OpenCode transport builds a scrubbed stage environment that way, and quietly adding host `PATH`
+    // on top of it would be overriding a decision it is in a position to make.
+    env:
+      request.inheritEnv === true
+        ? { ...process.env, ...request.env }
+        : request.inheritEnv === false
+          ? { ...request.env }
+          : buildChildEnvironment(request.env),
   });
 
   /**

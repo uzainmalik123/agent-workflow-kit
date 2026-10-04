@@ -41,6 +41,18 @@ async function makeProject(files: Readonly<Record<string, string>> = {}): Promis
   return { root, path: (relative) => join(root, relative) };
 }
 
+/**
+ * A lockfile in the shape pnpm itself writes.
+ *
+ * A bare `lockfileVersion: 9.0` is a lockfile pnpm considers malformed — the version is a float where
+ * pnpm writes a string, and there is no `settings` or `importers` section — so the first `pnpm run` in
+ * a project containing one repairs it. That repair is a real write to a fingerprinted file, and a stage
+ * whose command changed the tree it was checking is refused whatever it exited with. The fixture has to
+ * be a lockfile no package manager would want to fix, or the test measures pnpm's repair instead of the
+ * property it is about.
+ */
+const PNPM_LOCKFILE = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n";
+
 async function makeNodeProject(scriptBody: string, scripts: Readonly<Record<string, string>>): Promise<Project> {
   const project = await makeProject({
     "package.json": JSON.stringify({
@@ -48,7 +60,7 @@ async function makeNodeProject(scriptBody: string, scripts: Readonly<Record<stri
       private: true,
       scripts,
     }),
-    "pnpm-lock.yaml": "lockfileVersion: 9.0\n",
+    "pnpm-lock.yaml": PNPM_LOCKFILE,
   });
 
   await mkdir(project.path("node_modules/.bin"), { recursive: true });
@@ -141,7 +153,14 @@ describe("process runner", () => {
 
     const outcome = await run({
       executable: "/bin/sh",
-      args: ["-c", "sleep 5"],
+      // `exec`, so the shell is replaced by `sleep` rather than left waiting on it. A command that
+      // outlives its deadline has to be the process that is actually signalled, because
+      // `runChildProcess` stops the process it started and not the group around it: a shell that
+      // forks leaves a grandchild holding the captured pipes, and the outcome is not settled until
+      // that grandchild exits on its own. Whether `sh` forks or execs a lone command is a property of
+      // the shell the runner happens to find, so this test used to hang for the full `sleep` on a
+      // runner whose `/bin/sh` is not bash, and report a vitest timeout instead of its own failure.
+      args: ["-c", "exec sleep 5"],
       cwd: project.root,
       timeoutMs: 150,
       killGraceMs: 100,
@@ -150,6 +169,10 @@ describe("process runner", () => {
     expect(outcome.termination).toBe("timed_out");
     expect(outcome.reason).toBe("deadline_exceeded");
     expect(outcome.exitCode).not.toBe(0);
+    // The deadline has to have shortened the run, not only labelled it. `sleep 5` would have taken five
+    // seconds, so a duration anywhere near that means the command ran to its own end and the timeout
+    // arrived afterwards to describe something that had already finished.
+    expect(outcome.durationMs).toBeLessThan(2_500);
     expect(statusForOutcome(outcome)).toBe("timed_out");
   });
 
@@ -192,7 +215,10 @@ describe("process runner", () => {
 
     const outcome = await run({
       executable: "/bin/sh",
-      args: ["-c", "head -c 100 /dev/zero | tr '\\0' 'a'; head -c 400 /dev/zero | tr '\\0' 'z'; sleep 5"],
+      // The last command is `exec`'d for the reason given above. This one escapes the same trap today
+      // only because the byte ceiling stops the shell while it is still printing, before it has forked
+      // anything, and a ceiling that fires later would leave a `sleep` holding the pipes.
+      args: ["-c", "head -c 100 /dev/zero | tr '\\0' 'a'; head -c 400 /dev/zero | tr '\\0' 'z'; exec sleep 5"],
       cwd: project.root,
       maxStreamBytes: 200,
       captureHeadChars: 40,
@@ -446,7 +472,7 @@ describe("verification provider", () => {
       projectRoot: project.root,
       run: (request) => {
         executed.push([request.executable, ...request.args].join(" "));
-        return runChildProcess({ ...request, env: { ...process.env, PATH: `${project.path("bin")}:${process.env["PATH"] ?? ""}` } });
+        return runChildProcess({ ...request, env: { PATH: `${project.path("bin")}:${process.env["PATH"] ?? ""}` } });
       },
     });
 
@@ -550,13 +576,15 @@ describe("verification provider", () => {
 
     const timedOut = await run({
       executable: "/bin/sh",
-      args: ["-c", "sleep 5"],
+      // `exec` for the reason given above: the signalled process has to be the one holding the pipes.
+      args: ["-c", "exec sleep 5"],
       cwd: project.root,
       timeoutMs: 120,
       killGraceMs: 100,
     });
 
     expect(statusForOutcome(timedOut)).toBe("timed_out");
+    expect(timedOut.durationMs).toBeLessThan(2_500);
     expect(provider.projectRoot).toBe(project.root);
   });
 

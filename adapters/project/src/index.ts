@@ -34,6 +34,8 @@ export type {
   SupervisedChildProcessRequest,
 } from "./process.js";
 
+export { buildChildEnvironment, SAFE_HOST_ENVIRONMENT_VARIABLES } from "./child-environment.js";
+
 export {
   ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS,
   assertArgs,

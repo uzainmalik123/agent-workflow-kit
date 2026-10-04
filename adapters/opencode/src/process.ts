@@ -17,7 +17,14 @@ export interface RunProcessOptions {
   readonly maxOutputBytes?: number;
   readonly stderrExcerptLimit?: number;
   readonly killGraceMs?: number;
-  /** Inherit `process.env`. Defaults to true; a provider credential is needed for a real run. */
+  /**
+   * Inherit `process.env`. Defaults to true; a provider credential is needed for a real run.
+   *
+   * Stated as an explicit request rather than an omission, because the shared runner's own default is
+   * now a fixed allowlist. This transport earns that request: the commands it runs are the operator's
+   * own OpenCode binary — `run`, `--version`, `--help` — never a command a repository declared, and an
+   * agent run cannot authenticate without the credential the host holds.
+   */
   readonly inheritEnv?: boolean;
   /** Extra environment entries, merged over the inherited environment. Never logged. */
   readonly env?: Readonly<Record<string, string>>;
@@ -102,7 +109,10 @@ export async function runProcess(
     captureHeadChars: maxOutputBytes,
     captureTailChars: 0,
     killGraceMs: options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
-    ...(options.inheritEnv === false ? { inheritEnv: false } : {}),
+    // The runner hands out an allowlisted environment unless a caller asks for the host by name. This
+    // transport asks, so the two documented defaults stay exactly where they were: `runProcess`
+    // inherits, `inheritEnv: false` scrubs through `buildStageRunEnvironment` first.
+    inheritEnv: options.inheritEnv !== false,
     ...(options.env === undefined ? {} : { env: options.env }),
     signal: options.signal ?? null,
   });
