@@ -31,6 +31,8 @@ async function makeProject(files: Record<string, string>): Promise<string> {
 
 async function gitInit(root: string): Promise<void> {
   await execFileAsync("git", ["init", "--quiet", "--initial-branch=main", "."], { cwd: root });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: root });
 }
 
 async function runInit(root: string): Promise<ExecResult> {
