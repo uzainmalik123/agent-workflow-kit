@@ -15,7 +15,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
-    "verify": "pnpm lint && pnpm typecheck && pnpm test",
+    "verify": "pnpm build && pnpm lint && pnpm typecheck && pnpm test",
     "verify:dist": "pnpm build && pnpm smoke"
   },
   "license": "ISC",

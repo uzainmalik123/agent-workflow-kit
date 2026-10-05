@@ -3,7 +3,30 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "agentflow": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/cli.ts"
+  },
   "dependencies": {
-    "@agent-workflow-kit/core": "workspace:*"
+    "@agent-workflow-kit/core": "workspace:*",
+    "@agent-workflow-kit/orchestration": "workspace:*",
+    "@agent-workflow-kit/persistence": "workspace:*",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.9.3",
+    "tsx": "^4.19.0"
   }
 }

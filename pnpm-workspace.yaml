@@ -4,3 +4,5 @@ packages:
   - "adapters/*"
   - "integrations/*"
   - "apps/*"
+allowBuilds:
+  esbuild: true
