@@ -1,32 +1,34 @@
 # Agent Workflow Kit
 
-An agent-independent, deterministic software development workflow toolkit.
-
-This kit provides a gated workflow for coding agents. Features progress through explicit stages with human approvals, deterministic verification against a project's own commands, and isolated execution in Git worktrees. The workflow engine is separate from any specific agent, and decisions are based on measured evidence (exit codes, file changes, digests) rather than model opinions.
+An agent-independent, deterministic software development workflow toolkit that separates workflow logic from any specific coding agent. It provides a gated workflow with human approvals, deterministic verification against a project's own commands, and isolated execution in Git worktrees. Decisions are based on measured evidence (exit codes, file changes, digests) rather than model opinions.
 
 ## Status
 
 **What works today (verified):**
-- Deterministic workflow engine (`core/`) with 23 states, legal transitions, and fix return tracking.
+- Core workflow engine (`core/`) with 23 states, legal transitions, and fix return tracking.
 - Workflow orchestrator (`orchestration/`) with approval checkpoints, bounded fix loop (max 5 attempts), revision-guarded mutations, and publishing logic.
 - Persistence layer (`adapters/persistence/`) for repository-local feature sessions under `.agentflow/features/` with atomic writes and concurrency control.
-- Project discovery and verification (`adapters/project/`) that selects project commands (lint/typecheck/test/build/runtime) from manifests/config, runs them as separate processes, and produces deterministic evidence.
+- Project discovery and verification (`adapters/project/`) that selects project commands (lint/typecheck/test/build/runtime), runs them as separate processes, and produces deterministic evidence.
 - Isolated execution (`adapters/workspace/`) in detached Git worktrees at approved commits, with lease management, scope enforcement, and restoration of unauthorized changes.
+- CLI (`apps/cli/`) with `init`, `start`, `status`, `run`, and `approve` commands.
 - OpenCode V2 adapter (`adapters/opencode/`) with role-based profiles (read/write), least-privilege permissions, structured JSON protocol, and configuration isolation outside the target repo.
+- Build produces distributable packages; 1185 tests pass; smoke test passes.
 
-**Not implemented yet (unverified):**
-- CLI (`apps/cli/`) - package reserved but no implementation.
+**Not implemented yet:**
 - Installer or scaffolding.
 - Templates, third-party agent adapters (other than OpenCode), or external integrations beyond the defined ports.
-- End-to-end CLI usage example (no runnable CLI binary).
+- End-to-end CLI usage with a real agent: the CLI exists but `run` requires a configured `StageExecutor` (OpenCode adapter) which is not wired in the CLI package.
+
+**Known issues (observed):**
+- Real OpenCode LLM agents do not produce the required structured JSON response (exactly one fenced JSON payload with `outcome`, `featureId`, `stage`, `artifacts`, `findings`, `evidence`, `summary`); they respond in natural language instead. Verified against real OpenCode v1.18.33 — the adapter invokes the CLI correctly but the model output fails the protocol parser.
+- Real-agent runs time out waiting for a valid JSON response; no stage has completed successfully with a real model.
+- The structured JSON response protocol has not been confirmed against any real model; all 1185 passing tests use fake transports.
 
 ## How it works
 
 The workflow progresses through stages with explicit approval gates, verification against the project's own commands, and isolated fixes.
 
-Lifecycle stages: Draft → Grilling → SpecReady → Planning → PlanReview → AwaitingPlanApproval → Implementing → CodeReview → ScopeReview → StaticVerification → TestVerification → RuntimeVerification → Fixing → SecurityReview → FinalGate → FinalSummary → AwaitingPushApproval → Committing → Pushing → Complete/Failed.
-
-Key ideas in brief: plan/push approval gates, bounded fix loop (max 5 attempts) returning to origin state, deterministic verification from project commands, isolated worktrees at approved commits with lease/scope enforcement, security review with framework checks, and a two-step commit-then-push after push approval.
+Lifecycle: Draft → Grilling → SpecReady → Planning → PlanReview → AwaitingPlanApproval → Implementing → CodeReview → ScopeReview → StaticVerification → TestVerification → RuntimeVerification → Fixing → SecurityReview → FinalGate → FinalSummary → AwaitingPushApproval → Committing → Pushing → Complete/Failed.
 
 ### State machine (simplified)
 
@@ -63,115 +65,62 @@ flowchart TD
 
 *(Fix returns to the recorded origin state.)*
 
-### Persistent/session layer
-
-`adapters/persistence/` is the project adapter for durable repository-local workflow state. It stores authoritative `session.json` files, controlled feature artifacts, and append-only `events.jsonl` records under `.agentflow/features/`. Feature sessions persist only workflow metadata, machine snapshots, artifact references/statuses, and the two approval checkpoints; artifact contents remain in their deterministic files. Session writes use a temporary file followed by an atomic rename, and a successful transition persists the session before appending its event.
-
-Every session carries a `revision` that starts at `0` and increases by exactly one per successful mutation, and every mutation goes through `store.mutate(featureId, { expectedRevision, prepare })`. A short per-feature lock guards the critical section: the revision is re-checked inside it, `prepare` sees the state it is about to replace, and the lock is released before any external call. Artifacts are written first, then the session with its next revision, then the event log, so a reported failure can always be classified by reloading the session and a stale `expectedRevision` is refused with `REVISION_CONFLICT` before any artifact is touched.
-
-The persistence layer depends on core contracts, while core remains filesystem independent. Missing, malformed, mismatched, and unsupported persisted data fails explicitly; it never silently falls back to a draft state. Storage paths are guarded against symbolic links at every level for both reads and writes, a session update cannot patch the workflow state machine, and artifact writes roll back when the session update fails. The persisted layout, session document, and store API are described in `adapters/README.md`.
-
-### Orchestration
-
-`orchestration/` is the workflow coordinator. Given a persisted feature session it decides what work is legal next, routes only the artifacts that stage needs, invokes a generic `StageExecutor` port, validates the structured result, stores the produced artifacts, and applies exactly one legal state-machine event. `runNext()` executes at most one work stage per call, so recovery and human control stay explicit. Human approval states and terminal states run nothing at all. The commit and push states run nothing but publishing: `publishFeature()` performs exactly one of them per call, decides the branch, message, paths, commit, and remote itself, and reaches `complete` only after a remote confirmed the push. Failures are classified as workflow, executor, or persistence problems, and only an explicit `failFeature()` decision can terminate a feature. An ambiguous persistence failure is resolved by reloading the authoritative session and comparing machine snapshots and revisions, never by retrying the transition.
-
-Every decision is a revision-guarded mutation, so a stage result produced against an older session revision is reported as `conflict` instead of overwriting the winner or skipping a stage. `approvePlan()` freezes the approved `spec`, `plan`, and `plan_review` bytes as SHA-256 digests in the session, and every later stage re-verifies them before it runs, so a changed plan stops the workflow instead of being silently implemented.
-
-The fixer is the one stage that both writes and wants a failure to end, so it is handed a narrow contract and measured afterwards. It receives the failure, the deterministic evidence that decided it, the paths it may write, the attempt number, and the limit; it has no field for the acceptance criteria, the verification commands, the workflow state, or the approval checkpoint. Attempts are counted per origin stage from the durable history and capped at five by default, and the attempt after the limit is refused before the fixer is called at all. What it did is measured, not believed: a fix that rewrites the spec, the plan, or the plan review, edits the verification configuration, touches a framework-controlled file, deletes a verification check, or writes outside the approved scope is refused with the code named, the attempt is appended, and the feature fails. Nothing is restored after a fix is refused, out-of-scope paths included: the changed files are the evidence a human is about to read, and reversing part of an attempt would leave a tree the fixer never wrote. A rejected fix never returns to the stage that asked for it, and the check that decides whether the repair worked must be one that ran after it. The fixer's own report is kept as a claim beside the framework's verdict on it, in the controlled `fixes.json` history, which is then routed to verification, security review, the final gate, and the final summary. The stage map, context routing, concurrency rules, approval checkpoint, fixer trust model, fix history, and gate behavior are described in `orchestration/README.md`.
-
-### Workspace isolation
-
-`orchestration/` decides what a stage is allowed to change; `adapters/workspace/` is the only package allowed to put those changes on disk somewhere other than a human's checkout. The connection is the `ProjectWorkspaceProvider` port, and every pre-approval stage runs in the human's own repository with a `read_only` access level and no baseline, because nothing has been approved yet. The fixer follows the loop it belongs to rather than a fixed rule: after approval it writes in an isolated worktree like the stage that asked for it, and before approval it reads the human's checkout and is held to not writing to it.
-
-A post-approval stage runs in a detached worktree created at the approved commit, in a cache directory outside the repository. The worktree's identity lives in a sidecar file beside it rather than inside it, and a workspace that is not exactly what that sidecar describes — moved `HEAD`, staged index, missing or foreign metadata, a directory this adapter did not create — is refused rather than recreated, because recreating it would discard the previous run's work into a result describing an empty state. A lease file names a random owner token, the holder's process and host, and an expiry, so two stages of one feature cannot interleave writes in one worktree; a lease held by a live process is never stolen, and one held by another host is respected rather than guessed at.
-
-A plan is approved only over a clean tracked tree, and the framework's own judgement of what it saw is the authority on that: an adapter reporting a clean tree while naming dirty paths has contradicted itself, and the approval is refused either way. After each post-approval stage the change set is read from `git status --porcelain -z`, compared against the patterns the approved plan named, and every path outside them is put back — restored from the approved commit, or deleted when the commit never contained it. A path the adapter cannot prove safe to reverse is left alone and recorded as unsafe, and the stage's result is discarded rather than stored as clean.
-
-The worktree and its changes are never removed when a stage finishes or fails; only the lease is released, so a later run of the same feature reopens the same worktree and a human can still read what a failed stage wrote. The trust model, sidecar, lease, restoration, and Git runner rules are described in `adapters/workspace/README.md`.
-
-### Agent adapters and other outer layers
-
-Agent adapters translate between core contracts and a specific coding agent's capabilities, payloads, and responses. An agent adapter implements the orchestration `StageExecutor` port, so agent-specific APIs stay inside adapter packages. The core must never import an adapter or depend on a coding-agent SDK, and the orchestrator must never import an adapter.
-
-`adapters/opencode/` is the first such adapter. It maps the thirteen workflow stages onto eleven logical roles and two physical agents, `agentflow-read` and `agentflow-write`, each an ordered OpenCode V2 `permissions` ruleset written to a framework-owned configuration directory outside the target repository and handed to the CLI through `OPENCODE_CONFIG_DIR`, so configuring OpenCode never writes to the project. It builds a deterministic prompt from the orchestrator-routed request alone, running the agent through a substitutable transport, and translating exactly one fenced JSON payload back into a `StageExecutionResult`. It refuses anything else: prose, a foreign feature or stage, an artifact the stage does not own, a workflow-control field, an empty response, a non-zero exit, a timeout, or an event stream it does not recognize. Nothing in it chooses a transition, approves a gate, runs a command, or touches Git. It refuses a repository that defines a framework profile's agent id, and one whose configuration sets a global permission, tool, plugin, or instruction source. The roles, V2 permissions, prompt boundary, response protocol, transport properties, capability probe, runtime configuration directory, and the recorded installer policy are described in `adapters/opencode/README.md`.
-
-Other agent adapters, integrations, templates, the installer, and the user-facing CLI remain deferred.
-
-### Project adapters
-
-Project adapters encapsulate access to project resources and tools, such as repository files, version control, and task runners. They expose project operations to the rest of the kit without putting tool-specific behavior in the core.
-
-`adapters/project/` is the project adapter for verification. It reads a repository the way a build tool reads one, decides what its own verification commands are, runs them, and reports what happened.
-
-Discovery is a lookup, never an inference. It reads a fixed list of well-known files, resolves symbolic links nowhere, and refuses a manifest it cannot parse instead of reporting a project with no commands. A Node project is classified by its lockfile first (`pnpm`, then `bun`, then `yarn`, then `npm`) and by its manifest's `packageManager` or `devEngines.packageManager` only when no lockfile exists, with a conflict recorded rather than resolved silently. A capability is `applicable`, `not_applicable`, `unsupported`, `unavailable`, or `blocked`, and the reason is a stable code: a plain JavaScript project has no typecheck, a Python project has no adapter yet, a project with no `node_modules` is blocked and is never installed into, and `runtime` is never inferred at all, because a manifest says what a project has and never says how to start it.
-
-A command is an executable and an argument array, and it is `shell: false` always. A command comes from a script the project declares or from `agent-workflow.config.json`, never from a model: the file accepts only `{ id, capability, executable, args }` plus an optional `cwd` that must stay inside the repository, and refuses any other field, so there is no shape in which a shell line can be written, and the generated OpenCode permissions deny every role the ability to write it. `add`, `install`, `remove`, `exec`, lifecycle scripts, and any other package-manager invocation that would run repository-defined code at run time are refused structurally. A configured command may only cover the capability its own section exists for, so a `test` section cannot quietly acquire a `build` command.
-
-Two command shapes are refused because they turn a declared tool into a string some shell interprets. A detected script that declares a `pre<name>` or `post<name>` hook is blocked, because running it through pnpm, npm, yarn, or bun would execute code the manifest never offered the stage; the block names the hook and points at declaring the tool directly, and a configured command is the way out. And a command-string flag aimed at a known interpreter is refused, whether the executable is the shell itself or a general interpreter carrying that shell as an argument, so `sh -c`, `/bin/bash -lc`, `busybox sh -c`, `cmd /c`, `command.com /c`, `powershell -Command`, and `pwsh -Command` are all rejected by name, case-insensitively, at any path.
-
-Execution is the repository's single deterministic runner, and it never rejects: a non-zero exit, a timeout, an abort, a signal death, a missing binary, and a runaway stream are all results, because a failing lint run is the evidence the stage exists to record. Each result becomes a check carrying the command, the exit code, the signal, the duration, a bounded head-and-tail capture of both streams, the session revision, and a SHA-256 fingerprint of the working tree. The status comes from the termination and the exit code alone, never from a substring of the output.
-
-A running application is verified the same way, and the same requirement applies: the project declares it. `verification.runtime` is an object rather than a command, because starting a service is a command plus a readiness condition plus a set of criteria — a start command, a URL polled until it answers, and checks naming an expected status and an expected fragment. Each check path is resolved once, at parse time, against the readiness URL, and a path that would leave that host is refused with the host named rather than followed. Readiness accepts any answer, so a 503 that means "still booting" is not mistaken for a broken service and a 404 that means "up" is not mistaken for a healthy one, and a process that exits during the wait ends the wait immediately with its exit code and its bounded output instead of being polled against a port it will never bind. The run has one deadline covering the process, the readiness wait, and every check, so a criterion that never answers is recorded as `deadline_exceeded` and the criteria after it are never attempted. Requests are `http:`, are not redirected, are read under a byte ceiling, and are closed one at a time. Whatever happens, the process is stopped: the child is signalled as a process group, so a grandchild that inherited the pipes is stopped with it, and the port is released. A project that declares nothing runs nothing, and its runtime stage is recorded as `deferred` with one skipped check naming `runtime_not_configured` — never as a pass.
-
-The run is bracketed by two measurements of the same tree. The working tree is fingerprinted before any command runs and again after the last one, and both digests are kept: the bundle and every check carry the before digest, and the workspace record carries the pair. A command that rewrites the implementation it is verifying is therefore not judged on the code it produced, so a changed workspace forces a `failed` outcome on its own, however green the exit codes were, and the finding names both digests. It also means the fingerprint is never a stale constant read once and cached.
-
-The same bracketing is applied a second time to the framework's own directories. `.agentflow/` and `.opencode/` are excluded from the implementation fingerprint because neither is project code, and a verification command is repository-defined code that can write to either. A command that moves the session past a stage it never ran, deletes the recorded evidence, or rewrites the generated agent file for the role about to run leaves green exit codes and a workflow that quietly skipped a stage, so the control plane gets its own `before`/`after` pair, a changed control plane forces `failed` with a finding naming both digests, and the OpenCode adapter independently refuses a tampered generated file before any model is invoked. It never repairs it either: overwriting the file would destroy the evidence, and the decision to restore generated content stays with the operator.
-
-Editing the generated file is the obvious way in, so the adapter's own check is written around the sources rather than the file. OpenCode resolves an agent id and a project configuration from more than one place, so a repository does not have to edit the checked file to decide what a run loads. Each run resolves the id the CLI is about to ask for, walks every definition under `.opencode/agent/` and `.opencode/agents/` and refuses unless exactly one file resolves to that id and it is the generated one, refuses the `opencode.jsonc` and `.opencode/opencode.json` forms that OpenCode would also load rather than guessing which wins, and refuses the root config fields that can redefine a role, re-grant a tool, or add an instruction source. The rest of the configuration stays the repository's: `AGENTS.md`, its own agents under its own ids, and the model, provider, and display fields of `opencode.json`.
-
-The orchestrator collects that evidence for a verification stage after the plan approval has been re-verified and before the stage executor is involved, hands it to the verifier in the prompt, and enforces the result itself. A stage reached with no verification provider fails closed with `verification_not_configured`: the executor is never called, nothing is persisted, and `executedStages` says so. A bundle is bound to the request that asked for it, so an old revision, a future revision, another feature's tree, a foreign project root, or a single check whose kind, revision, or fingerprint does not match is refused with `verification_evidence_mismatch` before the executor runs. A bundle that fails validation, one that contradicts itself, or a provider that throws stops the stage and writes nothing, and a recorded `failed` or `blocked` check turns a reported `success` into `needs_fix` regardless of what the verifier said. A `deferred` stage is not a failure, so the workflow stays satisfiable; it is also not a pass, because a reported `success` on deferred runtime evidence is overruled to `inconclusive` rather than accepted. Every attempt is appended under a framework-owned `deterministic_evidence` key in `verification.json`, beside the model's own section and never over it, and the fingerprint means evidence from before a fix can never prove the code that fix produced. The profile, command policy, evidence records, and the orchestrator contract are described in `adapters/project/README.md`.
-
-### Security review
-
-`security_review` is a deterministic gate between `runtime_verification` and `final_gate`, and it is cleared by a record rather than by an opinion. A `SecurityReviewProvider` port, supplied to the orchestrator like the verification provider, scans the measured change set and returns evidence; the framework validates that evidence, binds it to the request that asked for it, merges its own two change-shaped checks into it, checks it against the last recorded fix, and applies it to the stage outcome whatever the reviewer returns.
-
-Reaching the gate with no provider is a refusal, not a pass, for the same reason a verification stage is: the reviewer has no command execution and no file-reading tools, so a stage whose only evidence is a model's description of a scan nobody performed is the outcome the gate exists to prevent. A `fail` in the record overrules a reported `success` and enters the fix loop, and the loop returns to `SecurityReview` rather than to the final gate, carrying the record that decided the failure. An `inconclusive` result — an unreadable file, a symlink out of the project, a file above the scan ceiling — stops the stage for a human rather than being read as a pass.
-
-The record is appended under the same framework-owned `deterministic_evidence` key the verification evidence uses, so a persisted record containing both a provider's checks and the framework's merged ones can be read back and handed to a fixer. Two checks are the framework's alone and are computed from the change set rather than asked of the provider: `protected_configuration_changed` and `dependency_configuration_out_of_scope`. A provider that reports either one is refused rather than believed. The gate's checks, its trust model, the fix-loop contract, and its stated limits are described in `docs/security-review.md`.
-
-### Integrations
-
-Integrations connect the kit to external systems and services. They own external I/O and service-specific representations while depending on shared contracts. External behavior must not leak into or become a dependency of the core.
-
-The dependency direction is intentionally one-way: outer layers may depend on core contracts; core never depends on a CLI, adapter, integration, or coding agent. The orchestrator sits above the core and the persistence adapter and is depended on only by adapters and the future CLI. The project, workspace, and OpenCode adapters sit above all three and are depended on by nothing.
-
-## Key ideas
-
+### Key ideas
 - **Agent-independent core**: Workflow logic, contracts, and state machine live in `core/` with no agent SDK dependencies.
-- **Deterministic evidence over model opinions**: Project verification runs actual commands and records exit codes, streams, and tree fingerprints. Security review combines measured change sets with framework checks.
-- **Isolated worktrees**: Post-approval stages execute in detached Git worktrees at the approved commit. Unauthorized changes are detected and restored; leases prevent concurrent writes.
-- **Bounded, auditable fixes**: Fix attempts are capped per origin stage (default 5) with integrity checks against protected files, approved scope, and frozen artifacts. Refused fixes preserve evidence.
-- **Revision-guarded concurrency**: Optimistic locking with `expectedRevision` prevents race conditions; stale results are rejected as conflicts.
-- **Least-privilege agent execution**: OpenCode adapter uses V2 permission rulesets with framework-owned runtime config outside the target repository; only `implementer` and `fixer` get write access to project files.
-- **Explicit approvals**: Two human gates (plan and push) freeze artifacts/checkpoints before proceeding; publishing requires re-verifying the approved tree.
+- **Deterministic evidence over model opinions**: Project verification runs actual commands and records exit codes, streams, and tree fingerprints.
+- **Isolated worktrees**: Post-approval stages execute in detached Git worktrees at the approved commit; unauthorized changes are detected and restored.
+- **Bounded, auditable fixes**: Fix attempts capped per origin stage (default 5) with integrity checks against protected files and approved scope.
+- **Revision-guarded concurrency**: Optimistic locking with `expectedRevision` prevents race conditions.
+- **Least-privilege agent execution**: OpenCode adapter uses V2 permission rulesets with framework-owned runtime config outside the target repo.
+- **Explicit approvals**: Two human gates (plan and push) freeze artifacts/checkpoints before proceeding.
 
 ## Quick start
 
-**Requirements:** Node.js `^22.13.0 || ^24.0.0 || >=26.0.0`, pnpm `11.27.1`
+Requirements: Node.js `^22.13.0 || ^24.0.0 || >=26.0.0`, pnpm `11.27.1`
 
 ```sh
-# Install dependencies
 pnpm install --frozen-lockfile
-
-# Build distributable packages (clean + compile TypeScript to dist/)
-pnpm build
-
-# Run runtime smoke test against built artifacts
-pnpm smoke
-
-# Lint, typecheck, test, or run all
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm verify        # runs lint + typecheck + test
-pnpm verify:dist   # runs build + smoke
+pnpm build          # builds all packages to dist/
+pnpm smoke          # runtime smoke test against dist/
+pnpm verify         # lint + typecheck + test (1185 tests)
+pnpm verify:dist    # build + smoke
 ```
 
-These commands work in this repository as verified (1177 tests pass, build produces usable dist/ artifacts). There is no CLI binary or end-to-end example provided yet (unverified).
+## Using it on another project
+
+```bash
+# In a separate Git repository:
+cd /path/to/your/project
+git init  # if not already a repo
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js init
+# Creates .agentflow/, agent-workflow.config.json
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js start \
+  --feature-id F-001 \
+  --title "Your feature" \
+  --request "What you want done" \
+  --slug your-feature-slug
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run
+# Runs stages until a human gate (plan or push approval)
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve plan
+# After reviewing the generated plan
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run
+# Runs post-approval stages until push gate
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve push --actor "your-name"
+# Creates branch, commits, pushes to origin
+```
+
+**Planned** (does not work yet):
+- `run` without a configured `StageExecutor` (currently errors with "Stage executor not configured")
+- Real-agent end-to-end run (OpenCode LLM does not emit required JSON format)
 
 ## Repo layout
 
-```text
+```
 core/              # Agent-independent domain model, state machine, contracts
 orchestration/     # Workflow coordinator, approval/fix/security/publishing logic
 adapters/
@@ -179,16 +128,19 @@ adapters/
   project/         # Project discovery, command selection, verification evidence
   workspace/       # Isolated Git worktrees, leases, scope enforcement
   opencode/        # OpenCode V2 agent adapter
-apps/cli/          # Reserved (no implementation yet)
+apps/cli/          # CLI commands: init, start, status, run, approve
 integrations/      # Reserved for external integrations
 templates/         # Reserved
 fixtures/          # Deterministic test fixtures (no model calls)
 tests/             # Cross-package contract and behavior tests
-docs/              # Additional docs (security-review, milestone notes, etc.)
+docs/
+  architecture.md  # Detailed architecture (moved from README)
+  security-review.md
 ```
 
 ## Learn more
 
+- [docs/architecture.md](docs/architecture.md) - Full architecture: persistence, orchestration, workspace, OpenCode adapter, project adapter, security review, integrations
 - [adapters/README.md](adapters/README.md) - Adapter architecture and persistence details
 - [orchestration/README.md](orchestration/README.md) - Orchestrator API, fix loop, approvals, publishing
 - [adapters/workspace/README.md](adapters/workspace/README.md) - Worktree isolation, leases, scope restoration
