@@ -153,14 +153,21 @@ The dependency direction is intentionally one-way: outer layers may depend on co
 # Install dependencies
 pnpm install --frozen-lockfile
 
+# Build distributable packages (clean + compile TypeScript to dist/)
+pnpm build
+
+# Run runtime smoke test against built artifacts
+pnpm smoke
+
 # Lint, typecheck, test, or run all
 pnpm lint
 pnpm typecheck
 pnpm test
-pnpm verify  # runs lint + typecheck + test
+pnpm verify        # runs lint + typecheck + test
+pnpm verify:dist   # runs build + smoke
 ```
 
-These commands work in this repository as verified (1177 tests pass). There is no CLI binary or end-to-end example provided yet (unverified).
+These commands work in this repository as verified (1177 tests pass, build produces usable dist/ artifacts). There is no CLI binary or end-to-end example provided yet (unverified).
 
 ## Repo layout
 

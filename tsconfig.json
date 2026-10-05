@@ -1,17 +1,6 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true,
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true,
-    "skipLibCheck": true,
     "noEmit": true
   },
   "include": [
@@ -19,6 +8,7 @@
     "orchestration/src/**/*.ts",
     "adapters/*/src/**/*.ts",
     "fixtures/**/*.ts",
-    "tests/**/*.ts"
+    "tests/**/*.ts",
+    "vitest.config.ts"
   ]
 }
