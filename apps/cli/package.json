@@ -22,6 +22,7 @@
     "@agent-workflow-kit/core": "workspace:*",
     "@agent-workflow-kit/orchestration": "workspace:*",
     "@agent-workflow-kit/persistence": "workspace:*",
+    "@agent-workflow-kit/project": "workspace:*",
     "commander": "^12.1.0"
   },
   "devDependencies": {
