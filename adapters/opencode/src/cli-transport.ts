@@ -104,6 +104,9 @@ export function buildOpenCodeInvocation(
   const args: string[] = [...(options?.extraArgs ?? [])];
 
   args.push("run");
+  // Use `--` immediately after `run` to separate the parent command's options from the subcommand.
+  // OpenCode's argument parser (yargs) requires this to correctly parse the `run` subcommand's options.
+  args.push("--");
   args.push("--standalone");
   args.push("--agent", request.agent);
   args.push("--format", toCliFormat(options?.responseFormat ?? "text"));
@@ -118,7 +121,8 @@ export function buildOpenCodeInvocation(
     args.push("--auto");
   }
 
-  args.push(request.prompt);
+  // Use `--prompt` flag for the prompt text.
+  args.push("--prompt", request.prompt);
 
   return { command, args, cwd: request.workingDirectory };
 }
