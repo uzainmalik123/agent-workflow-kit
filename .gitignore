@@ -2,3 +2,5 @@ node_modules/
 dist/
 coverage/
 security-audit-skill/
+.agentflow/
+**/tsconfig.build.json
