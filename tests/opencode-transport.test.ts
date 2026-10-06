@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -79,6 +79,29 @@ describe("invocation construction", () => {
     expect(invocation.args[0]).toBe("run");
   });
 
+  it("builds the exact PRD §10.2 invocation, with the prompt as the final positional", () => {
+    const prompt = "reply with the word ok";
+
+    expect(buildOpenCodeInvocation(requestFor({ prompt })).args).toEqual([
+      "run",
+      "--standalone",
+      "--agent",
+      "planner",
+      "--format",
+      "default",
+      prompt,
+    ]);
+  });
+
+  it("never sends a `--` separator or a `--prompt` flag, which the CLI does not have", () => {
+    const { args } = buildOpenCodeInvocation(requestFor());
+
+    // `opencode run --help` documents the prompt as the positional `[message..]`. Anything after a
+    // `--` is message text, which turned every flag into the prompt and ran the default agent.
+    expect(args).not.toContain("--");
+    expect(args).not.toContain("--prompt");
+  });
+
   it("passes the agent, the format, and the working directory as the child cwd", () => {
     const { args, cwd } = buildOpenCodeInvocation(requestFor({ workingDirectory: "/tmp/project" }));
 
@@ -119,6 +142,24 @@ describe("invocation construction", () => {
     expect(
       buildOpenCodeInvocation(requestFor({ model: "x" }), { model: null }).args,
     ).not.toContain("--model");
+  });
+
+  it("keeps the model flag between the format and the prompt", () => {
+    const { args } = buildOpenCodeInvocation(
+      requestFor({ prompt: "hello", model: "anthropic/claude-sonnet-4-5" }),
+    );
+
+    expect(args).toEqual([
+      "run",
+      "--standalone",
+      "--agent",
+      "planner",
+      "--format",
+      "default",
+      "--model",
+      "anthropic/claude-sonnet-4-5",
+      "hello",
+    ]);
   });
 
   it("passes the prompt as a single argument", () => {
@@ -543,5 +584,178 @@ describe("running a child process", () => {
   it("has a bounded default output cap", () => {
     expect(DEFAULT_MAX_OUTPUT_BYTES).toBeGreaterThan(0);
     expect(DEFAULT_MAX_OUTPUT_BYTES).toBeLessThanOrEqual(16_000_000);
+  });
+});
+
+describe("invocation recordings", () => {
+  const STAGE_PROMPT = "# Stage prompt\n\nReturn one fenced JSON block.";
+
+  const recordingsBase = (root: string): string =>
+    join(root, ".agentflow", "recordings", "F-001", "planning");
+
+  async function recordingDirectory(root: string): Promise<string> {
+    const entries = await readdir(recordingsBase(root));
+
+    expect(entries).toHaveLength(1);
+
+    return join(recordingsBase(root), entries[0] as string);
+  }
+
+  interface RecordedManifest {
+    featureId: string;
+    stage: string;
+    command: string;
+    args: string[];
+    cwd: string;
+    startedAt: string;
+    durationMs: number;
+    termination: string;
+    exitCode: number | null;
+    error: { code: string; message: string } | null;
+  }
+
+  async function recordingManifest(root: string): Promise<RecordedManifest> {
+    const directory = await recordingDirectory(root);
+
+    return JSON.parse(await readFile(join(directory, "invocation.json"), "utf8")) as RecordedManifest;
+  }
+
+  it("records argv, streams, exit code, and duration of a successful invocation", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport(
+      fakeOpenCode('process.stdout.write("the answer"); process.stderr.write("a warning");'),
+    );
+
+    const result = await transport.run(requestFor({ workingDirectory: root }));
+    const directory = await recordingDirectory(root);
+    const manifest = await recordingManifest(root);
+
+    expect(manifest.featureId).toBe("F-001");
+    expect(manifest.stage).toBe("planning");
+    expect(manifest.command).toBe(process.execPath);
+    expect(manifest.cwd).toBe(root);
+    expect(manifest.termination).toBe("exited");
+    expect(manifest.exitCode).toBe(0);
+    expect(manifest.error).toBeNull();
+    expect(manifest.durationMs).toBeGreaterThanOrEqual(0);
+    expect(manifest.startedAt.length).toBeGreaterThan(0);
+
+    const args = manifest.args;
+
+    // The recording is the argv the child actually received, so the fake CLI's own `-e <script>`
+    // prefix comes first and `run` follows it.
+    expect(args[2]).toBe("run");
+    expect(args).toContain("--standalone");
+    expect(args).not.toContain("--");
+    expect(args.at(-1)).toBe(STAGE_PROMPT);
+
+    expect(await readFile(join(directory, "stdout.txt"), "utf8")).toBe(result.stdout);
+    expect(await readFile(join(directory, "stderr.txt"), "utf8")).toBe("a warning");
+  });
+
+  it("records a non-zero exit with its code and its captured streams", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport(
+      fakeOpenCode('process.stderr.write("model unavailable"); process.exit(3);'),
+    );
+
+    const failure = await transport
+      .run(requestFor({ workingDirectory: root }))
+      .catch((error: unknown) => error);
+
+    expect((failure as OpenCodeAdapterError).code).toBe("non_zero_exit");
+
+    const manifest = await recordingManifest(root);
+
+    expect(manifest.termination).toBe("exited");
+    expect(manifest.exitCode).toBe(3);
+    expect(manifest.error?.code).toBe("non_zero_exit");
+    expect(manifest.error?.message).toContain("exited with code 3");
+
+    const directory = await recordingDirectory(root);
+
+    expect(await readFile(join(directory, "stderr.txt"), "utf8")).toBe("model unavailable");
+  });
+
+  it("records a timeout with no exit code and the partial streams it did capture", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport({
+      ...fakeOpenCode('process.stdout.write("partial"); setTimeout(() => {}, 30000);'),
+      killGraceMs: 100,
+    });
+
+    const failure = await transport
+      .run(requestFor({ workingDirectory: root, timeoutMs: 250 }))
+      .catch((error: unknown) => error);
+
+    expect((failure as OpenCodeAdapterError).code).toBe("transport_timeout");
+
+    const manifest = await recordingManifest(root);
+
+    expect(manifest.termination).toBe("timed_out");
+    expect(manifest.exitCode).toBeNull();
+    expect(manifest.error?.code).toBe("transport_timeout");
+    expect(manifest.error?.message.length ?? 0).toBeGreaterThan(0);
+
+    const directory = await recordingDirectory(root);
+
+    expect(await readFile(join(directory, "stdout.txt"), "utf8")).toBe("partial");
+  });
+
+  it("writes no recording when the child never ran, as with an already-cancelled run", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport(fakeOpenCode("setTimeout(() => {}, 1000);"));
+    const controller = new AbortController();
+
+    controller.abort();
+
+    const failure = await transport
+      .run(requestFor({ workingDirectory: root, signal: controller.signal }))
+      .catch((error: unknown) => error);
+
+    expect((failure as OpenCodeAdapterError).code).toBe("transport_cancelled");
+    await expect(readdir(join(root, ".agentflow"))).rejects.toThrow();
+  });
+
+  it("writes no recording when recording is disabled", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport({
+      ...fakeOpenCode('process.stdout.write("the answer");'),
+      recordInvocations: false,
+    });
+
+    await transport.run(requestFor({ workingDirectory: root }));
+
+    await expect(readdir(join(root, ".agentflow"))).rejects.toThrow();
+  });
+
+  it("never records outside the working directory, whatever the feature id contained", async () => {
+    const root = await makeRoot();
+    const transport = createOpenCodeCliTransport(
+      fakeOpenCode('process.stdout.write("the answer");'),
+    );
+
+    // A hostile feature id is sanitized into one safe segment; the run itself is unaffected.
+    await transport.run(requestFor({ workingDirectory: root, featureId: "../../elsewhere" }));
+
+    const recordings = await readdir(join(root, ".agentflow", "recordings"));
+
+    expect(recordings).toEqual(["elsewhere"]);
+  });
+
+  it("does not fail a run whose recording could not be written", async () => {
+    const root = await makeRoot();
+
+    // `.agentflow` exists as a file, so no recording directory can be created under it.
+    await writeFile(join(root, ".agentflow"), "not a directory", "utf8");
+
+    const transport = createOpenCodeCliTransport(
+      fakeOpenCode('process.stdout.write("the answer");'),
+    );
+
+    const result = await transport.run(requestFor({ workingDirectory: root }));
+
+    expect(result.text).toBe("the answer");
+    expect(result.exitCode).toBe(0);
   });
 });

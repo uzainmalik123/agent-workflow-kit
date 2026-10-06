@@ -5,8 +5,10 @@ import {
   DEFAULT_MAX_OUTPUT_BYTES,
   DEFAULT_STDERR_EXCERPT_LIMIT,
   runProcess,
+  type ProcessOutcomeObservation,
   type RunProcessResult,
 } from "./process.js";
+import { describeRecordingError, recordStageInvocation } from "./diagnostics.js";
 import { OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE } from "./runtime-config.js";
 import {
   type OpenCodeRawResult,
@@ -59,6 +61,13 @@ export interface OpenCodeCliTransportOptions {
    * role denies what it must not do, so approving the remainder is not needed to let it work.
    */
   readonly autoApprove?: boolean;
+  /**
+   * Records every real invocation under the stage working directory's `.agentflow/recordings/` —
+   * argv, both streams, the exit code, and how long the child ran — so a failed stage can be
+   * diagnosed from what actually ran instead of from a bounded error message. On by default, and
+   * best-effort: a recording that cannot be written never changes the outcome of a run.
+   */
+  readonly recordInvocations?: boolean;
 }
 
 export interface OpenCodeInvocation {
@@ -104,9 +113,10 @@ export function buildOpenCodeInvocation(
   const args: string[] = [...(options?.extraArgs ?? [])];
 
   args.push("run");
-  // Use `--` immediately after `run` to separate the parent command's options from the subcommand.
-  // OpenCode's argument parser (yargs) requires this to correctly parse the `run` subcommand's options.
-  args.push("--");
+  // Flags are passed directly, never after a `--` separator. `opencode run --help` documents the
+  // prompt as the positional `[message..]` and has no `--prompt` option, so anything after a `--`
+  // separator is message text: a separator here made every flag part of the prompt and silently ran
+  // the default agent instead of the one this stage was granted.
   args.push("--standalone");
   args.push("--agent", request.agent);
   args.push("--format", toCliFormat(options?.responseFormat ?? "text"));
@@ -121,8 +131,9 @@ export function buildOpenCodeInvocation(
     args.push("--auto");
   }
 
-  // Use `--prompt` flag for the prompt text.
-  args.push("--prompt", request.prompt);
+  // The prompt is the final positional argument, exactly as PRD §10.2 requires. The CLI has no
+  // `--prompt` option; the refusal above keeps a leading dash from being parsed as one.
+  args.push(request.prompt);
 
   return { command, args, cwd: request.workingDirectory };
 }
@@ -309,6 +320,7 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
     });
 
     let result: RunProcessResult;
+    let observation: ProcessOutcomeObservation | null = null;
 
     try {
       result = await runProcess(invocation.command, invocation.args, {
@@ -323,14 +335,23 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
         env: environment.env,
         ...(request.signal == null ? {} : { signal: request.signal }),
         label,
+        onOutcome: (outcome) => {
+          observation = outcome;
+        },
       });
     } catch (error) {
+      // The recording is written before the refusal leaves this function, so even a failed run
+      // leaves behind what it actually received and said. Best-effort: it cannot mask `error`.
+      await this.#recordInvocation(request, invocation, observation, error);
+
       if (error instanceof OpenCodeAdapterError) {
         throw error;
       }
 
       throw new OpenCodeAdapterError("transport_failed", `${label} failed.`, { cause: error });
     }
+
+    await this.#recordInvocation(request, invocation, observation, null);
 
     if (format === "json") {
       const stream = parseEventStream(result.stdout);
@@ -358,6 +379,37 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
       stderr: result.stderr,
       text: extractResponseText(result.stdout, format),
     };
+  }
+
+  /**
+   * Writes one invocation's recording, when there is something to record.
+   *
+   * A run that was cancelled before it started never spawned a child, so there is no observation and
+   * nothing is written. Everything else — a clean exit, a non-zero exit, a timeout, a spawn failure —
+   * leaves a recording under the stage working directory, written best-effort by `recordStageInvocation`.
+   */
+  async #recordInvocation(
+    request: OpenCodeTransportRequest,
+    invocation: OpenCodeInvocation,
+    observation: ProcessOutcomeObservation | null,
+    error: unknown,
+  ): Promise<void> {
+    if (this.#options.recordInvocations === false || observation === null) {
+      return;
+    }
+
+    await recordStageInvocation(
+      request.workingDirectory,
+      { featureId: request.featureId, stage: request.stage },
+      {
+        command: invocation.command,
+        args: invocation.args,
+        cwd: invocation.cwd,
+        startedAt: observation.startedAt,
+        observation,
+        error: describeRecordingError(error),
+      },
+    );
   }
 }
 

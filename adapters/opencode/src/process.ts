@@ -31,12 +31,41 @@ export interface RunProcessOptions {
   readonly signal?: AbortSignal;
   /** Names the run in a failure message without ever including the argument list. */
   readonly label: string;
+  /**
+   * Observes the raw child outcome, on success and failure alike, for a caller that records what
+   * actually ran. The callback is synchronous and cannot change the outcome: this function keeps
+   * sole ownership of the refusal policy, and a failed run still rejects with the same errors.
+   */
+  readonly onOutcome?: (observation: ProcessOutcomeObservation) => void;
 }
 
 export interface RunProcessResult {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
+}
+
+/**
+ * The raw child outcome, as the shared runner saw it, before this function's policy turns it into a
+ * result or a refusal.
+ *
+ * A refusal carries only a bounded stderr excerpt in its message, because a message travels and a
+ * prompt is private. A caller that needs the full picture — every byte of both streams, the exit
+ * code, how long the child actually ran — gets it here, on success and failure alike.
+ */
+export interface ProcessOutcomeObservation {
+  /** How the child ended: `exited`, `signalled`, `timed_out`, `cancelled`, `spawn_failed`, or `output_truncated`. */
+  readonly termination: ProcessTermination;
+  /** The exit code when the child exited on its own; `null` for every other termination. */
+  readonly exitCode: number | null;
+  /** The raw stdout capture, subject to the same caps as a successful result. */
+  readonly stdout: string;
+  /** The raw stderr capture, subject to the same caps as a successful result. */
+  readonly stderr: string;
+  /** When the child was spawned, as recorded by the shared runner's clock. */
+  readonly startedAt: string;
+  /** Wall-clock time from spawn to outcome, as measured by the shared runner. */
+  readonly durationMs: number;
 }
 
 export function excerpt(text: string, limit: number): string {
@@ -115,6 +144,15 @@ export async function runProcess(
     inheritEnv: options.inheritEnv !== false,
     ...(options.env === undefined ? {} : { env: options.env }),
     signal: options.signal ?? null,
+  });
+
+  options.onOutcome?.({
+    termination: outcome.termination,
+    exitCode: outcome.exitCode,
+    stdout: outcome.stdout.text,
+    stderr: outcome.stderr.text,
+    startedAt: outcome.startedAt,
+    durationMs: outcome.durationMs,
   });
 
   if (outcome.termination === "exited" && outcome.exitCode === 0) {
