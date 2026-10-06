@@ -16,6 +16,8 @@ try {
   // fallback to default
 }
 
+const MAX_RUN_ATTEMPTS = 100;
+
 class StubExecutor implements StageExecutor {
   execute(_request: StageExecutionRequest): Promise<StageExecutionResult> {
     return Promise.reject(
@@ -266,8 +268,11 @@ program
 
       const targetFeatureId = await getTargetFeatureId(store, featureId);
 
-      for (let attempt = 0; attempt < 100; attempt++) {
+      let lastResult: Awaited<ReturnType<typeof orchestrator.runNext>> | null = null;
+
+      for (let attempt = 0; attempt < MAX_RUN_ATTEMPTS; attempt++) {
         const result = await orchestrator.runNext(targetFeatureId);
+        lastResult = result;
 
         if (options.verbose) {
           console.log(`[${result.status}] ${result.state}${result.stage ? ` (${result.stage})` : ""}`);
@@ -277,12 +282,12 @@ program
           const action = result.action ?? "unknown";
           console.log(`Workflow paused at ${result.state} - awaiting ${action}`);
           console.log("Run 'agentflow approve plan' or 'agentflow approve push' to continue.");
-          break;
+          return;
         }
 
         if (result.status === "terminal") {
           console.log(`Workflow reached terminal state: ${result.state}`);
-          break;
+          return;
         }
 
         const errorStatuses = new Set([
@@ -304,6 +309,11 @@ program
           continue;
         }
       }
+
+      // Loop exhausted without reaching a gate or terminal state
+      const finalState = lastResult?.state ?? "unknown";
+      console.error(`did not converge after ${String(MAX_RUN_ATTEMPTS)} iterations; last state ${finalState}`);
+      process.exit(1);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`Error: ${message}`);
