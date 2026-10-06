@@ -158,6 +158,23 @@ export type {
   OpenCodeResponseFormat,
   ParsedEventStream,
 } from "./cli-transport.js";
+export type { ProcessOutcomeObservation } from "./process.js";
+
+export {
+  describeRecordingError,
+  INVOCATION_MANIFEST_FILENAME,
+  INVOCATION_SEGMENT_MAX_LENGTH,
+  INVOCATION_STDERR_FILENAME,
+  INVOCATION_STDOUT_FILENAME,
+  OPENCODE_RECORDINGS_DIRECTORY,
+  recordStageInvocation,
+  safeRecordingSegment,
+} from "./diagnostics.js";
+export type {
+  RecordedInvocation,
+  StageInvocationIdentity,
+  StageInvocationRecording,
+} from "./diagnostics.js";
 
 export {
   advertisesFlag,
