@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile, readFile, lstat, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile, readFile, lstat, readdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -38,6 +38,17 @@ async function gitInit(root: string): Promise<void> {
 async function runInit(root: string): Promise<ExecResult> {
   try {
     const result = await execFileAsync("node", [cliPath, "init"], { cwd: root });
+    return { stdout: result.stdout, stderr: result.stderr, code: 0 };
+  } catch (error: unknown) {
+    const err = error as Partial<ExecResult>;
+    return { stdout: err.stdout ?? "", stderr: err.stderr ?? "", code: err.code ?? 1 };
+  }
+}
+
+/** Any git invocation, with its exit code, so a non-zero result (as `check-ignore` gives) is data. */
+async function gitResult(root: string, ...args: string[]): Promise<ExecResult> {
+  try {
+    const result = await execFileAsync("git", args, { cwd: root });
     return { stdout: result.stdout, stderr: result.stderr, code: 0 };
   } catch (error: unknown) {
     const err = error as Partial<ExecResult>;
@@ -214,5 +225,102 @@ describe("agentflow init", () => {
     }
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("No workflow sessions found");
+  });
+
+  it("makes .agentflow/ impossible to commit by accident: nothing shows in status, everything is ignored", async () => {
+    const root = await makeProject({
+      "package.json": JSON.stringify({ name: "test", private: true }),
+      "tsconfig.json": "{}",
+      "package-lock.json": "{}",
+    });
+
+    await gitInit(root);
+    const init = await runInit(root);
+    expect(init.code).toBe(0);
+
+    // What a real run leaves behind under .agentflow/: runtime records and persisted sessions.
+    await mkdir(join(root, ".agentflow", "recordings", "F-001", "grill", "t"), { recursive: true });
+    await writeFile(join(root, ".agentflow", "recordings", "F-001", "grill", "t", "stdout.txt"), "captured\n", "utf8");
+    await mkdir(join(root, ".agentflow", "features", "F-001"), { recursive: true });
+    await writeFile(join(root, ".agentflow", "features", "F-001", "session.json"), "{}\n", "utf8");
+
+    const status = await gitResult(root, "status", "--porcelain");
+    expect(status.code).toBe(0);
+    expect(status.stdout.split("\n").filter((line) => line.includes(".agentflow"))).toEqual([]);
+
+    for (const path of [
+      ".agentflow/.gitignore",
+      ".agentflow/recordings/F-001/grill/t/stdout.txt",
+      ".agentflow/features/F-001/session.json",
+    ]) {
+      const check = await gitResult(root, "check-ignore", "-v", path);
+      expect(check.code, `${path} should be reported as ignored`).toBe(0);
+      expect(check.stdout).toContain(path);
+    }
+
+    // The config stays committable: it is outside .agentflow/ and still shows up.
+    const configStatus = await gitResult(root, "status", "--porcelain", "agent-workflow.config.json");
+    expect(configStatus.stdout).toContain("agent-workflow.config.json");
+  });
+
+  it("leaves an existing .agentflow/.gitignore with other content untouched, and reports it", async () => {
+    const root = await makeProject({
+      "package.json": JSON.stringify({ name: "test", private: true }),
+      "tsconfig.json": "{}",
+      "package-lock.json": "{}",
+    });
+
+    await gitInit(root);
+    await mkdir(join(root, ".agentflow"), { recursive: true });
+    await writeFile(join(root, ".agentflow", ".gitignore"), "state/\n!state/keep.json\n", "utf8");
+
+    const init = await runInit(root);
+    expect(init.code).toBe(0);
+    expect(await readFile(join(root, ".agentflow", ".gitignore"), "utf8")).toBe("state/\n!state/keep.json\n");
+
+    const reported = `${init.stdout}\n${init.stderr}`;
+    expect(reported).toContain(".agentflow/.gitignore");
+    expect(reported).toContain("untouched");
+
+    // And a re-run over the framework's own file is idempotent: same content, success, no churn.
+    const second = await runInit(root);
+    expect(second.code).toBe(0);
+    expect(await readFile(join(root, ".agentflow", ".gitignore"), "utf8")).toBe("state/\n!state/keep.json\n");
+  });
+
+  it("writes .agentflow/.gitignore only through a real directory, never through a symlink", async () => {
+    const root = await makeProject({
+      "package.json": JSON.stringify({ name: "test", private: true }),
+      "tsconfig.json": "{}",
+      "package-lock.json": "{}",
+    });
+
+    await gitInit(root);
+    await mkdir(join(root, "link-target"), { recursive: true });
+    await symlink(join(root, "link-target"), join(root, ".agentflow"));
+
+    const init = await runInit(root);
+    expect(init.code).not.toBe(0);
+    expect(init.stderr).toContain("symbolic link");
+
+    // Nothing was created through the link.
+    expect(await readdir(join(root, "link-target"))).toEqual([]);
+  });
+
+  it("is idempotent: a second init keeps .agentflow/.gitignore exactly as it wrote it", async () => {
+    const root = await makeProject({
+      "package.json": JSON.stringify({ name: "test", private: true }),
+      "tsconfig.json": "{}",
+      "package-lock.json": "{}",
+    });
+
+    await gitInit(root);
+    const first = await runInit(root);
+    expect(first.code).toBe(0);
+    expect(await readFile(join(root, ".agentflow", ".gitignore"), "utf8")).toBe("*\n");
+
+    const second = await runInit(root);
+    expect(second.code).toBe(0);
+    expect(await readFile(join(root, ".agentflow", ".gitignore"), "utf8")).toBe("*\n");
   });
 });

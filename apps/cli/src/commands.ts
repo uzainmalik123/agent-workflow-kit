@@ -4,7 +4,7 @@ import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/pr
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
 import { createRealStack, type OrchestratorStack } from "./stack.js";
 import { join, dirname, resolve } from "node:path";
-import { mkdir, writeFile, lstat } from "node:fs/promises";
+import { mkdir, writeFile, readFile, lstat } from "node:fs/promises";
 
 let packageVersion = "0.0.0";
 try {
@@ -81,6 +81,87 @@ const DEFAULT_CONFIG = {
   },
 } as const;
 
+/**
+ * The single line that makes `.agentflow/` impossible to commit by accident: a directory whose own
+ * `.gitignore` matches everything, itself included, so nothing under it can ever be staged. The
+ * repository's own `.gitignore` at the root is never touched.
+ */
+const AGENTFLOW_GITIGNORE_CONTENT = "*\n";
+
+/**
+ * Insists a path is a real directory before anything is created inside it.
+ *
+ * The rule the persistence layer writes by, applied here: `lstat`, never a followed link. `.agentflow`
+ * as a symlink would send everything init creates — including the ignore file below — to a location
+ * outside the repository, and a link is precisely the shape of a path nobody agreed to.
+ */
+async function ensureRealDirectory(path: string): Promise<void> {
+  let stats;
+
+  try {
+    stats = await lstat(path);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+
+    throw error;
+  }
+
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error(`"${path}" must be a real directory, not a symbolic link.`);
+  }
+}
+
+/**
+ * Creates `.agentflow/.gitignore` — what makes `.agentflow/` invisible to Git — without ever
+ * overwriting one that is already there.
+ *
+ * Same discipline as the persistence layer: `lstat` instead of a followed symlink, the `wx` flag so an
+ * existing file is never opened for truncation, and a file that already exists with other content is
+ * reported and left exactly as it is. A re-run over the framework's own `*` is a no-op, which is what
+ * makes init safe to run repeatedly.
+ */
+async function ensureAgentflowGitignore(agentflowDir: string): Promise<void> {
+  const path = join(agentflowDir, ".gitignore");
+
+  let stats;
+
+  try {
+    stats = await lstat(path);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+
+    try {
+      await writeFile(path, AGENTFLOW_GITIGNORE_CONTENT, { encoding: "utf8", flag: "wx" });
+      console.log("Created .agentflow/.gitignore");
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+      // Something created the file between the check and the write. Not ours, so not overwritten.
+    }
+
+    return;
+  }
+
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error(`"${path}" must be a real file, not a symbolic link.`);
+  }
+
+  const existing = await readFile(path, "utf8");
+
+  if (existing === "*" || existing === AGENTFLOW_GITIGNORE_CONTENT) {
+    return;
+  }
+
+  console.warn(
+    "Warning: .agentflow/.gitignore exists with other content, so it was left untouched. Until it ignores the directory, files under .agentflow/ may show up as untracked.",
+  );
+}
+
 async function initializeProject(repoRoot: string): Promise<void> {
   // Validate it's a Git repository
   const gitRoot = await findRepositoryRoot(repoRoot);
@@ -105,10 +186,15 @@ async function initializeProject(repoRoot: string): Promise<void> {
     throw err;
   }
 
-  // Create .agentflow/features directory structure
   const agentflowDir = join(repoRoot, ".agentflow");
+  await ensureRealDirectory(agentflowDir);
+
+  // Create .agentflow/features directory structure
   const featuresDir = join(agentflowDir, "features");
   await mkdir(featuresDir, { recursive: true });
+
+  // Make the structure Git can never stage or commit by accident.
+  await ensureAgentflowGitignore(agentflowDir);
 
   // Create minimal default config if it doesn't exist
   const configPath = join(repoRoot, PROJECT_CONFIG_FILENAME);
