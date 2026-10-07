@@ -4,7 +4,7 @@
   "description": "A coding-agent-independent software development workflow toolkit.",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.27.1",
+  "packageManager": "pnpm@12.9.1",
   "engines": {
     "node": "^22.13.0 || ^24.0.0 || >=26.0"
   },
@@ -22,7 +22,7 @@
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "11.27.1",
+      "version": "12.9.1",
       "onFail": "download"
     }
   },

@@ -1,0 +1,10 @@
+{
+  "name": "p4-basic",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.mjs",
+    "lint": "echo 'no lint'"
+  }
+}

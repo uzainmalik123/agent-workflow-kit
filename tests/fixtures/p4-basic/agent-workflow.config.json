@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "verification": {
+    "static": [
+      {
+        "id": "lint",
+        "capability": "lint",
+        "executable": "echo",
+        "args": ["no lint"]
+      }
+    ],
+    "test": [
+      {
+        "id": "test",
+        "capability": "test",
+        "executable": "node",
+        "args": ["test.mjs"]
+      }
+    ]
+  }
+}
