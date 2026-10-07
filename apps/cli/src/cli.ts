@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { program } from "commander";
-import { createWorkflowOrchestrator } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/project";
+import { createOrchestratorStack } from "./stack.js";
 import { resolve, join, dirname } from "node:path";
 import { mkdir, writeFile, lstat } from "node:fs/promises";
 import type { StageExecutor, StageExecutionRequest, StageExecutionResult } from "@agent-workflow-kit/orchestration";
@@ -30,9 +30,7 @@ class StubExecutor implements StageExecutor {
 }
 
 function createOrchestrator(repoRoot: string) {
-  const store = createFeatureSessionStore(repoRoot);
-  const executor = new StubExecutor();
-  return createWorkflowOrchestrator({ store, executor });
+  return createOrchestratorStack(repoRoot, { executor: new StubExecutor() }).orchestrator;
 }
 
 function getRepoRoot(cwd: string): string {
