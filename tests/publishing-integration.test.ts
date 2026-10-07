@@ -405,4 +405,57 @@ describe("publishing an approved change to a real repository", () => {
     // repository happened to contain, and the cache of worktrees nowhere in it.
     expect(tree.filter((path) => path !== "").sort()).toEqual([ADDED, EDITED].sort());
   });
+
+  it("stages no path under .agentflow/, with files present under the project's .agentflow/", async () => {
+    const harness = await makeHarness();
+
+    // The project's .agentflow/, in both shapes it really takes: state committed before the feature
+    // existed (so it is inside the publish worktree when staging runs), and the runtime records a run
+    // leaves behind, untracked, in the project checkout.
+    const tracked = ".agentflow/recordings/F-001/grill/t/stdout.txt";
+
+    await mkdir(join(harness.repositoryRoot, ".agentflow", "recordings", "F-001", "grill", "t"), { recursive: true });
+    await writeFile(join(harness.repositoryRoot, tracked), "captured\n", "utf8");
+    git(harness.repositoryRoot, "add", tracked);
+    git(harness.repositoryRoot, "commit", "--quiet", "-m", "record a stage");
+
+    await mkdir(join(harness.repositoryRoot, ".agentflow", "features", "F-001"), { recursive: true });
+    await writeFile(join(harness.repositoryRoot, ".agentflow", "features", "F-001", "session.json"), "{}\n", "utf8");
+
+    await driveToPushApproval(harness);
+    await harness.orchestrator.approvePush(FEATURE);
+    await driveTo(harness, WorkflowState.Committing);
+
+    expect((await harness.orchestrator.publishFeature(FEATURE)).status).toBe("committed");
+
+    const record = await publishRecord(harness);
+
+    // The staging step is `git add -- <approved paths>` in a temporary index, and the commit is built
+    // from that index, so the commit's own diff is exactly what that staging step staged.
+    const staged = git(harness.repositoryRoot, "show", "--name-status", "--format=", record.commit)
+      .trim()
+      .split("\n")
+      .sort();
+
+    expect(staged).toEqual([`A\t${ADDED}`, `M\t${EDITED}`].sort());
+    expect(staged.some((line) => line.includes(".agentflow"))).toBe(false);
+
+    // Not vacuous: the commit's inherited tree holds .agentflow/ paths, so staging ran over a worktree
+    // that contained them and staged none of them.
+    const tree = git(harness.repositoryRoot, "ls-tree", "-r", "--name-only", record.commit).split("\n");
+
+    expect(tree).toContain(tracked);
+
+    expect((await harness.orchestrator.publishFeature(FEATURE)).status).toBe("published");
+
+    const onRemote = git(harness.remote, "show", "--name-status", "--format=", record.branch).split("\n");
+
+    expect(onRemote.some((line) => line.includes(".agentflow"))).toBe(false);
+
+    // The project's own state files are untouched.
+    expect(
+      await readFile(join(harness.repositoryRoot, ".agentflow", "features", "F-001", "session.json"), "utf8"),
+    ).toBe("{}\n");
+    expect(await readFile(join(harness.repositoryRoot, tracked), "utf8")).toBe("captured\n");
+  });
 });
