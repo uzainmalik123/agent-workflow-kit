@@ -96,4 +96,4 @@ This milestone represents the **current framework freeze**. No new framework cap
 - Automatic PR/merge workflows
 - Autonomous requirement changes
 
-The framework is frozen as-is for production use on actual projects.
+**Status:** Core workflow logic is validated by fixtures and fake executors; real end-to-end (real OpenCode, external project, through push) is NOT yet proven.

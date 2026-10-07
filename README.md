@@ -5,7 +5,7 @@ An agent-independent, deterministic software development workflow toolkit that s
 ## Status
 
 **What works today (verified):**
-- Core workflow engine (`core/`) with 23 states, legal transitions, and fix return tracking.
+- Core workflow engine (`core/`) with 21 states, legal transitions, and fix return tracking.
 - Workflow orchestrator (`orchestration/`) with approval checkpoints, bounded fix loop (max 5 attempts), revision-guarded mutations, and publishing logic.
 - Persistence layer (`adapters/persistence/`) for repository-local feature sessions under `.agentflow/features/` with atomic writes and concurrency control.
 - Project discovery and verification (`adapters/project/`) that selects project commands (lint/typecheck/test/build/runtime), runs them as separate processes, and produces deterministic evidence.
