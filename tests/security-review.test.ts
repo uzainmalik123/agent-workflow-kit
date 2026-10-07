@@ -1036,6 +1036,45 @@ describe("the project scanner against a real tree", () => {
     ).rejects.toThrow();
   });
 
+  it("scans the tree a resolver names, the way a worktree stage is served", async () => {
+    const project = await makeRoot();
+    const worktree = await makeRoot();
+    await mkdir(join(worktree, "src"), { recursive: true });
+    await writeFile(join(worktree, "src", "config.ts"), 'export const key = "AKIAIOSFODNN7EXAMPLE";\n', "utf8");
+
+    // A post-approval stage runs in the worktree the orchestrator opened, so one provider serves
+    // both trees: the resolver says which tree this request belongs to, and the provider scans only
+    // that. This is the same option the verification provider takes as `resolveRunRoot`.
+    const provider = createProjectSecurityReviewProvider({
+      projectRoot: project,
+      resolveRoot: () => worktree,
+    });
+    const request: SecurityReviewRequest = {
+      featureId: "F-001",
+      stage: "security_review",
+      revision: 1,
+      projectRoot: worktree,
+      workspaceId: "ws-1",
+      changes: { added: ["src/config.ts"], deleted: [], modified: [], renamed: [], untracked: [] },
+      changedPaths: ["src/config.ts"],
+      approvedPatterns: ["**"],
+      protectedPatterns: SECURITY_PROTECTED_PATTERNS,
+      workspaceFingerprint: "0".repeat(64),
+      previousReview: null,
+    };
+
+    const record = await provider.review(request);
+
+    // The secret is in the worktree, and the record names the worktree as the tree that was read.
+    expect(record.projectRoot).toBe(worktree);
+    expect(checkNamed(record, "hardcoded_secret")).toMatchObject({ paths: ["src/config.ts"] });
+    expect(record.status).toBe("fail");
+
+    // The resolver decides, so a request for any other tree — the checkout included — is still
+    // refused even though the provider's own `projectRoot` names one of them.
+    await expect(provider.review({ ...request, projectRoot: project })).rejects.toThrow();
+  });
+
   it("produces a record the framework accepts", async () => {
     const record = await scan({ "src/index.ts": "export const answer = 42;\n" });
     const request: SecurityReviewRequest = {

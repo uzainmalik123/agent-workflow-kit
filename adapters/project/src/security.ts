@@ -905,22 +905,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export interface ProjectSecurityReviewProviderOptions {
   /**
-   * The project this provider may read. Defaults to `process.cwd()`. A kit that opens isolated
-   * worktrees supplies a resolver, and the directory it names is chosen when the provider is
-   * constructed rather than taken from a request, so a request cannot redirect a scan into a tree the
-   * kit did not open.
+   * The project this provider may read. Defaults to `process.cwd()`. It is the answer when no
+   * resolver is supplied, which is the whole story for a kit that scans the checkout itself.
    */
   readonly projectRoot?: string;
+  /**
+   * Where a review is allowed to scan, when the kit opens isolated worktrees for post-approval
+   * stages.
+   *
+   * The default answers every request with `projectRoot`. A kit whose `security_review` runs in a
+   * worktree supplies a resolver, exactly as the verification provider does, and the directory it
+   * names is trusted wiring chosen when the provider is constructed rather than free request data:
+   * every request is still checked against the resolver's answer, so a request can only scan a tree
+   * the kit's own wiring named.
+   */
+  readonly resolveRoot?: (request: SecurityReviewRequest) => string;
   /** Injectable millisecond clock, so evidence timestamps are reproducible in a test. */
   readonly clock?: () => number;
 }
 
 export class ProjectSecurityReviewProvider implements SecurityReviewProvider {
   readonly #root: string;
+  readonly #resolveRoot: (request: SecurityReviewRequest) => string;
   readonly #clock: () => number;
 
   constructor(options: ProjectSecurityReviewProviderOptions = {}) {
     this.#root = resolve(options.projectRoot ?? process.cwd());
+    this.#resolveRoot = options.resolveRoot ?? (() => this.#root);
     this.#clock = options.clock ?? Date.now;
   }
 
@@ -929,15 +940,16 @@ export class ProjectSecurityReviewProvider implements SecurityReviewProvider {
   }
 
   async review(request: SecurityReviewRequest): Promise<SecurityReviewEvidence> {
-    // The request's root is data the orchestrator supplies, so it is checked rather than followed.
-    // This is the same per-call check the verification provider makes, and for the same reason: the
-    // resolver says which tree is allowed and this provider still refuses anything else.
-    const root = resolve(request.projectRoot);
+    // The request's root is data the orchestrator supplies, so it is checked against the tree the
+    // kit's wiring allows rather than followed. This is the same per-call check the verification
+    // provider makes, and for the same reason: the resolver says which tree is allowed and this
+    // provider still refuses anything else.
+    const root = resolve(this.#resolveRoot(request));
 
-    if (root !== this.#root) {
+    if (resolve(request.projectRoot) !== root) {
       throw new ProjectAdapterError(
         "command_invalid",
-        `The security review request asked for project root "${request.projectRoot}" but this provider reads "${this.#root}".`,
+        `The security review request asked for project root "${request.projectRoot}" but this provider reads "${root}".`,
       );
     }
 

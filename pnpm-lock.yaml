@@ -247,6 +247,9 @@ importers:
       '@agent-workflow-kit/core':
         specifier: workspace:*
         version: link:../../core
+      '@agent-workflow-kit/opencode':
+        specifier: workspace:*
+        version: link:../../adapters/opencode
       '@agent-workflow-kit/orchestration':
         specifier: workspace:*
         version: link:../../orchestration
@@ -256,6 +259,9 @@ importers:
       '@agent-workflow-kit/project':
         specifier: workspace:*
         version: link:../../adapters/project
+      '@agent-workflow-kit/workspace':
+        specifier: workspace:*
+        version: link:../../adapters/workspace
       commander:
         specifier: ^12.1.0
         version: 12.1.0

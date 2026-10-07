@@ -20,9 +20,11 @@
   },
   "dependencies": {
     "@agent-workflow-kit/core": "workspace:*",
+    "@agent-workflow-kit/opencode": "workspace:*",
     "@agent-workflow-kit/orchestration": "workspace:*",
     "@agent-workflow-kit/persistence": "workspace:*",
     "@agent-workflow-kit/project": "workspace:*",
+    "@agent-workflow-kit/workspace": "workspace:*",
     "commander": "^12.1.0"
   },
   "devDependencies": {
