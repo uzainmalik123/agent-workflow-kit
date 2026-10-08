@@ -5,6 +5,10 @@ import type { FeatureSession } from "@agent-workflow-kit/persistence";
 import { createRealStack, type OrchestratorStack } from "./stack.js";
 import { join, dirname, resolve } from "node:path";
 import { mkdir, writeFile, readFile, lstat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 let packageVersion = "0.0.0";
 try {
@@ -273,6 +277,65 @@ async function getTargetFeatureId(
 }
 
 /**
+ * The environment variable `agentflow run` falls back to when no `--model` flag is given. The flag
+ * always wins; a value from either source is validated the same way before it reaches the
+ * executor.
+ */
+const AGENTFLOW_MODEL_ENV = "AGENTFLOW_MODEL";
+
+/**
+ * Resolves the model `run` asks OpenCode for, and refuses a value that could not be one argv
+ * token.
+ *
+ * The `--model` flag wins over `AGENTFLOW_MODEL`; `null` — which omits `--model` from the
+ * invocation and leaves the choice to OpenCode's own default — only when neither is set. Whichever
+ * source wins must be non-empty, free of whitespace, and free of a leading "-", which is what keeps
+ * the value a single argument after `--model` rather than an empty or option-like token on its way
+ * into the invocation.
+ *
+ * Thrown, not logged: the `run` action's catch reports it and exits non-zero, so an unusable value
+ * stops the command before a stack is built, let alone a stage run.
+ */
+function resolveRunModel(flag: string | undefined): string | null {
+  const source = flag !== undefined ? "--model" : AGENTFLOW_MODEL_ENV;
+  const value = flag ?? process.env[AGENTFLOW_MODEL_ENV] ?? null;
+
+  if (value === null) {
+    return null;
+  }
+
+  if (value.length === 0) {
+    throw new Error(`Invalid ${source} value: the model must not be empty.`);
+  }
+
+  if (/\s/.test(value)) {
+    throw new Error(`Invalid ${source} value: ${JSON.stringify(value)} must not contain spaces.`);
+  }
+
+  if (value.startsWith("-")) {
+    throw new Error(`Invalid ${source} value: ${JSON.stringify(value)} must not start with "-".`);
+  }
+
+  return value;
+}
+
+/**
+ * Whether `git rev-parse HEAD` resolves, i.e. the repository has at least one commit.
+ *
+ * `run` checks this before the workflow is touched: a stage diffs, verifies, and eventually
+ * publishes against commits, and in a repository with no commits that can only fail somewhere deep
+ * inside a stage. A failing `rev-parse` — no commits, or no Git at all — is a non-zero exit here.
+ */
+async function hasInitialCommit(repoRoot: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Builds the CLI's command tree.
  *
  * Every command is a thin adapter over an existing API: `init` over `initializeProject`, `status`
@@ -380,11 +443,26 @@ export function createCli(options: CreateCliOptions = {}): Command {
     .description("Run the workflow non-interactively until a human gate")
     .argument("[feature-id]", "Feature ID to run (defaults to most recent)")
     .option("-v, --verbose", "Verbose output")
-    .option("--model <model>", "Model to ask OpenCode for; defaults to OpenCode's own default model")
+    .option(
+      "--model <model>",
+      "Model to ask OpenCode for, as provider/model; falls back to AGENTFLOW_MODEL, then to OpenCode's own default model",
+    )
     .action(async (featureId: string | undefined, opts: { verbose?: boolean; model?: string }) => {
       try {
         const repoRoot = getRepoRoot(cwd());
-        const stack = createStack(repoRoot, { model: opts.model ?? null });
+        // Resolved and validated before anything is built, so an unusable value is this command's
+        // answer rather than a surprise inside a stage's invocation.
+        const model = resolveRunModel(opts.model);
+
+        // Before the stack exists and before any session is read: a repository with no commits
+        // cannot diff, verify, or publish, so the run stops here with that answer.
+        if (!(await hasInitialCommit(repoRoot))) {
+          console.error("Error: this repository has no commits; make an initial commit first.");
+          exit(1);
+          return;
+        }
+
+        const stack = createStack(repoRoot, { model });
         const orchestrator = stack.orchestrator;
 
         const targetFeatureId = await getTargetFeatureId(stack.store, exit, featureId);
