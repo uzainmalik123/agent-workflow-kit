@@ -10,19 +10,31 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 
 ---
 
-## D-1. The read and write profiles keep the `bash` tool declared, with every command denied
+## D-1. The read and write profiles keep the `bash` tool declared, with every command denied except `pwd`
 
-- **Status:** Proposed. Blocked on Task E2 evidence.
-- **Context:** OpenCode Zen's free tier returns `403 FreeTierError` when the selected agent's configuration removes the `bash` or `read` tool. Task E ran 19 probes and the rule fit all of them. `glob` and `grep` are not required, and denying `edit` is fine. Both `agentflow-read` and `agentflow-write` deny shell today, so both fail. PRD §2.5 says the supported OpenCode profiles grant no agent shell execution, and §10.5 says the read profile cannot use shell execution.
-- **Decision (draft):** keep `bash` declared in both profiles so the provider accepts the request, but deny every command (or allow only an explicitly listed harmless command). The agent must still be unable to run any command that reads secrets, writes, or touches the network.
-- **Accepted only if all of these hold:**
-  1. E2 finds a variant that passes the gate and blocks commands, with a positive control (the allowlisted command is allowed) and negative controls (`touch`, `sh -c 'echo x > f'`, `git init`, `cat /etc/passwd`, `curl` are refused and no file appears).
-  2. A test parses the generated agent file and asserts the effective permission rules are the intended ones. A malformed file must fail closed. Task E showed that malformed frontmatter silently yields an unrestricted agent.
-  3. The post-stage scope guard stays enabled as a second line of defense.
-  4. PRD §2.5 and §10.5 are reworded to match this decision.
-  5. Free Zen is documented as best-effort, with a keyed provider as the reliable path.
-- **Trade-off:** today the read agent has no shell at all. After this change the shell exists but is blocked by rules. A bug in OpenCode's permission enforcement would become a real exposure.
-- **Fallback if E2 finds nothing:** do not weaken the profiles. Use a provider with the owner's own API key through `--model provider/model`, and document that free Zen is unsupported with the restricted profiles.
+- **Status:** Accepted, conditional on Task G tests (condition 3 below)
+- **Date:** 2026-10-08
+- **Context:** OpenCode Zen's free tier returns `403 FreeTierError` when the selected agent's configuration removes the `bash` or `read` tool. Task E (19 probes) showed the rule fits every case; `glob` and `grep` are not required and denying `edit` is harmless. Both `agentflow-read` and `agentflow-write` denied shell, so both failed. PRD §2.5 and §10.5 said the profiles grant no agent shell execution.
+- **Decision:** both profiles declare the shell tool with exactly these ordered rules, last match wins:
+  1. shell, resource `*`, effect `deny`
+  2. shell, resource `pwd`, effect `allow`
+
+  No other shell allow rule exists in either profile.
+
+- **Evidence (Task E2):**
+  - Gate: the variant passes on `agentflow-read` and `agentflow-write` with `opencode/big-pickle`. An empty allowlist (`allow *` then `deny *`) fails the gate. `ask` passes but is rejected here (see trade-offs).
+  - Model-free permission evaluator: `pwd` is allowed; `touch`, `sh -c 'echo x > f'`, `git init`, `cat /etc/passwd`, and `curl` are denied; webfetch is denied; read, glob, and grep are allowed in-project; an external directory is denied.
+  - End to end: `pwd` ran; denied commands were rejected by OpenCode; no side-effect files were created and the scratch repo's git config was unchanged.
+- **Conditions for keeping this decision:**
+  1. The post-stage scope guard stays enabled as a second line of defense.
+  2. A test parses the generated agent files and fails closed on malformed YAML, duplicate keys, missing rules, or a changed rule order. Task E showed malformed frontmatter silently yields an unrestricted agent.
+  3. Compound and argument forms must evaluate to deny: `pwd; touch x`, `pwd && curl example.com`, `pwd | tee x`, `pwd > x`, `pwd $(touch x)`, backtick substitution, `pwd --version`, `FOO=1 pwd`. If any is allowed, this decision is withdrawn.
+  4. The transport never passes an auto-approve flag (asserted by an argv test).
+  5. PRD §2.5 and §10.5 are reworded to match this decision.
+- **Why not `ask`:** it passes the gate and is safe only because `opencode run` auto-rejects in non-interactive mode. One stray auto-approve flag would allow shell commands. A deny rule has no such dependency. Interactive TUI behavior under `ask` was not tested.
+- **Trade-off:** before this change the agent had no shell at all. Now the shell is present and blocked by rules, so a bug in OpenCode's permission enforcement could become a real exposure. Mitigation: the conditions above, plus keeping the scope guard on.
+- **Not verified:** the server-side logic of the Zen gate (no payload captured; inferred from behavior), and a model-driven read attempt on a path outside the project. The gate has changed several times and may change again.
+- **Fallback:** if the gate changes or this approach stops working, do not weaken the profiles. Use a provider with your own API key through `--model provider/model`. Free Zen is best-effort.
 
 ## D-2. Two physical profiles stay the core contract (prd-issues C-1)
 

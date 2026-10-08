@@ -3,337 +3,2661 @@
   "generated": "2026-10-05",
   "note": "One entry per atomic, testable requirement; compound PRD sentences are split. Vague/untestable items, duplicates, and non-locally-verifiable items are catalogued in prd-issues.md. Duplicated PRD statements are listed once with cross-references in the section field.",
   "requirements": [
-    {"id": "R-001", "section": "§2.1", "requirement": "Explicit human approval is required before implementation starts after planning.", "type": "security", "milestone": "M0", "verification": "test: advancing from AwaitingPlanApproval without approve_plan is rejected"},
-    {"id": "R-002", "section": "§2.1", "requirement": "Explicit human approval is required before repository publishing begins after final verification.", "type": "security", "milestone": "M0", "verification": "test: publishing path refuses to run without a valid approve_push record"},
-    {"id": "R-003", "section": "§2.1", "requirement": "Agents cannot approve themselves, transition workflow state on their own, or manufacture an approval through response content.", "type": "security", "milestone": "M0", "verification": "test: forged approval/state fields in agent output are ignored or rejected"},
-    {"id": "R-004", "section": "§2.2", "requirement": "Model output may propose, explain, review, or diagnose but is never treated as proof that software works; deterministic system evidence is the authoritative gate input.", "type": "behavior", "milestone": "M0", "verification": "test: gate decisions derive only from recorded evidence, not agent claims"},
-    {"id": "R-005", "section": "§2.3", "requirement": "Core workflow engine has no direct dependency on OpenCode, Claude Code, Codex, Freebuff, or any other vendor runtime.", "type": "behavior", "milestone": "M0", "verification": "code inspection: no vendor imports in core package"},
-    {"id": "R-006", "section": "§2.3", "requirement": "Agent runtimes are adapters behind a stable interface; OpenCode is the first and only production adapter required for the initial release.", "type": "process", "milestone": "M0", "verification": "code inspection: adapter interface exists; single registered production adapter"},
-    {"id": "R-007", "section": "§2.4", "requirement": "One workflow engine: CLI commands, adapters, tests, and integrations all use the existing orchestration/state machine; no second engine may grow inside a CLI or agent integration.", "type": "behavior", "milestone": "M0", "verification": "code inspection + test: no duplicated transition logic outside core"},
-    {"id": "R-008", "section": "§2.5", "requirement": "Agent invocations use structured argument arrays with shell:false.", "type": "security", "milestone": "M0", "verification": "test: spawned argv is an array and shell option is false"},
-    {"id": "R-009", "section": "§2.5", "requirement": "The supported OpenCode profiles do not grant the agent shell execution.", "type": "security", "milestone": "M0", "verification": "test: generated profile config denies shell execution"},
-    {"id": "R-010", "section": "§2.6", "requirement": "The workflow never silently installs agent-selected packages, tools, plugins, or other executable software during normal execution.", "type": "security", "milestone": "M0", "verification": "test: no install/lifecycle commands reachable from agent-controlled stages"},
-    {"id": "R-011", "section": "§2.7", "requirement": "Successful model output never becomes an unrestricted git push path; publishing is an explicitly gated, validated, protected operation.", "type": "security", "milestone": "M0", "verification": "test: push reachable only via approved publisher path"},
-    {"id": "R-012", "section": "§3.1", "requirement": "Canonical WorkflowState enum contains exactly the 20 listed states with the listed string values.", "type": "behavior", "milestone": "M1", "verification": "test: enum value set equals PRD §3.1 list"},
-    {"id": "R-013", "section": "§3.2", "requirement": "Canonical WorkflowEvent union is exactly advance, request_fix, complete_fix, fail, approve_plan, approve_push.", "type": "behavior", "milestone": "M1", "verification": "test: event union equality"},
-    {"id": "R-014", "section": "§3.3", "requirement": "A fixer invocation records its origin and may return only to Plan Review, Code Review, Scope Review, Static Verification, Test Verification, Runtime Verification, or Security Review.", "type": "behavior", "milestone": "M1", "verification": "test: invalid fix-return targets rejected"},
-    {"id": "R-015", "section": "§3.4", "requirement": "The success path follows exactly Draft → Grilling → … → Complete in the listed order.", "type": "behavior", "milestone": "M1", "verification": "test: legal happy-path transition sequence"},
-    {"id": "R-016", "section": "§3.5", "requirement": "A stage that fails validation or verification may route to Fixing.", "type": "behavior", "milestone": "M1", "verification": "test: failing review/verification stage enters Fixing"},
-    {"id": "R-017", "section": "§3.5", "requirement": "After fixing, the workflow returns to the recorded stage origin and fresh verification is required.", "type": "behavior", "milestone": "M1", "verification": "test: complete_fix returns to origin; old evidence not accepted afterwards"},
-    {"id": "R-018", "section": "§3.5", "requirement": "Unrecoverable errors enter Failed.", "type": "behavior", "milestone": "M1", "verification": "test: unrecoverable failure transitions to Failed"},
-    {"id": "R-019", "section": "§3.6", "requirement": "Complete and Failed are terminal states with no outgoing transitions.", "type": "behavior", "milestone": "M1", "verification": "test: transitions out of terminal states rejected"},
-    {"id": "R-020", "section": "§3.6", "requirement": "No successful final summary may bypass the final gate or push approval requirements.", "type": "behavior", "milestone": "M1", "verification": "test: FinalSummary stage unreachable unless FinalGate passed"},
-    {"id": "R-021", "section": "§4.1", "requirement": "AcceptanceCriterion contract: id, description, verification.", "type": "behavior", "milestone": "M1", "verification": "code inspection / type test"},
-    {"id": "R-022", "section": "§4.1", "requirement": "Every meaningful requirement is expressible as a concrete acceptance criterion with a corresponding verification description.", "type": "behavior", "milestone": "M1", "verification": "code inspection: domain model + documented requirements"},
-    {"id": "R-023", "section": "§4.2", "requirement": "Requirement contract: id, title, description, acceptanceCriteria.", "type": "behavior", "milestone": "M1", "verification": "code inspection / type test"},
-    {"id": "R-024", "section": "§4.3", "requirement": "PlanStep contract: id, description, requirementIds, expectedFiles, verification; plan steps must connect to requirements and expected repository changes.", "type": "behavior", "milestone": "M1", "verification": "type test + test: plan validation rejects unlinked steps"},
-    {"id": "R-025", "section": "§4.4", "requirement": "Plan contract: featureId, summary, steps.", "type": "behavior", "milestone": "M1", "verification": "code inspection / type test"},
-    {"id": "R-026", "section": "§4.5", "requirement": "ReviewFinding contract: featureId, severity info|warning|error, message, optional filePath and line.", "type": "behavior", "milestone": "M1", "verification": "code inspection / type test"},
-    {"id": "R-027", "section": "§4.6", "requirement": "VerificationEvidence contract: kind static|test|runtime|security, description, optional reference.", "type": "behavior", "milestone": "M1", "verification": "code inspection / type test"},
-    {"id": "R-028", "section": "§4.7", "requirement": "VerificationResult contract: requirementId, acceptanceCriterionId, status passed|failed|inconclusive, evidence list.", "type": "behavior", "milestone": "M1", "verification": "code inspection / type test"},
-    {"id": "R-029", "section": "§4.7", "requirement": "An inconclusive verification result must never be silently treated as success.", "type": "security", "milestone": "M1", "verification": "test: inconclusive blocks gate advancement"},
-    {"id": "R-030", "section": "§4.8", "requirement": "Feature contract: id, title, description, state, requirements, optional plan.", "type": "behavior", "milestone": "M1", "verification": "code inspection / type test"},
-    {"id": "R-031", "section": "§5", "requirement": "Repository defines Agent Workflow Kit as a reusable coding-agent workflow harness.", "type": "documentation", "milestone": "M0", "verification": "code inspection: README/docs wording"},
-    {"id": "R-032", "section": "§5", "requirement": "Core-first, adapter-based architecture is established (core independent of agent vendors).", "type": "behavior", "milestone": "M0", "verification": "code inspection: package structure"},
-    {"id": "R-033", "section": "§5", "requirement": "Tests are established as part of every milestone.", "type": "process", "milestone": "M0", "verification": "process: CI runs test suites per milestone/package"},
-    {"id": "R-034", "section": "§6", "requirement": "Only legal state transitions are enforced and accepted.", "type": "behavior", "milestone": "M1", "verification": "test: each legal transition succeeds"},
-    {"id": "R-035", "section": "§6", "requirement": "Invalid transitions are rejected.", "type": "behavior", "milestone": "M1", "verification": "test: illegal state/event pairs rejected"},
-    {"id": "R-036", "section": "§6", "requirement": "Explicit failure transitions exist.", "type": "behavior", "milestone": "M1", "verification": "test: fail event defined for relevant stages"},
-    {"id": "R-037", "section": "§6", "requirement": "Explicit fixer entry (request_fix) and fix completion (complete_fix) transitions exist.", "type": "behavior", "milestone": "M1", "verification": "test"},
-    {"id": "R-038", "section": "§6", "requirement": "A plan approval transition exists.", "type": "behavior", "milestone": "M1", "verification": "test: approve_plan from AwaitingPlanApproval → Implementing"},
-    {"id": "R-039", "section": "§6", "requirement": "A push approval transition exists.", "type": "behavior", "milestone": "M1", "verification": "test: approve_push from AwaitingPushApproval → Committing"},
-    {"id": "R-040", "section": "§6", "requirement": "State transitions are deterministic and never depend on an agent's claimed state.", "type": "behavior", "milestone": "M1", "verification": "test: agent-claimed state cannot alter machine state"},
-    {"id": "R-041", "section": "§7 (M2.1)", "requirement": "WorkflowMachineSnapshot carries state and optional fixReturnState.", "type": "behavior", "milestone": "M2", "verification": "code inspection / type test"},
-    {"id": "R-042", "section": "§7", "requirement": "The state machine can be constructed from a valid snapshot.", "type": "behavior", "milestone": "M2", "verification": "test"},
-    {"id": "R-043", "section": "§7", "requirement": "Workflow state is restored after process restart.", "type": "behavior", "milestone": "M2", "verification": "test: persist → new machine → identical state"},
-    {"id": "R-044", "section": "§7", "requirement": "A snapshot in state Fixing must carry a valid fixReturnState.", "type": "security", "milestone": "M2", "verification": "test: Fixing without valid origin rejected"},
-    {"id": "R-045", "section": "§7", "requirement": "Stale fixReturnState data is rejected when the state is not Fixing.", "type": "behavior", "milestone": "M2", "verification": "test"},
-    {"id": "R-046", "section": "§7", "requirement": "State/event combinations are tested comprehensively, including invalid combinations.", "type": "process", "milestone": "M2", "verification": "process: exhaustive transition-matrix test exists"},
-    {"id": "R-047", "section": "§8", "requirement": "Persistence is a dedicated adapter/package separate from the core.", "type": "behavior", "milestone": "M3", "verification": "code inspection"},
-    {"id": "R-048", "section": "§8", "requirement": "Durable session storage is provided.", "type": "behavior", "milestone": "M3", "verification": "test"},
-    {"id": "R-049", "section": "§8", "requirement": "Artifact storage exists for every workflow stage: request, grill, specification, plan, plan-review, implementation, code-review, scope-review, verification, security-review, final-summary, fixer/history.", "type": "behavior", "milestone": "M3", "verification": "test: artifact written and read back per stage"},
-    {"id": "R-050", "section": "§8", "requirement": "Persistence is revision-aware.", "type": "behavior", "milestone": "M3", "verification": "test: writes carry/validate a revision"},
-    {"id": "R-051", "section": "§8", "requirement": "Persistence mutations are atomic with rollback behavior.", "type": "behavior", "milestone": "M3", "verification": "test: failed write leaves prior state intact"},
-    {"id": "R-052", "section": "§8", "requirement": "Partially created artifacts are cleaned up.", "type": "behavior", "milestone": "M3", "verification": "test: interrupted write cleaned on next open"},
-    {"id": "R-053", "section": "§8", "requirement": "Persistence enforces path safety (traversal-resistant paths).", "type": "security", "milestone": "M3", "verification": "test: ../ and absolute-path identifiers rejected"},
-    {"id": "R-054", "section": "§8", "requirement": "Persistence performs symlink-aware safety checks.", "type": "security", "milestone": "M3", "verification": "test: symlinked artifact target rejected/handled safely"},
-    {"id": "R-055", "section": "§8", "requirement": "Concurrency locking protects persistence.", "type": "behavior", "milestone": "M3", "verification": "test: concurrent writers serialized"},
-    {"id": "R-056", "section": "§8", "requirement": "Stale locks are reclaimed only under explicit safe rules.", "type": "behavior", "milestone": "M3", "verification": "test: reclaim allowed only with matching owner metadata/expiry"},
-    {"id": "R-057", "section": "§8", "requirement": "Feature/session isolation prevents cross-feature/session data access.", "type": "security", "milestone": "M3", "verification": "test: session A cannot read session B artifacts"},
-    {"id": "R-058", "section": "§8", "requirement": "Persistence validates artifacts on read.", "type": "behavior", "milestone": "M3", "verification": "test: malformed artifact rejected on read"},
-    {"id": "R-059", "section": "§8", "requirement": "The core package remains filesystem-independent; storage concerns belong in adapters.", "type": "behavior", "milestone": "M3", "verification": "code inspection: no fs usage in core"},
-    {"id": "R-060", "section": "§9", "requirement": "A generic StageExecutor abstraction coordinates stages without embedding vendor-specific agent implementations.", "type": "behavior", "milestone": "M4", "verification": "code inspection"},
-    {"id": "R-061", "section": "§9", "requirement": "Stage execution request/result contracts are defined.", "type": "behavior", "milestone": "M4", "verification": "code inspection / type test"},
-    {"id": "R-062", "section": "§9", "requirement": "Context routed between stages is restricted.", "type": "behavior", "milestone": "M4", "verification": "test: stage receives only permitted context"},
-    {"id": "R-063", "section": "§9", "requirement": "No vendor imports exist in core orchestration.", "type": "security", "milestone": "M4", "verification": "code inspection: import graph"},
-    {"id": "R-064", "section": "§9", "requirement": "Optimistic/CAS revision checks use expected revision values.", "type": "behavior", "milestone": "M4", "verification": "test: mismatched revision aborts write/execution"},
-    {"id": "R-065", "section": "§9", "requirement": "Stale stage execution is prevented.", "type": "behavior", "milestone": "M4", "verification": "test: stage run against outdated revision is rejected"},
-    {"id": "R-066", "section": "§9", "requirement": "Plan approval is bound to a plan digest/hash.", "type": "security", "milestone": "M4", "verification": "test: approval references plan hash; changed plan invalidates approval"},
-    {"id": "R-067", "section": "§9", "requirement": "Fix history is tracked.", "type": "behavior", "milestone": "M4", "verification": "test: fix events recorded"},
-    {"id": "R-068", "section": "§9", "requirement": "Failed stages route deterministically into the fixer.", "type": "behavior", "milestone": "M4", "verification": "test: routing is a pure function of stage + failure"},
-    {"id": "R-069", "section": "§9", "requirement": "Explicit return-to-origin behavior after fixing.", "type": "behavior", "milestone": "M4", "verification": "test"},
-    {"id": "R-070", "section": "§9", "requirement": "Workflow locks record owner token, PID, hostname, and creation time.", "type": "behavior", "milestone": "M4", "verification": "test: lock metadata fields present"},
-    {"id": "R-071", "section": "§9", "requirement": "Lock reclaim follows safe rules only.", "type": "behavior", "milestone": "M4", "verification": "test: unsafe reclaim attempts refused"},
-    {"id": "R-072", "section": "§9", "requirement": "Persisted workflow recovers after process interruption.", "type": "behavior", "milestone": "M4", "verification": "test: interrupt mid-run → resume from persisted state"},
-    {"id": "R-073", "section": "§10.1", "requirement": "OpenCode-specific behavior is contained in the adapter package and does not leak into the workflow core.", "type": "behavior", "milestone": "M5", "verification": "code inspection"},
-    {"id": "R-074", "section": "§10.2", "requirement": "Invocation form is equivalent to: opencode run --standalone --agent <agent> --format <default|json> [--model] [prompt].", "type": "behavior", "milestone": "M5", "verification": "test: assert spawned argv shape"},
-    {"id": "R-075", "section": "§10.2", "requirement": "The OpenCode process runs with the intended repository working directory.", "type": "behavior", "milestone": "M5", "verification": "test: assert child cwd option"},
-    {"id": "R-076", "section": "§10.2", "requirement": "The implementation does not rely on unnecessary --dir or --pure behavior.", "type": "behavior", "milestone": "M5", "verification": "code inspection: argv contains neither flag absent demonstrated need"},
-    {"id": "R-077", "section": "§10.3", "requirement": "NDJSON/event-stream parsing of agent output.", "type": "behavior", "milestone": "M5", "verification": "test: parser fixtures"},
-    {"id": "R-078", "section": "§10.3", "requirement": "Structured process transport (no shell strings).", "type": "behavior", "milestone": "M5", "verification": "code inspection"},
-    {"id": "R-079", "section": "§10.3", "requirement": "Process output handling is bounded.", "type": "behavior", "milestone": "M5", "verification": "test: oversized stream truncated/capped"},
-    {"id": "R-080", "section": "§10.3", "requirement": "Adapter failures get explicit error classification.", "type": "behavior", "milestone": "M5", "verification": "test: error taxonomy distinguishes classes"},
-    {"id": "R-081", "section": "§10.3", "requirement": "Useful version/capability discovery is available.", "type": "behavior", "milestone": "M5", "verification": "test: probe returns version + capabilities"},
-    {"id": "R-082", "section": "§10.3", "requirement": "Response parsing never allows model output to control workflow state.", "type": "security", "milestone": "M5", "verification": "test: state-changing fields in output are ignored"},
-    {"id": "R-083", "section": "§10.4", "requirement": "OpenCode capabilities are detected and recorded rather than blindly assumed.", "type": "behavior", "milestone": "M5", "verification": "test: probe result recorded; unknown capability flagged"},
-    {"id": "R-084", "section": "§10.5", "requirement": "Exactly two physical permission profiles exist: agentflow-read and agentflow-write; logical roles map onto them.", "type": "behavior", "milestone": "M5", "verification": "test: generated config defines exactly these two profiles"},
-    {"id": "R-085", "section": "§10.5", "requirement": "Read profile: may inspect the project; cannot edit files, use shell execution, or escalate to subagents.", "type": "security", "milestone": "M5", "verification": "test: profile permission assertions"},
-    {"id": "R-086", "section": "§10.5", "requirement": "Write profile: may make required file edits; cannot use arbitrary shell execution or subagents; external/tool restrictions remain enforced.", "type": "security", "milestone": "M5", "verification": "test: profile permission assertions"},
-    {"id": "R-087", "section": "§10.5", "requirement": "Every invocation explicitly selects the intended physical profile.", "type": "behavior", "milestone": "M5", "verification": "test: --agent always set from stage definition"},
-    {"id": "R-088", "section": "§10.6", "requirement": "Control-plane runtime config lives at <tempdir>/agent-workflow-kit/opencode-<sha256(repo-path)>/ and contains generated agent/agentflow-read.md, agent/agentflow-write.md, and opencode.json.", "type": "behavior", "milestone": "M5", "verification": "test: deterministic path derivation + exact file set"},
-    {"id": "R-089", "section": "§10.6", "requirement": "The target repository is not required to contain framework-generated OpenCode profiles.", "type": "behavior", "milestone": "M5", "verification": "test: run succeeds in a repo without profile files"},
-    {"id": "R-090", "section": "§10.6", "requirement": "The framework-controlled OPENCODE_CONFIG_DIR is forced after environment sanitization.", "type": "security", "milestone": "M5", "verification": "test: repo-injected env value is discarded"},
-    {"id": "R-091", "section": "§10.6", "requirement": "Unsafe environment/configuration boundaries are rejected.", "type": "security", "milestone": "M5", "verification": "test: boundary-violation fixtures rejected"},
-    {"id": "R-092", "section": "§10.6; §28.2", "requirement": "Repository-defined OpenCode profile shadowing is prevented.", "type": "security", "milestone": "M5", "verification": "test: repo-level profile files ignored/blocked"},
-    {"id": "R-093", "section": "§10.6; §28.2", "requirement": "Repository configuration cannot override framework control-plane boundaries.", "type": "security", "milestone": "M5", "verification": "test: repo opencode.json cannot alter control-plane settings"},
-    {"id": "R-094", "section": "§10.6", "requirement": "Repository plugin locations are preflighted before execution.", "type": "behavior", "milestone": "M5", "verification": "test"},
-    {"id": "R-095", "section": "§10.6", "requirement": "Unsafe repository plugin/configuration behavior is refused.", "type": "security", "milestone": "M5", "verification": "test"},
-    {"id": "R-096", "section": "§10.7", "requirement": "Plugin preflight inspects .opencode/plugin, .opencode/plugins, plugin, and plugins.", "type": "behavior", "milestone": "M5", "verification": "test: all four locations checked"},
-    {"id": "R-097", "section": "§10.7", "requirement": "Safe empty/text-only plugin directories are permitted; executable repository-controlled plugin code is rejected or blocked according to installed policy.", "type": "security", "milestone": "M5", "verification": "test: benign dir passes; executable plugin blocked"},
-    {"id": "R-098", "section": "§10.8; §28.3", "requirement": "Agent output is parsed through a constrained structured protocol; smuggling of workflow-control fields or state transitions into ordinary responses is rejected.", "type": "security", "milestone": "M5", "verification": "test: injected control fields rejected"},
-    {"id": "R-099", "section": "§10.8", "requirement": "The adapter does not approve stages and does not decide workflow transitions.", "type": "security", "milestone": "M5", "verification": "code inspection + test"},
-    {"id": "R-100", "section": "§11.1", "requirement": "Repositories use a versioned verification configuration file (agent-workflow.config.json) with schema versioning and explicit verification configuration.", "type": "behavior", "milestone": "M6", "verification": "test: schema validation including version field"},
-    {"id": "R-101", "section": "§11.2", "requirement": "Verification supports the project's declared package manager from pnpm, npm, yarn, and bun.", "type": "behavior", "milestone": "M6", "verification": "test: fixture per package manager"},
-    {"id": "R-102", "section": "§11.3", "requirement": "Verification commands use structured argv.", "type": "behavior", "milestone": "M6", "verification": "test"},
-    {"id": "R-103", "section": "§11.3", "requirement": "Verification commands run with shell:false and no direct shell-string interpolation.", "type": "security", "milestone": "M6", "verification": "test + code inspection"},
-    {"id": "R-104", "section": "§11.3", "requirement": "Verification output capture is bounded.", "type": "behavior", "milestone": "M6", "verification": "test"},
-    {"id": "R-105", "section": "§11.3", "requirement": "Verification commands have explicit timeout limits.", "type": "behavior", "milestone": "M6", "verification": "test: timeout enforced"},
-    {"id": "R-106", "section": "§11.3", "requirement": "Verification supports cancellation via AbortSignal where applicable.", "type": "behavior", "milestone": "M6", "verification": "code inspection + test"},
-    {"id": "R-107", "section": "§11.3", "requirement": "Arbitrary mutating/install lifecycle behavior is rejected as part of the verification policy.", "type": "security", "milestone": "M6", "verification": "test: install/script hooks blocked"},
-    {"id": "R-108", "section": "§11.3", "requirement": "The repository cannot redefine framework control behavior through unsafe command selection.", "type": "security", "milestone": "M6", "verification": "test: dangerous command forms rejected"},
-    {"id": "R-109", "section": "§11.4", "requirement": "Static verification runs the configured deterministic static checks (typecheck, lint, build/static analysis) as allowed by configuration.", "type": "behavior", "milestone": "M6", "verification": "test: fixture run captures results"},
-    {"id": "R-110", "section": "§11.5", "requirement": "Test verification runs configured deterministic tests capturing exit status, bounded output, and evidence metadata.", "type": "behavior", "milestone": "M6", "verification": "test"},
-    {"id": "R-111", "section": "§11.6", "requirement": "Verification evidence is bound to the workflow session/revision and a SHA-256 fingerprint of the relevant working tree.", "type": "security", "milestone": "M6", "verification": "test: evidence carries both bindings"},
-    {"id": "R-112", "section": "§11.6", "requirement": "Evidence must not be reused as proof after the repository has changed.", "type": "security", "milestone": "M6", "verification": "test: stale-fingerprint evidence rejected"},
-    {"id": "R-113", "section": "§11.7", "requirement": "The working-tree fingerprint ignores .agentflow, .git, caches, .opencode, .next, build, coverage, dist, node_modules, target, and venv.", "type": "behavior", "milestone": "M6", "verification": "test: changes under ignored dirs do not alter fingerprint"},
-    {"id": "R-114", "section": "§11.8", "requirement": "A failed or inconclusive check cannot be promoted to success merely because the agent claims success.", "type": "security", "milestone": "M6", "verification": "test"},
-    {"id": "R-115", "section": "§11.9", "requirement": "Repository-controlled verification commands do not inherit the operator's full host environment by default; a minimal allowlist environment policy is used.", "type": "security", "milestone": "M6", "verification": "test: subprocess env equals allowlisted set"},
-    {"id": "R-116", "section": "§11.9", "requirement": "Credential-bearing host variables (cloud/API credentials, tokens, signing secrets, unrelated operator secrets) are not passed into verification processes by default.", "type": "security", "milestone": "M6", "verification": "test: seeded secret absent from child env"},
-    {"id": "R-117", "section": "§11.9", "requirement": "Environment sanitization applies to both normal verification and runtime verification subprocesses.", "type": "security", "milestone": "M6", "verification": "test: both paths sanitized"},
-    {"id": "R-118", "section": "§12", "requirement": "M6 capabilities are preserved via regression tests: package-manager/framework discovery, bounded subprocess execution, evidence revision/fingerprint binding, and dangerous lifecycle/install rejection.", "type": "process", "milestone": "M6.1", "verification": "process: regression suite exists and passes"},
-    {"id": "R-119", "section": "§12", "requirement": "Deterministic configuration validation is improved.", "type": "behavior", "milestone": "M6.1", "verification": "test: invalid config cases rejected with diagnostics"},
-    {"id": "R-120", "section": "§12", "requirement": "File/path safety is strengthened.", "type": "security", "milestone": "M6.1", "verification": "test: path-attack fixtures"},
-    {"id": "R-121", "section": "§12", "requirement": "Explicit handling of missing configuration is preserved (no silent defaults for critical settings).", "type": "behavior", "milestone": "M6.1", "verification": "test: missing config yields explicit error"},
-    {"id": "R-122", "section": "§12", "requirement": "Verification failures are diagnosable and routeable to fixing.", "type": "behavior", "milestone": "M6.1", "verification": "test: failure yields actionable evidence and fixer routing"},
-    {"id": "R-123", "section": "§12", "requirement": "Regression tests and fixture coverage are preserved.", "type": "process", "milestone": "M6.1", "verification": "process"},
-    {"id": "R-124", "section": "§13.1", "requirement": "A workspace provider abstracts creation/opening/closing/management of isolated development workspaces.", "type": "behavior", "milestone": "M7", "verification": "code inspection"},
-    {"id": "R-125", "section": "§13.2", "requirement": "Implementation/publishing operate in a controlled Git worktree/workspace, not by blindly mutating the user's main checkout.", "type": "behavior", "milestone": "M7", "verification": "test: main checkout untouched during run"},
-    {"id": "R-126", "section": "§13.3", "requirement": "Workspace leases identify ownership and prevent conflicting concurrent workflow operations.", "type": "behavior", "milestone": "M7", "verification": "test: second workflow blocked while lease held"},
-    {"id": "R-127", "section": "§13.3", "requirement": "Lease metadata includes owner/process/time context enabling safe stale-state recovery.", "type": "behavior", "milestone": "M7", "verification": "test: metadata fields present"},
-    {"id": "R-128", "section": "§13.4", "requirement": "Workspace state may use a framework-controlled sidecar so workflow metadata does not pollute source directories.", "type": "behavior", "milestone": "M7", "verification": "test: metadata location outside source tree"},
-    {"id": "R-129", "section": "§13.5", "requirement": "Changes are constrained to the approved repository/workspace scope.", "type": "security", "milestone": "M7", "verification": "test: out-of-scope edits detected"},
-    {"id": "R-130", "section": "§13.5", "requirement": "Inappropriate repository/root/workspace mismatches are detected and rejected.", "type": "security", "milestone": "M7", "verification": "test"},
-    {"id": "R-131", "section": "§13.6", "requirement": "An approved baseline is captured and later compared to the repository/workspace under execution.", "type": "behavior", "milestone": "M7", "verification": "test"},
-    {"id": "R-132", "section": "§13.6", "requirement": "The workflow refuses to continue when the baseline cannot be trusted.", "type": "security", "milestone": "M7", "verification": "test: corrupted baseline aborts"},
-    {"id": "R-133", "section": "§13.7", "requirement": "The physical OpenCode execution surface stays collapsed to two profiles while logical stage roles are retained.", "type": "behavior", "milestone": "M7", "verification": "test (duplicate of §10.5 / R-084)"},
-    {"id": "R-134", "section": "§13.8", "requirement": "The external OpenCode runtime config directory is derived deterministically from repository identity/path and created safely.", "type": "behavior", "milestone": "M7", "verification": "test: deterministic path (duplicate of §10.6 / R-088)"},
-    {"id": "R-135", "section": "§14.1", "requirement": "Runtime verification uses explicitly declared project runtime configuration.", "type": "behavior", "milestone": "M8", "verification": "test"},
-    {"id": "R-136", "section": "§14.1", "requirement": "The framework never guesses ports, scripts, routes, health endpoints, or startup commands.", "type": "security", "milestone": "M8", "verification": "test: absent config → no inferred execution"},
-    {"id": "R-137", "section": "§14.2", "requirement": "Runtime processes launch through the existing bounded process runner.", "type": "behavior", "milestone": "M8", "verification": "code inspection"},
-    {"id": "R-138", "section": "§14.2", "requirement": "Runtime execution uses shell:false, controlled argv, bounded output, explicit timeout, cancellation/termination support, and proper cleanup.", "type": "security", "milestone": "M8", "verification": "test"},
-    {"id": "R-139", "section": "§14.3", "requirement": "On supported POSIX systems the runtime process uses process-group-aware cleanup so child processes are not left running.", "type": "behavior", "milestone": "M8", "verification": "test: server spawning children leaves no orphans"},
-    {"id": "R-140", "section": "§14.4", "requirement": "Readiness and acceptance are separate concepts; a process becoming available is not itself proof the feature works.", "type": "behavior", "milestone": "M8", "verification": "test: ready server failing acceptance → stage fails"},
-    {"id": "R-141", "section": "§14.5", "requirement": "HTTP acceptance uses the explicitly configured URL/route.", "type": "behavior", "milestone": "M8", "verification": "test"},
-    {"id": "R-142", "section": "§14.5", "requirement": "HTTP acceptance does not silently follow redirects.", "type": "security", "milestone": "M8", "verification": "test: redirect response is not followed/reported"},
-    {"id": "R-143", "section": "§14.5", "requirement": "HTTP response size/body capture is bounded.", "type": "behavior", "milestone": "M8", "verification": "test"},
-    {"id": "R-144", "section": "§14.5", "requirement": "Deterministic result evidence is recorded for runtime verification.", "type": "behavior", "milestone": "M8", "verification": "test"},
-    {"id": "R-145", "section": "§14.5", "requirement": "Connection/readiness errors are distinguished from acceptance failures.", "type": "behavior", "milestone": "M8", "verification": "test: two failure classes reported distinctly"},
-    {"id": "R-146", "section": "§14.6", "requirement": "Missing runtime configuration produces a deferred/inconclusive outcome, never a false success.", "type": "security", "milestone": "M8", "verification": "test"},
-    {"id": "R-147", "section": "§14.6", "requirement": "The resulting workflow state makes the runtime limitation explicit and routes according to policy.", "type": "behavior", "milestone": "M8", "verification": "test"},
-    {"id": "R-148", "section": "§14.7", "requirement": "Runtime acceptance failure routes through the bounded fixer and then performs fresh verification.", "type": "behavior", "milestone": "M8", "verification": "test"},
-    {"id": "R-149", "section": "§14.8", "requirement": "A runtime verification result refers to the current revision/fingerprint and cannot satisfy a later gate after the source changes.", "type": "security", "milestone": "M8", "verification": "test: mutate source → old runtime evidence rejected"},
-    {"id": "R-150", "section": "§14.9", "requirement": "A disposable fixture application/test path proves the runtime verifier works end to end; browser automation is not part of this requirement.", "type": "behavior", "milestone": "M8", "verification": "test: fixture suite"},
-    {"id": "R-151", "section": "§15", "requirement": "The number of fix attempts is bounded.", "type": "behavior", "milestone": "M9", "verification": "test: attempt N+1 refused"},
-    {"id": "R-152", "section": "§15", "requirement": "Fixer routing is deterministic.", "type": "behavior", "milestone": "M9", "verification": "test"},
-    {"id": "R-153", "section": "§15", "requirement": "Original requirements are immutable during fixing.", "type": "security", "milestone": "M9", "verification": "test: requirement mutation attempt rejected"},
-    {"id": "R-154", "section": "§15", "requirement": "Acceptance criteria are immutable during fixing.", "type": "security", "milestone": "M9", "verification": "test"},
-    {"id": "R-155", "section": "§15", "requirement": "Verification configuration is immutable during fixing.", "type": "security", "milestone": "M9", "verification": "test"},
-    {"id": "R-156", "section": "§15", "requirement": "Framework configuration/files are protected from modification.", "type": "security", "milestone": "M9", "verification": "test"},
-    {"id": "R-157", "section": "§15", "requirement": "Anti-cheating checks are active during fixing.", "type": "security", "milestone": "M9", "verification": "test: cheat-pattern fixtures flagged"},
-    {"id": "R-158", "section": "§15", "requirement": "Changing verification rules merely to obtain a pass is prevented.", "type": "security", "milestone": "M9", "verification": "test"},
-    {"id": "R-159", "section": "§15", "requirement": "Changing protected configuration to bypass gates is prevented.", "type": "security", "milestone": "M9", "verification": "test"},
-    {"id": "R-160", "section": "§15", "requirement": "Fresh verification runs after each relevant mutation.", "type": "behavior", "milestone": "M9", "verification": "test"},
-    {"id": "R-161", "section": "§15", "requirement": "FixReturnState behavior is preserved through fixing.", "type": "behavior", "milestone": "M9", "verification": "test"},
-    {"id": "R-162", "section": "§15", "requirement": "Fixer history and evidence are recorded.", "type": "behavior", "milestone": "M9", "verification": "test"},
-    {"id": "R-163", "section": "§15", "requirement": "Exhausted fix attempts produce a clear failure.", "type": "behavior", "milestone": "M9", "verification": "test"},
-    {"id": "R-164", "section": "§15", "requirement": "Focused tests exist for every important fixer protection.", "type": "process", "milestone": "M9", "verification": "process: test inventory per protection"},
-    {"id": "R-165", "section": "§16", "requirement": "A deterministic security gate exists as a dedicated workflow stage before the final gate.", "type": "security", "milestone": "M10", "verification": "test"},
-    {"id": "R-166", "section": "§16", "requirement": "Security-related configuration is protected.", "type": "security", "milestone": "M10", "verification": "test"},
-    {"id": "R-167", "section": "§16", "requirement": "Security review produces a security-review artifact.", "type": "behavior", "milestone": "M10", "verification": "test"},
-    {"id": "R-168", "section": "§16", "requirement": "The security stage integrates with the bounded fixer path.", "type": "behavior", "milestone": "M10", "verification": "test"},
-    {"id": "R-169", "section": "§16", "requirement": "Security review evidence is freshly bound to the current tree.", "type": "security", "milestone": "M10", "verification": "test"},
-    {"id": "R-170", "section": "§16", "requirement": "Security-specific validation runs in addition to ordinary checks.", "type": "behavior", "milestone": "M10", "verification": "test"},
-    {"id": "R-171", "section": "§16", "requirement": "Passing ordinary tests does not equal passing security review.", "type": "security", "milestone": "M10", "verification": "test: green tests + failing security gate blocks flow"},
-    {"id": "R-172", "section": "§16", "requirement": "A security failure routes through the bounded fixer and returns to security verification with fresh evidence.", "type": "behavior", "milestone": "M10", "verification": "test"},
-    {"id": "R-173", "section": "§16", "requirement": "Any fixer mutation that can affect security-relevant behavior invalidates prior security-review evidence/verdicts so security review is re-armed over the post-fix tree.", "type": "security", "milestone": "M10", "verification": "test: fix touching security-sensitive file → prior verdict void"},
-    {"id": "R-174", "section": "§16", "requirement": "Tests cover security failure and recovery behavior.", "type": "process", "milestone": "M10", "verification": "process"},
-    {"id": "R-175", "section": "§17", "requirement": "FinalGate requires all required workflow stages completed.", "type": "behavior", "milestone": "M11", "verification": "test"},
-    {"id": "R-176", "section": "§17", "requirement": "FinalGate requires all required acceptance criteria passed.", "type": "behavior", "milestone": "M11", "verification": "test"},
-    {"id": "R-177", "section": "§17", "requirement": "FinalGate requires fresh deterministic verification evidence.", "type": "security", "milestone": "M11", "verification": "test: stale evidence fails the gate"},
-    {"id": "R-178", "section": "§17", "requirement": "FinalGate requires valid scope/workspace state.", "type": "behavior", "milestone": "M11", "verification": "test"},
-    {"id": "R-179", "section": "§17", "requirement": "FinalGate requires the security gate passed.", "type": "security", "milestone": "M11", "verification": "test"},
-    {"id": "R-180", "section": "§17", "requirement": "FinalGate requires fixer state resolved.", "type": "behavior", "milestone": "M11", "verification": "test"},
-    {"id": "R-181", "section": "§17", "requirement": "FinalGate requires approval records valid and current.", "type": "security", "milestone": "M11", "verification": "test"},
-    {"id": "R-182", "section": "§17", "requirement": "FinalGate inputs are tied to the exact revision/fingerprint.", "type": "security", "milestone": "M11", "verification": "test"},
-    {"id": "R-183", "section": "§17", "requirement": "FinalGate requires no unresolved blocking failure.", "type": "behavior", "milestone": "M11", "verification": "test"},
-    {"id": "R-184", "section": "§17", "requirement": "The final summary cannot bypass FinalGate.", "type": "security", "milestone": "M11", "verification": "test"},
-    {"id": "R-185", "section": "§17", "requirement": "FinalGate failure routes to the correct failure/fixer state rather than silently succeeding.", "type": "behavior", "milestone": "M11", "verification": "test"},
-    {"id": "R-186", "section": "§18.1", "requirement": "FinalSummary is read-only.", "type": "behavior", "milestone": "M12", "verification": "test: no mutation APIs or side effects"},
-    {"id": "R-187", "section": "§18.1", "requirement": "FinalSummary contains: what was requested, implemented requirements, changed files/areas, verification results, security status, notable failures/fixes, resulting revision/fingerprint, final-gate status, and publishing readiness.", "type": "behavior", "milestone": "M12", "verification": "test: all fields present"},
-    {"id": "R-188", "section": "§18.2", "requirement": "After FinalSummary the workflow enters AwaitingPushApproval.", "type": "behavior", "milestone": "M12", "verification": "test"},
-    {"id": "R-189", "section": "§18.2", "requirement": "No branch/commit/push operation may begin before explicit human approval.", "type": "security", "milestone": "M12", "verification": "test"},
-    {"id": "R-190", "section": "§18.3", "requirement": "Push approval is bound to feature identity, workflow revision, summary digest/hash, working-tree fingerprint, and final-gate status/digest/fingerprint.", "type": "security", "milestone": "M12", "verification": "test: approval payload contains all bindings"},
-    {"id": "R-191", "section": "§18.3", "requirement": "A stale or modified summary invalidates the approval.", "type": "security", "milestone": "M12", "verification": "test"},
-    {"id": "R-192", "section": "§18.3", "requirement": "A modified working tree invalidates the approval.", "type": "security", "milestone": "M12", "verification": "test"},
-    {"id": "R-193", "section": "§19.1", "requirement": "Publishing refuses to run without a valid push approval bound to the current workflow/repository state.", "type": "security", "milestone": "M13", "verification": "test"},
-    {"id": "R-194", "section": "§19.2", "requirement": "Publishing creates/uses a dedicated feature branch rather than publishing directly to protected/default branches.", "type": "security", "milestone": "M13", "verification": "test"},
-    {"id": "R-195", "section": "§19.3", "requirement": "The publisher rejects targets main, master, and other configured protected branches.", "type": "security", "milestone": "M13", "verification": "test: each branch name rejected"},
-    {"id": "R-196", "section": "§19.4", "requirement": "Git commands use structured argv and shell:false.", "type": "security", "milestone": "M13", "verification": "test + code inspection"},
-    {"id": "R-197", "section": "§19.5", "requirement": "The Git flag firewall rejects --force, --force-with-lease*, --delete, --receive-pack*, and compound/spelling variants; no force-push route exists through the publisher.", "type": "security", "milestone": "M13", "verification": "test: each flag form rejected"},
-    {"id": "R-198", "section": "§19.6; §28.8", "requirement": "Before committing/pushing the framework revalidates approval and repository state; a changed head, fingerprint, final-gate state, or relevant approval input stops publishing.", "type": "security", "milestone": "M13", "verification": "test: each mutation aborts publish"},
-    {"id": "R-199", "section": "§19.7", "requirement": "Commit creation is deterministic enough to provide a traceable release artifact containing the approved change.", "type": "behavior", "milestone": "M13", "verification": "test: fixed dates/author/message/tree → reproducible commit; artifact records SHA"},
-    {"id": "R-200", "section": "§19.8", "requirement": "The publisher records the push outcome and relevant branch/commit information.", "type": "behavior", "milestone": "M13", "verification": "test"},
-    {"id": "R-201", "section": "§19.9", "requirement": "The workflow reaches Complete only after a successful publish operation.", "type": "behavior", "milestone": "M13", "verification": "test"},
-    {"id": "R-202", "section": "§19.9", "requirement": "A failed push is not a successful workflow completion.", "type": "behavior", "milestone": "M13", "verification": "test: push failure → non-complete state"},
-    {"id": "R-203", "section": "§19.10", "requirement": "Automated tests use a disposable/local or otherwise controlled non-production remote; no product test may push to a real production repository.", "type": "security", "milestone": "M13", "verification": "test: test remote config + code inspection"},
-    {"id": "R-204", "section": "§20.1", "requirement": "A disposable project executes the full happy-path lifecycle request → grill → spec → plan → approval → implementation → reviews → verifications → security → final gate → summary → push approval → branch → commit → push → complete.", "type": "behavior", "milestone": "M14", "verification": "test: E2E suite"},
-    {"id": "R-205", "section": "§20.2", "requirement": "Controlled failures route into the fixer and return to the correct origin with fresh evidence (E2E).", "type": "behavior", "milestone": "M14", "verification": "test"},
-    {"id": "R-206", "section": "§20.3", "requirement": "Security-stage failure is independently testable and cannot be bypassed by ordinary test/static/runtime success.", "type": "security", "milestone": "M14", "verification": "test"},
-    {"id": "R-207", "section": "§20.4", "requirement": "E2E proves implementation cannot start without plan approval.", "type": "security", "milestone": "M14", "verification": "test"},
-    {"id": "R-208", "section": "§20.4", "requirement": "E2E proves publishing cannot start without push approval.", "type": "security", "milestone": "M14", "verification": "test"},
-    {"id": "R-209", "section": "§20.4", "requirement": "E2E proves a stale approval cannot be reused.", "type": "security", "milestone": "M14", "verification": "test"},
-    {"id": "R-210", "section": "§20.4", "requirement": "E2E proves modified repository state invalidates approval/evidence.", "type": "security", "milestone": "M14", "verification": "test"},
-    {"id": "R-211", "section": "§20.4", "requirement": "E2E proves agents cannot manufacture approvals.", "type": "security", "milestone": "M14", "verification": "test"},
-    {"id": "R-212", "section": "§20.5", "requirement": "A failed branch/commit/push operation produces a failed/non-complete outcome with useful evidence.", "type": "behavior", "milestone": "M14", "verification": "test"},
-    {"id": "R-213", "section": "§20.6", "requirement": "Equivalent runs over equivalent fixture inputs produce stable workflow behavior and artifacts to the extent practical.", "type": "behavior", "milestone": "M14", "verification": "test: repeated fixture run diff (proposed scope: state sequence + artifact structure; agent text may vary — see prd-issues)"},
-    {"id": "R-214", "section": "§20.7", "requirement": "The comprehensive suite covers prior milestone behavior and critical security boundaries.", "type": "process", "milestone": "M14", "verification": "process"},
-    {"id": "R-215", "section": "§20.8; §36; §38.1", "requirement": "After M14 the core workflow is feature-frozen; future work focuses on productization/extensions.", "type": "process", "milestone": "M14", "verification": "process/manual"},
-    {"id": "R-216", "section": "§21", "requirement": "The finished source repository is installable and buildable outside its development-only monorepo context.", "type": "behavior", "milestone": "P1", "verification": "test: clean-checkout build in temp dir"},
-    {"id": "R-217", "section": "§21", "requirement": "A deterministic top-level pnpm build exists.", "type": "behavior", "milestone": "P1", "verification": "test: repeated builds stable"},
-    {"id": "R-218", "section": "§21", "requirement": "Packages build in dependency order.", "type": "behavior", "milestone": "P1", "verification": "test: build order respected"},
-    {"id": "R-219", "section": "§21", "requirement": "Intended runtime packages emit JavaScript runtime output and TypeScript declarations.", "type": "behavior", "milestone": "P1", "verification": "test: dist contains .js and .d.ts"},
-    {"id": "R-220", "section": "§21", "requirement": "Packages intended for distribution emit dist (or the final agreed build output).", "type": "behavior", "milestone": "P1", "verification": "test"},
-    {"id": "R-221", "section": "§21", "requirement": "Package main/types/exports point to built output, not raw source .ts files.", "type": "behavior", "milestone": "P1", "verification": "code inspection + test: resolve entry from built package"},
-    {"id": "R-222", "section": "§21", "requirement": "The module field is used only when actually required by the runtime/package strategy.", "type": "behavior", "milestone": "P1", "verification": "code inspection"},
-    {"id": "R-223", "section": "§21", "requirement": "Internal package dependencies resolve from compiled artifacts rather than monorepo source paths.", "type": "behavior", "milestone": "P1", "verification": "test: consume built package"},
-    {"id": "R-224", "section": "§21", "requirement": "No bundler is introduced unless necessary.", "type": "process", "milestone": "P1", "verification": "code inspection (vague — see prd-issues)"},
-    {"id": "R-225", "section": "§21", "requirement": "The existing module-system strategy is preserved.", "type": "behavior", "milestone": "P1", "verification": "code inspection"},
-    {"id": "R-226", "section": "§21", "requirement": "Generated build output is not committed and is added to .gitignore where appropriate.", "type": "process", "milestone": "P1", "verification": "code inspection: git status + .gitignore"},
-    {"id": "R-227", "section": "§21", "requirement": "A clean-checkout build succeeds.", "type": "behavior", "milestone": "P1", "verification": "test: fresh clone build"},
-    {"id": "R-228", "section": "§21", "requirement": "Compiled runtime output resolves its internal package dependencies without importing source TypeScript directly.", "type": "behavior", "milestone": "P1", "verification": "test"},
-    {"id": "R-229", "section": "§21", "requirement": "Test/typecheck/lint behavior is preserved.", "type": "behavior", "milestone": "P1", "verification": "test: existing suites pass"},
-    {"id": "R-230", "section": "§21", "requirement": "P1 adds no CLI behavior, initialization logic, npm publishing, or new workflow features.", "type": "process", "milestone": "P1", "verification": "code inspection: change scope"},
-    {"id": "R-231", "section": "§22.1", "requirement": "The CLI provides agentflow --help, --version, status, start, run, approve plan, and approve push (exact syntax may evolve; capabilities must exist).", "type": "behavior", "milestone": "P2", "verification": "test: invoke each command"},
-    {"id": "R-232", "section": "§22.2", "requirement": "The CLI is a thin layer over existing orchestration APIs; no second state machine; no hidden workflow semantics in command handling.", "type": "behavior", "milestone": "P2", "verification": "code inspection"},
-    {"id": "R-233", "section": "§22.2; §34", "requirement": "The CLI exposes useful, predictable exit codes.", "type": "behavior", "milestone": "P2", "verification": "test: exit codes per outcome class"},
-    {"id": "R-234", "section": "§22.2", "requirement": "Errors are useful and human-readable; no stack traces by default for ordinary user errors.", "type": "behavior", "milestone": "P2", "verification": "test"},
-    {"id": "R-235", "section": "§22.2", "requirement": "Version comes from package metadata.", "type": "behavior", "milestone": "P2", "verification": "test: --version matches package.json"},
-    {"id": "R-236", "section": "§22.2", "requirement": "status is read-only.", "type": "behavior", "milestone": "P2", "verification": "test: no state mutation during status"},
-    {"id": "R-237", "section": "§22.2", "requirement": "start invokes existing orchestration APIs.", "type": "behavior", "milestone": "P2", "verification": "code inspection"},
-    {"id": "R-238", "section": "§22.2", "requirement": "run must not bypass human approval gates.", "type": "security", "milestone": "P2", "verification": "test: run halts at approval states"},
-    {"id": "R-239", "section": "§22.2", "requirement": "approve plan and approve push use existing approval mechanisms.", "type": "behavior", "milestone": "P2", "verification": "code inspection + test"},
-    {"id": "R-240", "section": "§22.2", "requirement": "CLI commands work against persisted workflow state.", "type": "behavior", "milestone": "P2", "verification": "test"},
-    {"id": "R-241", "section": "§22.3", "requirement": "Fixture/mocked CLI tests cover help, version, status, start, run, plan approval, push approval, and error/exit behavior; unit tests require no live OpenCode.", "type": "process", "milestone": "P2", "verification": "process: test suite inspection"},
-    {"id": "R-242", "section": "§23.1", "requirement": "agentflow init detects the target repository and validates that it is a Git repository.", "type": "behavior", "milestone": "P3", "verification": "test: non-Git directory rejected"},
-    {"id": "R-243", "section": "§23.1", "requirement": "init creates the required .agentflow configuration/state structure.", "type": "behavior", "milestone": "P3", "verification": "test"},
-    {"id": "R-244", "section": "§23.1", "requirement": "init is safe to run repeatedly (idempotent).", "type": "behavior", "milestone": "P3", "verification": "test: double init"},
-    {"id": "R-245", "section": "§23.1", "requirement": "init preserves compatible existing configuration.", "type": "behavior", "milestone": "P3", "verification": "test: existing values kept"},
-    {"id": "R-246", "section": "§23.1", "requirement": "init avoids overwriting unrelated user files.", "type": "security", "milestone": "P3", "verification": "test"},
-    {"id": "R-247", "section": "§23.1", "requirement": "init makes no source-code changes, creates no commits, performs no pushes, and copies no workflow source into the target repository.", "type": "security", "milestone": "P3", "verification": "test: git status clean of source changes; no new commits"},
-    {"id": "R-248", "section": "§23.2", "requirement": "The initializer creates only files actually required by the implementation; .agentflow is the target project's workflow configuration/state location.", "type": "behavior", "milestone": "P3", "verification": "test: exact file-set assertion"},
-    {"id": "R-249", "section": "§23.2", "requirement": "The product does not create .opencode/ in the target repository merely to host framework profiles.", "type": "security", "milestone": "P3", "verification": "test: .opencode absent after init and run"},
-    {"id": "R-250", "section": "§23.3", "requirement": "The initialized configuration has a documented schema/version, deterministic defaults, and clear required/optional fields.", "type": "documentation", "milestone": "P3", "verification": "code inspection: docs + schema"},
-    {"id": "R-251", "section": "§23.3", "requirement": "Configuration is validated before execution.", "type": "behavior", "milestone": "P3", "verification": "test: invalid config blocks run"},
-    {"id": "R-252", "section": "§23.3", "requirement": "Compatibility behavior is defined for re-running initialization.", "type": "behavior", "milestone": "P3", "verification": "test"},
-    {"id": "R-253", "section": "§23.4", "requirement": "Fixture validation proves expected files are created and unexpected files are not created.", "type": "behavior", "milestone": "P3", "verification": "test"},
-    {"id": "R-254", "section": "§23.4", "requirement": "Fixture validation proves existing unrelated files remain unchanged and target project source files are untouched.", "type": "security", "milestone": "P3", "verification": "test: checksums"},
-    {"id": "R-255", "section": "§23.4", "requirement": "Second init is safe/idempotent (fixture-proven).", "type": "behavior", "milestone": "P3", "verification": "test"},
-    {"id": "R-256", "section": "§23.4", "requirement": "status can read the initialized state.", "type": "behavior", "milestone": "P3", "verification": "test"},
-    {"id": "R-257", "section": "§24", "requirement": "P4 E2E runs in a disposable real Git repository outside the Agent Workflow Kit repository.", "type": "process", "milestone": "P4", "verification": "process: harness setup"},
-    {"id": "R-258", "section": "§24", "requirement": "The main P4 E2E uses real OpenCode, not a fake CLI or mocked transport.", "type": "process", "milestone": "P4", "verification": "process: harness inspection"},
-    {"id": "R-259", "section": "§24", "requirement": "The E2E starts with agentflow init and executes the full feature lifecycle through successful publishing.", "type": "behavior", "milestone": "P4", "verification": "test"},
-    {"id": "R-260", "section": "§24", "requirement": "P4 proves: real invocation, real profile selection, real fixture feature, deterministic static/test/runtime/security verification, workspace isolation, runtime config isolation, profile restrictions, no arbitrary shell, verification environment restrictions, evidence freshness, approval integrity, Git publishing protections, real branch creation, real deterministic commit, safe push to disposable test remote, and Complete only after successful push.", "type": "behavior", "milestone": "P4", "verification": "test: E2E assertions per boundary"},
-    {"id": "R-261", "section": "§24", "requirement": "A controlled failure enters the fixer and then re-verifies successfully where the fixture is designed for recovery.", "type": "behavior", "milestone": "P4", "verification": "test"},
-    {"id": "R-262", "section": "§24", "requirement": "P4 documentation records exact prerequisites, OpenCode version, setup commands, workflow transitions, verification results, resulting branch, resulting commit, and push result.", "type": "documentation", "milestone": "P4", "verification": "code inspection: report doc"},
-    {"id": "R-263", "section": "§24", "requirement": "No new workflow feature may be added solely to make P4 easier.", "type": "process", "milestone": "P4", "verification": "code inspection: change scope"},
-    {"id": "R-264", "section": "§25.1", "requirement": "README explains: what the kit is, the problem it solves, who it is for, the end-to-end workflow, why deterministic verification matters, where humans approve work, how safe publishing works, OpenCode as the supported production adapter, and how the architecture is separated.", "type": "documentation", "milestone": "P5", "verification": "manual/code inspection: README review"},
-    {"id": "R-265", "section": "§25.2", "requirement": "Architecture documentation covers boundaries among core contracts/state machine, orchestration, persistence, project verification, workspace isolation, OpenCode adapter, CLI, and publishing.", "type": "documentation", "milestone": "P5", "verification": "code inspection: docs"},
-    {"id": "R-266", "section": "§25.3", "requirement": "The quick start shows the validated flow install → agentflow init → configure → start → run → approve plan → implementation/verification → final summary → approve push → branch/commit/push, and the exact commands match the shipped CLI.", "type": "documentation", "milestone": "P5", "verification": "test: commands executed against shipped CLI"},
-    {"id": "R-267", "section": "§25.4", "requirement": "Docs state what .agentflow/ contains, what files the workflow creates/changes, that .opencode/ is not generated for framework profiles, where temporary OpenCode runtime config lives, and which files are user/project config versus framework runtime state.", "type": "documentation", "milestone": "P5", "verification": "code inspection: docs"},
-    {"id": "R-268", "section": "§25.5", "requirement": "The README clearly identifies the plan approval and push approval boundaries.", "type": "documentation", "milestone": "P5", "verification": "code inspection"},
-    {"id": "R-269", "section": "§25.6", "requirement": "Security documentation reflects implemented behavior only; no protection is claimed that the code does not enforce.", "type": "documentation", "milestone": "P5", "verification": "manual: claims vs code audit"},
-    {"id": "R-270", "section": "§25.7", "requirement": "The README links/references the real P4 external-project demo as evidence the workflow works in practice.", "type": "documentation", "milestone": "P5", "verification": "code inspection: link resolves"},
-    {"id": "R-271", "section": "§25.8", "requirement": "A contributor guide documents development setup, builds, tests, lint/typecheck, fixture setup, and milestone validation.", "type": "documentation", "milestone": "P5", "verification": "code inspection"},
-    {"id": "R-272", "section": "§25.9", "requirement": "Documentation contains no outdated/hypothetical claims and does not claim support for unimplemented agent runtimes.", "type": "documentation", "milestone": "P5", "verification": "manual review"},
-    {"id": "R-273", "section": "§25.9", "requirement": "No npm-install instructions appear before P6 is complete.", "type": "documentation", "milestone": "P5", "verification": "code inspection: README"},
-    {"id": "R-274", "section": "§25.9", "requirement": "Every quick-start command is tested.", "type": "process", "milestone": "P5", "verification": "process: scripted quick-start run"},
-    {"id": "R-275", "section": "§26.1", "requirement": "Package metadata finalized: name, version, description, license, repository metadata, homepage/docs, keywords, package exports, published file list, CLI binary metadata.", "type": "process", "milestone": "P6", "verification": "code inspection: package.json"},
-    {"id": "R-276", "section": "§26.2", "requirement": "Generated npm tarballs contain no temporary directories, local machine paths, secrets, audit leftovers, development-only artifacts, or unintended source/test material.", "type": "security", "milestone": "P6", "verification": "test: npm pack + content scan"},
-    {"id": "R-277", "section": "§26.3", "requirement": "The release process includes package build, package-content inspection, npm publish --dry-run (or equivalent), release/version decision, changelog/release notes, and final publication only after P1–P5 acceptance.", "type": "process", "milestone": "P6", "verification": "process: release checklist/script"},
-    {"id": "R-278", "section": "§26.4", "requirement": "The GitHub repository has an accurate description, topic/tag set (only topics supported by the product), and release information.", "type": "process", "milestone": "P6", "verification": "manual: GitHub settings/API (not fully local)"},
-    {"id": "R-279", "section": "§26.5; §39", "requirement": "A new developer can go discover → README → install → init → start/run → develop/verify/approve → publish without access to the development monorepo internals.", "type": "process", "milestone": "P6", "verification": "manual: fresh-machine walkthrough"},
-    {"id": "R-280", "section": "§27.1", "requirement": "The framework itself owns state transitions, approvals, verification configuration, security gates, evidence binding, workspace boundaries, and Git publishing; agent output is treated as untrusted.", "type": "security", "milestone": "cross-cutting", "verification": "code inspection + tests"},
-    {"id": "R-281", "section": "§27.2", "requirement": "The target repository cannot redefine framework control-plane authority: profile shadowing, configuration boundary crossing, plugin execution compromise, forged workflow response fields, verification rule tampering, and protected configuration modification are all blocked.", "type": "security", "milestone": "cross-cutting", "verification": "test: each attack fixture blocked"},
-    {"id": "R-282", "section": "§27.5", "requirement": "Evidence is tied to the relevant workflow revision/session, exact/reproducible command identity where applicable, working-tree fingerprint, fixer-history constraints, and the current final-gate state; stale evidence is invalid.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-283", "section": "§27.7", "requirement": "The publisher prevents unauthorized branch/commit operations and shell/argument injection (in addition to force/delete/protected-branch rules).", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-284", "section": "§27.8", "requirement": "Repository root, workspace identity, approved baseline, lease, and relevant repository state are validated before executing sensitive stages.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-285", "section": "§27.8", "requirement": "Workspace changes outside allowed scope block progression.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-286", "section": "§27.9", "requirement": "Persistence guards against path traversal, unsafe feature identifiers, unsafe slug/path construction, session cross-contamination, lock abuse, unsafe symlink behavior, and malformed artifact/approval records.", "type": "security", "milestone": "cross-cutting", "verification": "test: attack fixtures"},
-    {"id": "R-287", "section": "§27.10", "requirement": "The architecture supports independent static/dynamic security audits without undocumented assumptions; external audit findings are triaged against actual source behavior.", "type": "process", "milestone": "cross-cutting", "verification": "manual: audit walkthrough (vague — see prd-issues)"},
-    {"id": "R-288", "section": "§28.1", "requirement": "The stage definition (not the model request) decides which OpenCode profile is permitted; a profile/role mismatch fails the execution.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-289", "section": "§28.4", "requirement": "Feature identifiers have a constrained format and path-safe derivation.", "type": "security", "milestone": "cross-cutting", "verification": "test: invalid ids rejected"},
-    {"id": "R-290", "section": "§28.4", "requirement": "Paths/filenames are normalized and traversal-resistant.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-291", "section": "§28.5", "requirement": "Workspace identifiers are derived from validated framework-controlled data, not directly from user-provided path spellings.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-292", "section": "§28.6", "requirement": "Approval records are validated when read and again before the sensitive action they authorize.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-293", "section": "§28.7", "requirement": "A push approval cannot authorize publishing unless the associated FinalGate status is exactly valid and current.", "type": "security", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-294", "section": "§29", "requirement": "Durable artifacts exist for all categories: request, requirements/specification, plan, plan review, implementation result, code review, scope review, static/test/runtime verification, security review, fixer history, final gate, final summary, approval records, and publishing outcome.", "type": "behavior", "milestone": "cross-cutting", "verification": "test: artifact per category after E2E (supersedes §8 artifact list)"},
-    {"id": "R-295", "section": "§29", "requirement": "Artifacts make it possible to answer: what was requested, what was approved, what the agent did, what failed, what was fixed, what evidence passed, which exact repository state was verified, who/what approved publishing, what branch/commit was created, and whether the push succeeded.", "type": "behavior", "milestone": "cross-cutting", "verification": "test: post-run audit checklist"},
-    {"id": "R-296", "section": "§30.3", "requirement": "Separation of target project state, .agentflow/ configuration, and external OpenCode runtime state is preserved across initialization, execution, and cleanup.", "type": "behavior", "milestone": "cross-cutting", "verification": "test: all three phases"},
-    {"id": "R-297", "section": "§31", "requirement": "Project configuration explicitly declares: package manager where needed, static verification commands, test verification commands, runtime startup configuration, runtime readiness information, runtime acceptance endpoint/checks, timeouts/bounds within supported policy, and security verification inputs where required.", "type": "behavior", "milestone": "cross-cutting", "verification": "test: config schema covers all fields"},
-    {"id": "R-298", "section": "§31", "requirement": "The framework refuses to invent critical verification details merely because a project 'looks like' a particular stack.", "type": "security", "milestone": "cross-cutting", "verification": "test: missing explicit config → explicit error/deferred"},
-    {"id": "R-299", "section": "§32", "requirement": "All framework-owned child processes follow: structured argv, shell:false, bounded output/time, explicit cancellation/termination, process cleanup, controlled working directory, sanitized environment where repository code executes, and meaningful error/result classification.", "type": "security", "milestone": "cross-cutting", "verification": "test: shared runner contract suite"},
-    {"id": "R-300", "section": "§32", "requirement": "No user-facing feature may bypass the process-safety controls for convenience.", "type": "security", "milestone": "cross-cutting", "verification": "code inspection: single bounded runner used everywhere"},
-    {"id": "R-301", "section": "§33.1", "requirement": "Unit tests cover state transitions, snapshot restoration, validation, persistence mutations, path rules, lock behavior, approval validation, evidence binding, Git flag firewall, CLI command handling, OpenCode parsing/configuration policy, and project verification configuration.", "type": "process", "milestone": "cross-cutting", "verification": "process: suite inventory"},
-    {"id": "R-302", "section": "§33.2", "requirement": "Integration tests cover core+orchestration, orchestration+persistence, orchestration+workspace, orchestration+project verification, orchestration+OpenCode, and orchestration+publishing.", "type": "process", "milestone": "cross-cutting", "verification": "process"},
-    {"id": "R-303", "section": "§33.3", "requirement": "Disposable fixture projects are maintained for static verification, tests, runtime servers, controlled failures, fixer recovery, external initialization, and safe publishing.", "type": "process", "milestone": "cross-cutting", "verification": "process: fixtures exist"},
-    {"id": "R-304", "section": "§33.4", "requirement": "The full happy/failure/security/publishing E2E paths are proven; P4 specifically proves them using real OpenCode in a separate target repository.", "type": "process", "milestone": "cross-cutting", "verification": "test (duplicate of §20/§24)"},
-    {"id": "R-305", "section": "§33.5", "requirement": "Security regression tests protect against: shell execution, environment credential leakage, profile shadowing, plugin/config boundary crossing, forged state/approval, stale evidence, scope escape, unsafe Git pushes, protected branch bypass, and verification-rule tampering.", "type": "process", "milestone": "cross-cutting", "verification": "process: test inventory per boundary"},
-    {"id": "R-306", "section": "§34", "requirement": "Clear command discovery through --help.", "type": "behavior", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-307", "section": "§34", "requirement": "Readable status output with explicit current workflow state and explicit blocked/approval state.", "type": "behavior", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-308", "section": "§34", "requirement": "The CLI explicitly indicates when human approval is required.", "type": "behavior", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-309", "section": "§34", "requirement": "A useful failure reason is surfaced to the user.", "type": "behavior", "milestone": "cross-cutting", "verification": "test"},
-    {"id": "R-310", "section": "§34", "requirement": "No silent bypasses of workflow controls.", "type": "security", "milestone": "cross-cutting", "verification": "test + code inspection"},
-    {"id": "R-311", "section": "§34", "requirement": "Non-interactive operation where appropriate.", "type": "behavior", "milestone": "cross-cutting", "verification": "test: commands never block on stdin (vague — see prd-issues)"},
-    {"id": "R-312", "section": "§35", "requirement": "No orphaned runtime processes where supported cleanup is available.", "type": "behavior", "milestone": "cross-cutting", "verification": "test: process table clean after run"},
-    {"id": "R-313", "section": "§35", "requirement": "No indefinite waits on external agent processes.", "type": "behavior", "milestone": "cross-cutting", "verification": "test: all agent waits timeout-bounded"},
-    {"id": "R-314", "section": "§35", "requirement": "No accidental repeated publishing.", "type": "security", "milestone": "cross-cutting", "verification": "test: second publish attempt blocked/identity-checked"},
-    {"id": "R-315", "section": "§35", "requirement": "No duplicate initialization damage.", "type": "behavior", "milestone": "cross-cutting", "verification": "test (duplicate of R-244/R-255)"},
-    {"id": "R-316", "section": "§35", "requirement": "Ability to resume/recover from persisted workflow state.", "type": "behavior", "milestone": "cross-cutting", "verification": "test (duplicate of R-043/R-072)"},
-    {"id": "R-317", "section": "§36", "requirement": "Browser automation is not a mandatory verification mechanism in the core release.", "type": "process", "milestone": "cross-cutting", "verification": "code inspection: no browser dependency in core verification"},
-    {"id": "R-318", "section": "§36", "requirement": "No unlimited autonomous agent loops.", "type": "security", "milestone": "cross-cutting", "verification": "test: all agent stages bounded"},
-    {"id": "R-319", "section": "§36", "requirement": "No claims of support for multiple agents before their adapters exist.", "type": "documentation", "milestone": "cross-cutting", "verification": "code inspection: docs claims vs adapters"},
-    {"id": "R-320", "section": "§37.1 (future)", "requirement": "A stable agent adapter interface lets additional runtimes integrate without changing the core state machine; adapters cannot own transitions or self-approve, and must use structured transport, bounded execution, capability probing, controlled permissions, repository/configuration boundary protection, a compatible response protocol, and deterministic error handling.", "type": "security", "milestone": "future (§37)", "verification": "code inspection + adapter contract tests (not required for current baseline)"},
-    {"id": "R-321", "section": "§37.2 (future)", "requirement": "An optional Claude Code adapter implements the same workflow contract with no Claude-specific behavior in the core orchestrator, preserving approvals, deterministic verification, workspace isolation, environment restrictions, evidence freshness, and protected publishing.", "type": "behavior", "milestone": "future (§37)", "verification": "adapter tests (when implemented)"},
-    {"id": "R-322", "section": "§37.3 (future)", "requirement": "An optional Codex adapter uses the same workflow contracts; Codex execution stays subordinate to the state machine, verification gates, approval records, and Git publisher.", "type": "behavior", "milestone": "future (§37)", "verification": "adapter tests (when implemented)"},
-    {"id": "R-323", "section": "§37.4 (future)", "requirement": "An optional Freebuff adapter must not revive a second orchestration system or relax the core security model.", "type": "behavior", "milestone": "future (§37)", "verification": "adapter tests + code inspection (when implemented)"},
-    {"id": "R-324", "section": "§37.6 (future)", "requirement": "Logical workflow roles (analyst/griller, spec/planner, implementation, code reviewer, verifier/reviewer, fixer, security reviewer) remain stable across runtimes and may map onto a small number of physical permission profiles.", "type": "behavior", "milestone": "future (§37)", "verification": "code inspection (when implemented)"},
-    {"id": "R-325", "section": "§37.7 (future)", "requirement": "Multi-agent parallelism must not weaken approval ordering, state consistency, workspace integrity, evidence binding, or deterministic gate behavior.", "type": "security", "milestone": "future (§37)", "verification": "parallel-mode tests (when implemented)"},
-    {"id": "R-326", "section": "§37.8 (future)", "requirement": "Alternative workspace providers (containers, remote workspaces, other backends) must satisfy the baseline/lease/scope/integrity contract.", "type": "behavior", "milestone": "future (§37)", "verification": "provider contract tests (when implemented)"},
-    {"id": "R-327", "section": "§37.9 (future)", "requirement": "Runtime verification extensions beyond HTTP remain explicit and deterministic; browser automation only as an optional adapter meeting the same evidence/security requirements.", "type": "behavior", "milestone": "future (§37)", "verification": "extension tests (when implemented)"},
-    {"id": "R-328", "section": "§37.11 (future)", "requirement": "External security audit tools/skills are advisory/audit inputs, read-only, never granted permission to alter the repository, and their findings enter gates only if explicitly integrated.", "type": "security", "milestone": "future (§37)", "verification": "tool contract tests (when implemented)"},
-    {"id": "R-329", "section": "§37.13 (future)", "requirement": "All future integrations plug into the current workflow rather than replacing it.", "type": "behavior", "milestone": "future (§37)", "verification": "code inspection (when implemented)"},
-    {"id": "R-330", "section": "§38.3", "requirement": "A change altering workflow safety, approval semantics, state transitions, evidence semantics, or publishing authority requires an explicit versioned product decision, not a silent adapter-level change.", "type": "process", "milestone": "cross-cutting", "verification": "process: change-review checklist"},
-    {"id": "R-331", "section": "§39", "requirement": "A developer can obtain the product and understand how to use it without reading the implementation source first.", "type": "process", "milestone": "cross-cutting", "verification": "manual: fresh-user walkthrough (duplicate of R-279)"},
-    {"id": "R-332", "section": "§42", "requirement": "Implementation-vs-PRD conflicts are resolved using the §42 priority order: human approval authority, deterministic verification, evidence/approval freshness and integrity, workspace/configuration boundaries, safe Git publishing, smallest implementation, explicit extensions.", "type": "process", "milestone": "cross-cutting", "verification": "process: recorded decision log"}
+    {
+      "id": "R-001",
+      "section": "§2.1",
+      "requirement": "Explicit human approval is required before implementation starts after planning.",
+      "type": "security",
+      "milestone": "M0",
+      "verification": "test: advancing from AwaitingPlanApproval without approve_plan is rejected"
+    },
+    {
+      "id": "R-002",
+      "section": "§2.1",
+      "requirement": "Explicit human approval is required before repository publishing begins after final verification.",
+      "type": "security",
+      "milestone": "M0",
+      "verification": "test: publishing path refuses to run without a valid approve_push record"
+    },
+    {
+      "id": "R-003",
+      "section": "§2.1",
+      "requirement": "Agents cannot approve themselves, transition workflow state on their own, or manufacture an approval through response content.",
+      "type": "security",
+      "milestone": "M0",
+      "verification": "test: forged approval/state fields in agent output are ignored or rejected"
+    },
+    {
+      "id": "R-004",
+      "section": "§2.2",
+      "requirement": "Model output may propose, explain, review, or diagnose but is never treated as proof that software works; deterministic system evidence is the authoritative gate input.",
+      "type": "behavior",
+      "milestone": "M0",
+      "verification": "test: gate decisions derive only from recorded evidence, not agent claims"
+    },
+    {
+      "id": "R-005",
+      "section": "§2.3",
+      "requirement": "Core workflow engine has no direct dependency on OpenCode, Claude Code, Codex, Freebuff, or any other vendor runtime.",
+      "type": "behavior",
+      "milestone": "M0",
+      "verification": "code inspection: no vendor imports in core package"
+    },
+    {
+      "id": "R-006",
+      "section": "§2.3",
+      "requirement": "Agent runtimes are adapters behind a stable interface; OpenCode is the first and only production adapter required for the initial release.",
+      "type": "process",
+      "milestone": "M0",
+      "verification": "code inspection: adapter interface exists; single registered production adapter"
+    },
+    {
+      "id": "R-007",
+      "section": "§2.4",
+      "requirement": "One workflow engine: CLI commands, adapters, tests, and integrations all use the existing orchestration/state machine; no second engine may grow inside a CLI or agent integration.",
+      "type": "behavior",
+      "milestone": "M0",
+      "verification": "code inspection + test: no duplicated transition logic outside core"
+    },
+    {
+      "id": "R-008",
+      "section": "§2.5",
+      "requirement": "Agent invocations use structured argument arrays with shell:false.",
+      "type": "security",
+      "milestone": "M0",
+      "verification": "test: spawned argv is an array and shell option is false"
+    },
+    {
+      "id": "R-009",
+      "section": "§2.5",
+      "requirement": "The supported OpenCode profiles do not allow the agent to run shell commands. They declare the shell tool only so the provider accepts the request, and every command is denied by permission rules except a single no-op allowlisted command (`pwd`). See decision D-1.",
+      "type": "security",
+      "milestone": "M0",
+      "verification": "test: generated profile config denies shell execution"
+    },
+    {
+      "id": "R-010",
+      "section": "§2.6",
+      "requirement": "The workflow never silently installs agent-selected packages, tools, plugins, or other executable software during normal execution.",
+      "type": "security",
+      "milestone": "M0",
+      "verification": "test: no install/lifecycle commands reachable from agent-controlled stages"
+    },
+    {
+      "id": "R-011",
+      "section": "§2.7",
+      "requirement": "Successful model output never becomes an unrestricted git push path; publishing is an explicitly gated, validated, protected operation.",
+      "type": "security",
+      "milestone": "M0",
+      "verification": "test: push reachable only via approved publisher path"
+    },
+    {
+      "id": "R-012",
+      "section": "§3.1",
+      "requirement": "Canonical WorkflowState enum contains exactly the 20 listed states with the listed string values.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: enum value set equals PRD §3.1 list"
+    },
+    {
+      "id": "R-013",
+      "section": "§3.2",
+      "requirement": "Canonical WorkflowEvent union is exactly advance, request_fix, complete_fix, fail, approve_plan, approve_push.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: event union equality"
+    },
+    {
+      "id": "R-014",
+      "section": "§3.3",
+      "requirement": "A fixer invocation records its origin and may return only to Plan Review, Code Review, Scope Review, Static Verification, Test Verification, Runtime Verification, or Security Review.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: invalid fix-return targets rejected"
+    },
+    {
+      "id": "R-015",
+      "section": "§3.4",
+      "requirement": "The success path follows exactly Draft → Grilling → … → Complete in the listed order.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: legal happy-path transition sequence"
+    },
+    {
+      "id": "R-016",
+      "section": "§3.5",
+      "requirement": "A stage that fails validation or verification may route to Fixing.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: failing review/verification stage enters Fixing"
+    },
+    {
+      "id": "R-017",
+      "section": "§3.5",
+      "requirement": "After fixing, the workflow returns to the recorded stage origin and fresh verification is required.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: complete_fix returns to origin; old evidence not accepted afterwards"
+    },
+    {
+      "id": "R-018",
+      "section": "§3.5",
+      "requirement": "Unrecoverable errors enter Failed.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: unrecoverable failure transitions to Failed"
+    },
+    {
+      "id": "R-019",
+      "section": "§3.6",
+      "requirement": "Complete and Failed are terminal states with no outgoing transitions.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: transitions out of terminal states rejected"
+    },
+    {
+      "id": "R-020",
+      "section": "§3.6",
+      "requirement": "No successful final summary may bypass the final gate or push approval requirements.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: FinalSummary stage unreachable unless FinalGate passed"
+    },
+    {
+      "id": "R-021",
+      "section": "§4.1",
+      "requirement": "AcceptanceCriterion contract: id, description, verification.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-022",
+      "section": "§4.1",
+      "requirement": "Every meaningful requirement is expressible as a concrete acceptance criterion with a corresponding verification description.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection: domain model + documented requirements"
+    },
+    {
+      "id": "R-023",
+      "section": "§4.2",
+      "requirement": "Requirement contract: id, title, description, acceptanceCriteria.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-024",
+      "section": "§4.3",
+      "requirement": "PlanStep contract: id, description, requirementIds, expectedFiles, verification; plan steps must connect to requirements and expected repository changes.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "type test + test: plan validation rejects unlinked steps"
+    },
+    {
+      "id": "R-025",
+      "section": "§4.4",
+      "requirement": "Plan contract: featureId, summary, steps.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-026",
+      "section": "§4.5",
+      "requirement": "ReviewFinding contract: featureId, severity info|warning|error, message, optional filePath and line.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-027",
+      "section": "§4.6",
+      "requirement": "VerificationEvidence contract: kind static|test|runtime|security, description, optional reference.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-028",
+      "section": "§4.7",
+      "requirement": "VerificationResult contract: requirementId, acceptanceCriterionId, status passed|failed|inconclusive, evidence list.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-029",
+      "section": "§4.7",
+      "requirement": "An inconclusive verification result must never be silently treated as success.",
+      "type": "security",
+      "milestone": "M1",
+      "verification": "test: inconclusive blocks gate advancement"
+    },
+    {
+      "id": "R-030",
+      "section": "§4.8",
+      "requirement": "Feature contract: id, title, description, state, requirements, optional plan.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-031",
+      "section": "§5",
+      "requirement": "Repository defines Agent Workflow Kit as a reusable coding-agent workflow harness.",
+      "type": "documentation",
+      "milestone": "M0",
+      "verification": "code inspection: README/docs wording"
+    },
+    {
+      "id": "R-032",
+      "section": "§5",
+      "requirement": "Core-first, adapter-based architecture is established (core independent of agent vendors).",
+      "type": "behavior",
+      "milestone": "M0",
+      "verification": "code inspection: package structure"
+    },
+    {
+      "id": "R-033",
+      "section": "§5",
+      "requirement": "Tests are established as part of every milestone.",
+      "type": "process",
+      "milestone": "M0",
+      "verification": "process: CI runs test suites per milestone/package"
+    },
+    {
+      "id": "R-034",
+      "section": "§6",
+      "requirement": "Only legal state transitions are enforced and accepted.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: each legal transition succeeds"
+    },
+    {
+      "id": "R-035",
+      "section": "§6",
+      "requirement": "Invalid transitions are rejected.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: illegal state/event pairs rejected"
+    },
+    {
+      "id": "R-036",
+      "section": "§6",
+      "requirement": "Explicit failure transitions exist.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: fail event defined for relevant stages"
+    },
+    {
+      "id": "R-037",
+      "section": "§6",
+      "requirement": "Explicit fixer entry (request_fix) and fix completion (complete_fix) transitions exist.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test"
+    },
+    {
+      "id": "R-038",
+      "section": "§6",
+      "requirement": "A plan approval transition exists.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: approve_plan from AwaitingPlanApproval → Implementing"
+    },
+    {
+      "id": "R-039",
+      "section": "§6",
+      "requirement": "A push approval transition exists.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: approve_push from AwaitingPushApproval → Committing"
+    },
+    {
+      "id": "R-040",
+      "section": "§6",
+      "requirement": "State transitions are deterministic and never depend on an agent's claimed state.",
+      "type": "behavior",
+      "milestone": "M1",
+      "verification": "test: agent-claimed state cannot alter machine state"
+    },
+    {
+      "id": "R-041",
+      "section": "§7 (M2.1)",
+      "requirement": "WorkflowMachineSnapshot carries state and optional fixReturnState.",
+      "type": "behavior",
+      "milestone": "M2",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-042",
+      "section": "§7",
+      "requirement": "The state machine can be constructed from a valid snapshot.",
+      "type": "behavior",
+      "milestone": "M2",
+      "verification": "test"
+    },
+    {
+      "id": "R-043",
+      "section": "§7",
+      "requirement": "Workflow state is restored after process restart.",
+      "type": "behavior",
+      "milestone": "M2",
+      "verification": "test: persist → new machine → identical state"
+    },
+    {
+      "id": "R-044",
+      "section": "§7",
+      "requirement": "A snapshot in state Fixing must carry a valid fixReturnState.",
+      "type": "security",
+      "milestone": "M2",
+      "verification": "test: Fixing without valid origin rejected"
+    },
+    {
+      "id": "R-045",
+      "section": "§7",
+      "requirement": "Stale fixReturnState data is rejected when the state is not Fixing.",
+      "type": "behavior",
+      "milestone": "M2",
+      "verification": "test"
+    },
+    {
+      "id": "R-046",
+      "section": "§7",
+      "requirement": "State/event combinations are tested comprehensively, including invalid combinations.",
+      "type": "process",
+      "milestone": "M2",
+      "verification": "process: exhaustive transition-matrix test exists"
+    },
+    {
+      "id": "R-047",
+      "section": "§8",
+      "requirement": "Persistence is a dedicated adapter/package separate from the core.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-048",
+      "section": "§8",
+      "requirement": "Durable session storage is provided.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test"
+    },
+    {
+      "id": "R-049",
+      "section": "§8",
+      "requirement": "Artifact storage exists for every workflow stage: request, grill, specification, plan, plan-review, implementation, code-review, scope-review, verification, security-review, final-summary, fixer/history.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test: artifact written and read back per stage"
+    },
+    {
+      "id": "R-050",
+      "section": "§8",
+      "requirement": "Persistence is revision-aware.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test: writes carry/validate a revision"
+    },
+    {
+      "id": "R-051",
+      "section": "§8",
+      "requirement": "Persistence mutations are atomic with rollback behavior.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test: failed write leaves prior state intact"
+    },
+    {
+      "id": "R-052",
+      "section": "§8",
+      "requirement": "Partially created artifacts are cleaned up.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test: interrupted write cleaned on next open"
+    },
+    {
+      "id": "R-053",
+      "section": "§8",
+      "requirement": "Persistence enforces path safety (traversal-resistant paths).",
+      "type": "security",
+      "milestone": "M3",
+      "verification": "test: ../ and absolute-path identifiers rejected"
+    },
+    {
+      "id": "R-054",
+      "section": "§8",
+      "requirement": "Persistence performs symlink-aware safety checks.",
+      "type": "security",
+      "milestone": "M3",
+      "verification": "test: symlinked artifact target rejected/handled safely"
+    },
+    {
+      "id": "R-055",
+      "section": "§8",
+      "requirement": "Concurrency locking protects persistence.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test: concurrent writers serialized"
+    },
+    {
+      "id": "R-056",
+      "section": "§8",
+      "requirement": "Stale locks are reclaimed only under explicit safe rules.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test: reclaim allowed only with matching owner metadata/expiry"
+    },
+    {
+      "id": "R-057",
+      "section": "§8",
+      "requirement": "Feature/session isolation prevents cross-feature/session data access.",
+      "type": "security",
+      "milestone": "M3",
+      "verification": "test: session A cannot read session B artifacts"
+    },
+    {
+      "id": "R-058",
+      "section": "§8",
+      "requirement": "Persistence validates artifacts on read.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "test: malformed artifact rejected on read"
+    },
+    {
+      "id": "R-059",
+      "section": "§8",
+      "requirement": "The core package remains filesystem-independent; storage concerns belong in adapters.",
+      "type": "behavior",
+      "milestone": "M3",
+      "verification": "code inspection: no fs usage in core"
+    },
+    {
+      "id": "R-060",
+      "section": "§9",
+      "requirement": "A generic StageExecutor abstraction coordinates stages without embedding vendor-specific agent implementations.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-061",
+      "section": "§9",
+      "requirement": "Stage execution request/result contracts are defined.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "code inspection / type test"
+    },
+    {
+      "id": "R-062",
+      "section": "§9",
+      "requirement": "Context routed between stages is restricted.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: stage receives only permitted context"
+    },
+    {
+      "id": "R-063",
+      "section": "§9",
+      "requirement": "No vendor imports exist in core orchestration.",
+      "type": "security",
+      "milestone": "M4",
+      "verification": "code inspection: import graph"
+    },
+    {
+      "id": "R-064",
+      "section": "§9",
+      "requirement": "Optimistic/CAS revision checks use expected revision values.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: mismatched revision aborts write/execution"
+    },
+    {
+      "id": "R-065",
+      "section": "§9",
+      "requirement": "Stale stage execution is prevented.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: stage run against outdated revision is rejected"
+    },
+    {
+      "id": "R-066",
+      "section": "§9",
+      "requirement": "Plan approval is bound to a plan digest/hash.",
+      "type": "security",
+      "milestone": "M4",
+      "verification": "test: approval references plan hash; changed plan invalidates approval"
+    },
+    {
+      "id": "R-067",
+      "section": "§9",
+      "requirement": "Fix history is tracked.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: fix events recorded"
+    },
+    {
+      "id": "R-068",
+      "section": "§9",
+      "requirement": "Failed stages route deterministically into the fixer.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: routing is a pure function of stage + failure"
+    },
+    {
+      "id": "R-069",
+      "section": "§9",
+      "requirement": "Explicit return-to-origin behavior after fixing.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test"
+    },
+    {
+      "id": "R-070",
+      "section": "§9",
+      "requirement": "Workflow locks record owner token, PID, hostname, and creation time.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: lock metadata fields present"
+    },
+    {
+      "id": "R-071",
+      "section": "§9",
+      "requirement": "Lock reclaim follows safe rules only.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: unsafe reclaim attempts refused"
+    },
+    {
+      "id": "R-072",
+      "section": "§9",
+      "requirement": "Persisted workflow recovers after process interruption.",
+      "type": "behavior",
+      "milestone": "M4",
+      "verification": "test: interrupt mid-run → resume from persisted state"
+    },
+    {
+      "id": "R-073",
+      "section": "§10.1",
+      "requirement": "OpenCode-specific behavior is contained in the adapter package and does not leak into the workflow core.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-074",
+      "section": "§10.2",
+      "requirement": "Invocation form is equivalent to: opencode run --standalone --agent <agent> --format <default|json> [--model] [prompt].",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: assert spawned argv shape"
+    },
+    {
+      "id": "R-075",
+      "section": "§10.2",
+      "requirement": "The OpenCode process runs with the intended repository working directory.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: assert child cwd option"
+    },
+    {
+      "id": "R-076",
+      "section": "§10.2",
+      "requirement": "The implementation does not rely on unnecessary --dir or --pure behavior.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "code inspection: argv contains neither flag absent demonstrated need"
+    },
+    {
+      "id": "R-077",
+      "section": "§10.3",
+      "requirement": "NDJSON/event-stream parsing of agent output.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: parser fixtures"
+    },
+    {
+      "id": "R-078",
+      "section": "§10.3",
+      "requirement": "Structured process transport (no shell strings).",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-079",
+      "section": "§10.3",
+      "requirement": "Process output handling is bounded.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: oversized stream truncated/capped"
+    },
+    {
+      "id": "R-080",
+      "section": "§10.3",
+      "requirement": "Adapter failures get explicit error classification.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: error taxonomy distinguishes classes"
+    },
+    {
+      "id": "R-081",
+      "section": "§10.3",
+      "requirement": "Useful version/capability discovery is available.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: probe returns version + capabilities"
+    },
+    {
+      "id": "R-082",
+      "section": "§10.3",
+      "requirement": "Response parsing never allows model output to control workflow state.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: state-changing fields in output are ignored"
+    },
+    {
+      "id": "R-083",
+      "section": "§10.4",
+      "requirement": "OpenCode capabilities are detected and recorded rather than blindly assumed.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: probe result recorded; unknown capability flagged"
+    },
+    {
+      "id": "R-084",
+      "section": "§10.5",
+      "requirement": "Exactly two physical permission profiles exist: agentflow-read and agentflow-write; logical roles map onto them.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: generated config defines exactly these two profiles"
+    },
+    {
+      "id": "R-085",
+      "section": "§10.5",
+      "requirement": "Read profile: the shell tool is declared, every command is denied except `pwd`;",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: profile permission assertions"
+    },
+    {
+      "id": "R-086",
+      "section": "§10.5",
+      "requirement": "Write profile: same shell rules; it cannot run arbitrary shell commands.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: profile permission assertions"
+    },
+    {
+      "id": "R-087",
+      "section": "§10.5",
+      "requirement": "Every invocation explicitly selects the intended physical profile.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: --agent always set from stage definition"
+    },
+    {
+      "id": "R-088",
+      "section": "§10.6",
+      "requirement": "Control-plane runtime config lives at <tempdir>/agent-workflow-kit/opencode-<sha256(repo-path)>/ and contains generated agent/agentflow-read.md, agent/agentflow-write.md, and opencode.json.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: deterministic path derivation + exact file set"
+    },
+    {
+      "id": "R-089",
+      "section": "§10.6",
+      "requirement": "The target repository is not required to contain framework-generated OpenCode profiles.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: run succeeds in a repo without profile files"
+    },
+    {
+      "id": "R-090",
+      "section": "§10.6",
+      "requirement": "The framework-controlled OPENCODE_CONFIG_DIR is forced after environment sanitization.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: repo-injected env value is discarded"
+    },
+    {
+      "id": "R-091",
+      "section": "§10.6",
+      "requirement": "Unsafe environment/configuration boundaries are rejected.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: boundary-violation fixtures rejected"
+    },
+    {
+      "id": "R-092",
+      "section": "§10.6; §28.2",
+      "requirement": "Repository-defined OpenCode profile shadowing is prevented.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: repo-level profile files ignored/blocked"
+    },
+    {
+      "id": "R-093",
+      "section": "§10.6; §28.2",
+      "requirement": "Repository configuration cannot override framework control-plane boundaries.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: repo opencode.json cannot alter control-plane settings"
+    },
+    {
+      "id": "R-094",
+      "section": "§10.6",
+      "requirement": "Repository plugin locations are preflighted before execution.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test"
+    },
+    {
+      "id": "R-095",
+      "section": "§10.6",
+      "requirement": "Unsafe repository plugin/configuration behavior is refused.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test"
+    },
+    {
+      "id": "R-096",
+      "section": "§10.7",
+      "requirement": "Plugin preflight inspects .opencode/plugin, .opencode/plugins, plugin, and plugins.",
+      "type": "behavior",
+      "milestone": "M5",
+      "verification": "test: all four locations checked"
+    },
+    {
+      "id": "R-097",
+      "section": "§10.7",
+      "requirement": "Safe empty/text-only plugin directories are permitted; executable repository-controlled plugin code is rejected or blocked according to installed policy.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: benign dir passes; executable plugin blocked"
+    },
+    {
+      "id": "R-098",
+      "section": "§10.8; §28.3",
+      "requirement": "Agent output is parsed through a constrained structured protocol; smuggling of workflow-control fields or state transitions into ordinary responses is rejected.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "test: injected control fields rejected"
+    },
+    {
+      "id": "R-099",
+      "section": "§10.8",
+      "requirement": "The adapter does not approve stages and does not decide workflow transitions.",
+      "type": "security",
+      "milestone": "M5",
+      "verification": "code inspection + test"
+    },
+    {
+      "id": "R-100",
+      "section": "§11.1",
+      "requirement": "Repositories use a versioned verification configuration file (agent-workflow.config.json) with schema versioning and explicit verification configuration.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test: schema validation including version field"
+    },
+    {
+      "id": "R-101",
+      "section": "§11.2",
+      "requirement": "Verification supports the project's declared package manager from pnpm, npm, yarn, and bun.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test: fixture per package manager"
+    },
+    {
+      "id": "R-102",
+      "section": "§11.3",
+      "requirement": "Verification commands use structured argv.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test"
+    },
+    {
+      "id": "R-103",
+      "section": "§11.3",
+      "requirement": "Verification commands run with shell:false and no direct shell-string interpolation.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test + code inspection"
+    },
+    {
+      "id": "R-104",
+      "section": "§11.3",
+      "requirement": "Verification output capture is bounded.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test"
+    },
+    {
+      "id": "R-105",
+      "section": "§11.3",
+      "requirement": "Verification commands have explicit timeout limits.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test: timeout enforced"
+    },
+    {
+      "id": "R-106",
+      "section": "§11.3",
+      "requirement": "Verification supports cancellation via AbortSignal where applicable.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "code inspection + test"
+    },
+    {
+      "id": "R-107",
+      "section": "§11.3",
+      "requirement": "Arbitrary mutating/install lifecycle behavior is rejected as part of the verification policy.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test: install/script hooks blocked"
+    },
+    {
+      "id": "R-108",
+      "section": "§11.3",
+      "requirement": "The repository cannot redefine framework control behavior through unsafe command selection.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test: dangerous command forms rejected"
+    },
+    {
+      "id": "R-109",
+      "section": "§11.4",
+      "requirement": "Static verification runs the configured deterministic static checks (typecheck, lint, build/static analysis) as allowed by configuration.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test: fixture run captures results"
+    },
+    {
+      "id": "R-110",
+      "section": "§11.5",
+      "requirement": "Test verification runs configured deterministic tests capturing exit status, bounded output, and evidence metadata.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test"
+    },
+    {
+      "id": "R-111",
+      "section": "§11.6",
+      "requirement": "Verification evidence is bound to the workflow session/revision and a SHA-256 fingerprint of the relevant working tree.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test: evidence carries both bindings"
+    },
+    {
+      "id": "R-112",
+      "section": "§11.6",
+      "requirement": "Evidence must not be reused as proof after the repository has changed.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test: stale-fingerprint evidence rejected"
+    },
+    {
+      "id": "R-113",
+      "section": "§11.7",
+      "requirement": "The working-tree fingerprint ignores .agentflow, .git, caches, .opencode, .next, build, coverage, dist, node_modules, target, and venv.",
+      "type": "behavior",
+      "milestone": "M6",
+      "verification": "test: changes under ignored dirs do not alter fingerprint"
+    },
+    {
+      "id": "R-114",
+      "section": "§11.8",
+      "requirement": "A failed or inconclusive check cannot be promoted to success merely because the agent claims success.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test"
+    },
+    {
+      "id": "R-115",
+      "section": "§11.9",
+      "requirement": "Repository-controlled verification commands do not inherit the operator's full host environment by default; a minimal allowlist environment policy is used.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test: subprocess env equals allowlisted set"
+    },
+    {
+      "id": "R-116",
+      "section": "§11.9",
+      "requirement": "Credential-bearing host variables (cloud/API credentials, tokens, signing secrets, unrelated operator secrets) are not passed into verification processes by default.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test: seeded secret absent from child env"
+    },
+    {
+      "id": "R-117",
+      "section": "§11.9",
+      "requirement": "Environment sanitization applies to both normal verification and runtime verification subprocesses.",
+      "type": "security",
+      "milestone": "M6",
+      "verification": "test: both paths sanitized"
+    },
+    {
+      "id": "R-118",
+      "section": "§12",
+      "requirement": "M6 capabilities are preserved via regression tests: package-manager/framework discovery, bounded subprocess execution, evidence revision/fingerprint binding, and dangerous lifecycle/install rejection.",
+      "type": "process",
+      "milestone": "M6.1",
+      "verification": "process: regression suite exists and passes"
+    },
+    {
+      "id": "R-119",
+      "section": "§12",
+      "requirement": "Deterministic configuration validation is improved.",
+      "type": "behavior",
+      "milestone": "M6.1",
+      "verification": "test: invalid config cases rejected with diagnostics"
+    },
+    {
+      "id": "R-120",
+      "section": "§12",
+      "requirement": "File/path safety is strengthened.",
+      "type": "security",
+      "milestone": "M6.1",
+      "verification": "test: path-attack fixtures"
+    },
+    {
+      "id": "R-121",
+      "section": "§12",
+      "requirement": "Explicit handling of missing configuration is preserved (no silent defaults for critical settings).",
+      "type": "behavior",
+      "milestone": "M6.1",
+      "verification": "test: missing config yields explicit error"
+    },
+    {
+      "id": "R-122",
+      "section": "§12",
+      "requirement": "Verification failures are diagnosable and routeable to fixing.",
+      "type": "behavior",
+      "milestone": "M6.1",
+      "verification": "test: failure yields actionable evidence and fixer routing"
+    },
+    {
+      "id": "R-123",
+      "section": "§12",
+      "requirement": "Regression tests and fixture coverage are preserved.",
+      "type": "process",
+      "milestone": "M6.1",
+      "verification": "process"
+    },
+    {
+      "id": "R-124",
+      "section": "§13.1",
+      "requirement": "A workspace provider abstracts creation/opening/closing/management of isolated development workspaces.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-125",
+      "section": "§13.2",
+      "requirement": "Implementation/publishing operate in a controlled Git worktree/workspace, not by blindly mutating the user's main checkout.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "test: main checkout untouched during run"
+    },
+    {
+      "id": "R-126",
+      "section": "§13.3",
+      "requirement": "Workspace leases identify ownership and prevent conflicting concurrent workflow operations.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "test: second workflow blocked while lease held"
+    },
+    {
+      "id": "R-127",
+      "section": "§13.3",
+      "requirement": "Lease metadata includes owner/process/time context enabling safe stale-state recovery.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "test: metadata fields present"
+    },
+    {
+      "id": "R-128",
+      "section": "§13.4",
+      "requirement": "Workspace state may use a framework-controlled sidecar so workflow metadata does not pollute source directories.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "test: metadata location outside source tree"
+    },
+    {
+      "id": "R-129",
+      "section": "§13.5",
+      "requirement": "Changes are constrained to the approved repository/workspace scope.",
+      "type": "security",
+      "milestone": "M7",
+      "verification": "test: out-of-scope edits detected"
+    },
+    {
+      "id": "R-130",
+      "section": "§13.5",
+      "requirement": "Inappropriate repository/root/workspace mismatches are detected and rejected.",
+      "type": "security",
+      "milestone": "M7",
+      "verification": "test"
+    },
+    {
+      "id": "R-131",
+      "section": "§13.6",
+      "requirement": "An approved baseline is captured and later compared to the repository/workspace under execution.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "test"
+    },
+    {
+      "id": "R-132",
+      "section": "§13.6",
+      "requirement": "The workflow refuses to continue when the baseline cannot be trusted.",
+      "type": "security",
+      "milestone": "M7",
+      "verification": "test: corrupted baseline aborts"
+    },
+    {
+      "id": "R-133",
+      "section": "§13.7",
+      "requirement": "The physical OpenCode execution surface stays collapsed to two profiles while logical stage roles are retained.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "test (duplicate of §10.5 / R-084)"
+    },
+    {
+      "id": "R-134",
+      "section": "§13.8",
+      "requirement": "The external OpenCode runtime config directory is derived deterministically from repository identity/path and created safely.",
+      "type": "behavior",
+      "milestone": "M7",
+      "verification": "test: deterministic path (duplicate of §10.6 / R-088)"
+    },
+    {
+      "id": "R-135",
+      "section": "§14.1",
+      "requirement": "Runtime verification uses explicitly declared project runtime configuration.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-136",
+      "section": "§14.1",
+      "requirement": "The framework never guesses ports, scripts, routes, health endpoints, or startup commands.",
+      "type": "security",
+      "milestone": "M8",
+      "verification": "test: absent config → no inferred execution"
+    },
+    {
+      "id": "R-137",
+      "section": "§14.2",
+      "requirement": "Runtime processes launch through the existing bounded process runner.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-138",
+      "section": "§14.2",
+      "requirement": "Runtime execution uses shell:false, controlled argv, bounded output, explicit timeout, cancellation/termination support, and proper cleanup.",
+      "type": "security",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-139",
+      "section": "§14.3",
+      "requirement": "On supported POSIX systems the runtime process uses process-group-aware cleanup so child processes are not left running.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test: server spawning children leaves no orphans"
+    },
+    {
+      "id": "R-140",
+      "section": "§14.4",
+      "requirement": "Readiness and acceptance are separate concepts; a process becoming available is not itself proof the feature works.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test: ready server failing acceptance → stage fails"
+    },
+    {
+      "id": "R-141",
+      "section": "§14.5",
+      "requirement": "HTTP acceptance uses the explicitly configured URL/route.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-142",
+      "section": "§14.5",
+      "requirement": "HTTP acceptance does not silently follow redirects.",
+      "type": "security",
+      "milestone": "M8",
+      "verification": "test: redirect response is not followed/reported"
+    },
+    {
+      "id": "R-143",
+      "section": "§14.5",
+      "requirement": "HTTP response size/body capture is bounded.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-144",
+      "section": "§14.5",
+      "requirement": "Deterministic result evidence is recorded for runtime verification.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-145",
+      "section": "§14.5",
+      "requirement": "Connection/readiness errors are distinguished from acceptance failures.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test: two failure classes reported distinctly"
+    },
+    {
+      "id": "R-146",
+      "section": "§14.6",
+      "requirement": "Missing runtime configuration produces a deferred/inconclusive outcome, never a false success.",
+      "type": "security",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-147",
+      "section": "§14.6",
+      "requirement": "The resulting workflow state makes the runtime limitation explicit and routes according to policy.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-148",
+      "section": "§14.7",
+      "requirement": "Runtime acceptance failure routes through the bounded fixer and then performs fresh verification.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test"
+    },
+    {
+      "id": "R-149",
+      "section": "§14.8",
+      "requirement": "A runtime verification result refers to the current revision/fingerprint and cannot satisfy a later gate after the source changes.",
+      "type": "security",
+      "milestone": "M8",
+      "verification": "test: mutate source → old runtime evidence rejected"
+    },
+    {
+      "id": "R-150",
+      "section": "§14.9",
+      "requirement": "A disposable fixture application/test path proves the runtime verifier works end to end; browser automation is not part of this requirement.",
+      "type": "behavior",
+      "milestone": "M8",
+      "verification": "test: fixture suite"
+    },
+    {
+      "id": "R-151",
+      "section": "§15",
+      "requirement": "The number of fix attempts is bounded.",
+      "type": "behavior",
+      "milestone": "M9",
+      "verification": "test: attempt N+1 refused"
+    },
+    {
+      "id": "R-152",
+      "section": "§15",
+      "requirement": "Fixer routing is deterministic.",
+      "type": "behavior",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-153",
+      "section": "§15",
+      "requirement": "Original requirements are immutable during fixing.",
+      "type": "security",
+      "milestone": "M9",
+      "verification": "test: requirement mutation attempt rejected"
+    },
+    {
+      "id": "R-154",
+      "section": "§15",
+      "requirement": "Acceptance criteria are immutable during fixing.",
+      "type": "security",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-155",
+      "section": "§15",
+      "requirement": "Verification configuration is immutable during fixing.",
+      "type": "security",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-156",
+      "section": "§15",
+      "requirement": "Framework configuration/files are protected from modification.",
+      "type": "security",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-157",
+      "section": "§15",
+      "requirement": "Anti-cheating checks are active during fixing.",
+      "type": "security",
+      "milestone": "M9",
+      "verification": "test: cheat-pattern fixtures flagged"
+    },
+    {
+      "id": "R-158",
+      "section": "§15",
+      "requirement": "Changing verification rules merely to obtain a pass is prevented.",
+      "type": "security",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-159",
+      "section": "§15",
+      "requirement": "Changing protected configuration to bypass gates is prevented.",
+      "type": "security",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-160",
+      "section": "§15",
+      "requirement": "Fresh verification runs after each relevant mutation.",
+      "type": "behavior",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-161",
+      "section": "§15",
+      "requirement": "FixReturnState behavior is preserved through fixing.",
+      "type": "behavior",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-162",
+      "section": "§15",
+      "requirement": "Fixer history and evidence are recorded.",
+      "type": "behavior",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-163",
+      "section": "§15",
+      "requirement": "Exhausted fix attempts produce a clear failure.",
+      "type": "behavior",
+      "milestone": "M9",
+      "verification": "test"
+    },
+    {
+      "id": "R-164",
+      "section": "§15",
+      "requirement": "Focused tests exist for every important fixer protection.",
+      "type": "process",
+      "milestone": "M9",
+      "verification": "process: test inventory per protection"
+    },
+    {
+      "id": "R-165",
+      "section": "§16",
+      "requirement": "A deterministic security gate exists as a dedicated workflow stage before the final gate.",
+      "type": "security",
+      "milestone": "M10",
+      "verification": "test"
+    },
+    {
+      "id": "R-166",
+      "section": "§16",
+      "requirement": "Security-related configuration is protected.",
+      "type": "security",
+      "milestone": "M10",
+      "verification": "test"
+    },
+    {
+      "id": "R-167",
+      "section": "§16",
+      "requirement": "Security review produces a security-review artifact.",
+      "type": "behavior",
+      "milestone": "M10",
+      "verification": "test"
+    },
+    {
+      "id": "R-168",
+      "section": "§16",
+      "requirement": "The security stage integrates with the bounded fixer path.",
+      "type": "behavior",
+      "milestone": "M10",
+      "verification": "test"
+    },
+    {
+      "id": "R-169",
+      "section": "§16",
+      "requirement": "Security review evidence is freshly bound to the current tree.",
+      "type": "security",
+      "milestone": "M10",
+      "verification": "test"
+    },
+    {
+      "id": "R-170",
+      "section": "§16",
+      "requirement": "Security-specific validation runs in addition to ordinary checks.",
+      "type": "behavior",
+      "milestone": "M10",
+      "verification": "test"
+    },
+    {
+      "id": "R-171",
+      "section": "§16",
+      "requirement": "Passing ordinary tests does not equal passing security review.",
+      "type": "security",
+      "milestone": "M10",
+      "verification": "test: green tests + failing security gate blocks flow"
+    },
+    {
+      "id": "R-172",
+      "section": "§16",
+      "requirement": "A security failure routes through the bounded fixer and returns to security verification with fresh evidence.",
+      "type": "behavior",
+      "milestone": "M10",
+      "verification": "test"
+    },
+    {
+      "id": "R-173",
+      "section": "§16",
+      "requirement": "Any fixer mutation that can affect security-relevant behavior invalidates prior security-review evidence/verdicts so security review is re-armed over the post-fix tree.",
+      "type": "security",
+      "milestone": "M10",
+      "verification": "test: fix touching security-sensitive file → prior verdict void"
+    },
+    {
+      "id": "R-174",
+      "section": "§16",
+      "requirement": "Tests cover security failure and recovery behavior.",
+      "type": "process",
+      "milestone": "M10",
+      "verification": "process"
+    },
+    {
+      "id": "R-175",
+      "section": "§17",
+      "requirement": "FinalGate requires all required workflow stages completed.",
+      "type": "behavior",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-176",
+      "section": "§17",
+      "requirement": "FinalGate requires all required acceptance criteria passed.",
+      "type": "behavior",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-177",
+      "section": "§17",
+      "requirement": "FinalGate requires fresh deterministic verification evidence.",
+      "type": "security",
+      "milestone": "M11",
+      "verification": "test: stale evidence fails the gate"
+    },
+    {
+      "id": "R-178",
+      "section": "§17",
+      "requirement": "FinalGate requires valid scope/workspace state.",
+      "type": "behavior",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-179",
+      "section": "§17",
+      "requirement": "FinalGate requires the security gate passed.",
+      "type": "security",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-180",
+      "section": "§17",
+      "requirement": "FinalGate requires fixer state resolved.",
+      "type": "behavior",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-181",
+      "section": "§17",
+      "requirement": "FinalGate requires approval records valid and current.",
+      "type": "security",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-182",
+      "section": "§17",
+      "requirement": "FinalGate inputs are tied to the exact revision/fingerprint.",
+      "type": "security",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-183",
+      "section": "§17",
+      "requirement": "FinalGate requires no unresolved blocking failure.",
+      "type": "behavior",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-184",
+      "section": "§17",
+      "requirement": "The final summary cannot bypass FinalGate.",
+      "type": "security",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-185",
+      "section": "§17",
+      "requirement": "FinalGate failure routes to the correct failure/fixer state rather than silently succeeding.",
+      "type": "behavior",
+      "milestone": "M11",
+      "verification": "test"
+    },
+    {
+      "id": "R-186",
+      "section": "§18.1",
+      "requirement": "FinalSummary is read-only.",
+      "type": "behavior",
+      "milestone": "M12",
+      "verification": "test: no mutation APIs or side effects"
+    },
+    {
+      "id": "R-187",
+      "section": "§18.1",
+      "requirement": "FinalSummary contains: what was requested, implemented requirements, changed files/areas, verification results, security status, notable failures/fixes, resulting revision/fingerprint, final-gate status, and publishing readiness.",
+      "type": "behavior",
+      "milestone": "M12",
+      "verification": "test: all fields present"
+    },
+    {
+      "id": "R-188",
+      "section": "§18.2",
+      "requirement": "After FinalSummary the workflow enters AwaitingPushApproval.",
+      "type": "behavior",
+      "milestone": "M12",
+      "verification": "test"
+    },
+    {
+      "id": "R-189",
+      "section": "§18.2",
+      "requirement": "No branch/commit/push operation may begin before explicit human approval.",
+      "type": "security",
+      "milestone": "M12",
+      "verification": "test"
+    },
+    {
+      "id": "R-190",
+      "section": "§18.3",
+      "requirement": "Push approval is bound to feature identity, workflow revision, summary digest/hash, working-tree fingerprint, and final-gate status/digest/fingerprint.",
+      "type": "security",
+      "milestone": "M12",
+      "verification": "test: approval payload contains all bindings"
+    },
+    {
+      "id": "R-191",
+      "section": "§18.3",
+      "requirement": "A stale or modified summary invalidates the approval.",
+      "type": "security",
+      "milestone": "M12",
+      "verification": "test"
+    },
+    {
+      "id": "R-192",
+      "section": "§18.3",
+      "requirement": "A modified working tree invalidates the approval.",
+      "type": "security",
+      "milestone": "M12",
+      "verification": "test"
+    },
+    {
+      "id": "R-193",
+      "section": "§19.1",
+      "requirement": "Publishing refuses to run without a valid push approval bound to the current workflow/repository state.",
+      "type": "security",
+      "milestone": "M13",
+      "verification": "test"
+    },
+    {
+      "id": "R-194",
+      "section": "§19.2",
+      "requirement": "Publishing creates/uses a dedicated feature branch rather than publishing directly to protected/default branches.",
+      "type": "security",
+      "milestone": "M13",
+      "verification": "test"
+    },
+    {
+      "id": "R-195",
+      "section": "§19.3",
+      "requirement": "The publisher rejects targets main, master, and other configured protected branches.",
+      "type": "security",
+      "milestone": "M13",
+      "verification": "test: each branch name rejected"
+    },
+    {
+      "id": "R-196",
+      "section": "§19.4",
+      "requirement": "Git commands use structured argv and shell:false.",
+      "type": "security",
+      "milestone": "M13",
+      "verification": "test + code inspection"
+    },
+    {
+      "id": "R-197",
+      "section": "§19.5",
+      "requirement": "The Git flag firewall rejects --force, --force-with-lease*, --delete, --receive-pack*, and compound/spelling variants; no force-push route exists through the publisher.",
+      "type": "security",
+      "milestone": "M13",
+      "verification": "test: each flag form rejected"
+    },
+    {
+      "id": "R-198",
+      "section": "§19.6; §28.8",
+      "requirement": "Before committing/pushing the framework revalidates approval and repository state; a changed head, fingerprint, final-gate state, or relevant approval input stops publishing.",
+      "type": "security",
+      "milestone": "M13",
+      "verification": "test: each mutation aborts publish"
+    },
+    {
+      "id": "R-199",
+      "section": "§19.7",
+      "requirement": "Commit creation is deterministic enough to provide a traceable release artifact containing the approved change.",
+      "type": "behavior",
+      "milestone": "M13",
+      "verification": "test: fixed dates/author/message/tree → reproducible commit; artifact records SHA"
+    },
+    {
+      "id": "R-200",
+      "section": "§19.8",
+      "requirement": "The publisher records the push outcome and relevant branch/commit information.",
+      "type": "behavior",
+      "milestone": "M13",
+      "verification": "test"
+    },
+    {
+      "id": "R-201",
+      "section": "§19.9",
+      "requirement": "The workflow reaches Complete only after a successful publish operation.",
+      "type": "behavior",
+      "milestone": "M13",
+      "verification": "test"
+    },
+    {
+      "id": "R-202",
+      "section": "§19.9",
+      "requirement": "A failed push is not a successful workflow completion.",
+      "type": "behavior",
+      "milestone": "M13",
+      "verification": "test: push failure → non-complete state"
+    },
+    {
+      "id": "R-203",
+      "section": "§19.10",
+      "requirement": "Automated tests use a disposable/local or otherwise controlled non-production remote; no product test may push to a real production repository.",
+      "type": "security",
+      "milestone": "M13",
+      "verification": "test: test remote config + code inspection"
+    },
+    {
+      "id": "R-204",
+      "section": "§20.1",
+      "requirement": "A disposable project executes the full happy-path lifecycle request → grill → spec → plan → approval → implementation → reviews → verifications → security → final gate → summary → push approval → branch → commit → push → complete.",
+      "type": "behavior",
+      "milestone": "M14",
+      "verification": "test: E2E suite"
+    },
+    {
+      "id": "R-205",
+      "section": "§20.2",
+      "requirement": "Controlled failures route into the fixer and return to the correct origin with fresh evidence (E2E).",
+      "type": "behavior",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-206",
+      "section": "§20.3",
+      "requirement": "Security-stage failure is independently testable and cannot be bypassed by ordinary test/static/runtime success.",
+      "type": "security",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-207",
+      "section": "§20.4",
+      "requirement": "E2E proves implementation cannot start without plan approval.",
+      "type": "security",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-208",
+      "section": "§20.4",
+      "requirement": "E2E proves publishing cannot start without push approval.",
+      "type": "security",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-209",
+      "section": "§20.4",
+      "requirement": "E2E proves a stale approval cannot be reused.",
+      "type": "security",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-210",
+      "section": "§20.4",
+      "requirement": "E2E proves modified repository state invalidates approval/evidence.",
+      "type": "security",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-211",
+      "section": "§20.4",
+      "requirement": "E2E proves agents cannot manufacture approvals.",
+      "type": "security",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-212",
+      "section": "§20.5",
+      "requirement": "A failed branch/commit/push operation produces a failed/non-complete outcome with useful evidence.",
+      "type": "behavior",
+      "milestone": "M14",
+      "verification": "test"
+    },
+    {
+      "id": "R-213",
+      "section": "§20.6",
+      "requirement": "Equivalent runs over equivalent fixture inputs produce stable workflow behavior and artifacts to the extent practical.",
+      "type": "behavior",
+      "milestone": "M14",
+      "verification": "test: repeated fixture run diff (proposed scope: state sequence + artifact structure; agent text may vary — see prd-issues)"
+    },
+    {
+      "id": "R-214",
+      "section": "§20.7",
+      "requirement": "The comprehensive suite covers prior milestone behavior and critical security boundaries.",
+      "type": "process",
+      "milestone": "M14",
+      "verification": "process"
+    },
+    {
+      "id": "R-215",
+      "section": "§20.8; §36; §38.1",
+      "requirement": "After M14 the core workflow is feature-frozen; future work focuses on productization/extensions.",
+      "type": "process",
+      "milestone": "M14",
+      "verification": "process/manual"
+    },
+    {
+      "id": "R-216",
+      "section": "§21",
+      "requirement": "The finished source repository is installable and buildable outside its development-only monorepo context.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test: clean-checkout build in temp dir"
+    },
+    {
+      "id": "R-217",
+      "section": "§21",
+      "requirement": "A deterministic top-level pnpm build exists.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test: repeated builds stable"
+    },
+    {
+      "id": "R-218",
+      "section": "§21",
+      "requirement": "Packages build in dependency order.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test: build order respected"
+    },
+    {
+      "id": "R-219",
+      "section": "§21",
+      "requirement": "Intended runtime packages emit JavaScript runtime output and TypeScript declarations.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test: dist contains .js and .d.ts"
+    },
+    {
+      "id": "R-220",
+      "section": "§21",
+      "requirement": "Packages intended for distribution emit dist (or the final agreed build output).",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test"
+    },
+    {
+      "id": "R-221",
+      "section": "§21",
+      "requirement": "Package main/types/exports point to built output, not raw source .ts files.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "code inspection + test: resolve entry from built package"
+    },
+    {
+      "id": "R-222",
+      "section": "§21",
+      "requirement": "The module field is used only when actually required by the runtime/package strategy.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-223",
+      "section": "§21",
+      "requirement": "Internal package dependencies resolve from compiled artifacts rather than monorepo source paths.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test: consume built package"
+    },
+    {
+      "id": "R-224",
+      "section": "§21",
+      "requirement": "No bundler is introduced unless necessary.",
+      "type": "process",
+      "milestone": "P1",
+      "verification": "code inspection (vague — see prd-issues)"
+    },
+    {
+      "id": "R-225",
+      "section": "§21",
+      "requirement": "The existing module-system strategy is preserved.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-226",
+      "section": "§21",
+      "requirement": "Generated build output is not committed and is added to .gitignore where appropriate.",
+      "type": "process",
+      "milestone": "P1",
+      "verification": "code inspection: git status + .gitignore"
+    },
+    {
+      "id": "R-227",
+      "section": "§21",
+      "requirement": "A clean-checkout build succeeds.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test: fresh clone build"
+    },
+    {
+      "id": "R-228",
+      "section": "§21",
+      "requirement": "Compiled runtime output resolves its internal package dependencies without importing source TypeScript directly.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test"
+    },
+    {
+      "id": "R-229",
+      "section": "§21",
+      "requirement": "Test/typecheck/lint behavior is preserved.",
+      "type": "behavior",
+      "milestone": "P1",
+      "verification": "test: existing suites pass"
+    },
+    {
+      "id": "R-230",
+      "section": "§21",
+      "requirement": "P1 adds no CLI behavior, initialization logic, npm publishing, or new workflow features.",
+      "type": "process",
+      "milestone": "P1",
+      "verification": "code inspection: change scope"
+    },
+    {
+      "id": "R-231",
+      "section": "§22.1",
+      "requirement": "The CLI provides agentflow --help, --version, status, start, run, approve plan, and approve push (exact syntax may evolve; capabilities must exist).",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "test: invoke each command"
+    },
+    {
+      "id": "R-232",
+      "section": "§22.2",
+      "requirement": "The CLI is a thin layer over existing orchestration APIs; no second state machine; no hidden workflow semantics in command handling.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-233",
+      "section": "§22.2; §34",
+      "requirement": "The CLI exposes useful, predictable exit codes.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "test: exit codes per outcome class"
+    },
+    {
+      "id": "R-234",
+      "section": "§22.2",
+      "requirement": "Errors are useful and human-readable; no stack traces by default for ordinary user errors.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "test"
+    },
+    {
+      "id": "R-235",
+      "section": "§22.2",
+      "requirement": "Version comes from package metadata.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "test: --version matches package.json"
+    },
+    {
+      "id": "R-236",
+      "section": "§22.2",
+      "requirement": "status is read-only.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "test: no state mutation during status"
+    },
+    {
+      "id": "R-237",
+      "section": "§22.2",
+      "requirement": "start invokes existing orchestration APIs.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-238",
+      "section": "§22.2",
+      "requirement": "run must not bypass human approval gates.",
+      "type": "security",
+      "milestone": "P2",
+      "verification": "test: run halts at approval states"
+    },
+    {
+      "id": "R-239",
+      "section": "§22.2",
+      "requirement": "approve plan and approve push use existing approval mechanisms.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "code inspection + test"
+    },
+    {
+      "id": "R-240",
+      "section": "§22.2",
+      "requirement": "CLI commands work against persisted workflow state.",
+      "type": "behavior",
+      "milestone": "P2",
+      "verification": "test"
+    },
+    {
+      "id": "R-241",
+      "section": "§22.3",
+      "requirement": "Fixture/mocked CLI tests cover help, version, status, start, run, plan approval, push approval, and error/exit behavior; unit tests require no live OpenCode.",
+      "type": "process",
+      "milestone": "P2",
+      "verification": "process: test suite inspection"
+    },
+    {
+      "id": "R-242",
+      "section": "§23.1",
+      "requirement": "agentflow init detects the target repository and validates that it is a Git repository.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test: non-Git directory rejected"
+    },
+    {
+      "id": "R-243",
+      "section": "§23.1",
+      "requirement": "init creates the required .agentflow configuration/state structure.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test"
+    },
+    {
+      "id": "R-244",
+      "section": "§23.1",
+      "requirement": "init is safe to run repeatedly (idempotent).",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test: double init"
+    },
+    {
+      "id": "R-245",
+      "section": "§23.1",
+      "requirement": "init preserves compatible existing configuration.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test: existing values kept"
+    },
+    {
+      "id": "R-246",
+      "section": "§23.1",
+      "requirement": "init avoids overwriting unrelated user files.",
+      "type": "security",
+      "milestone": "P3",
+      "verification": "test"
+    },
+    {
+      "id": "R-247",
+      "section": "§23.1",
+      "requirement": "init makes no source-code changes, creates no commits, performs no pushes, and copies no workflow source into the target repository.",
+      "type": "security",
+      "milestone": "P3",
+      "verification": "test: git status clean of source changes; no new commits"
+    },
+    {
+      "id": "R-248",
+      "section": "§23.2",
+      "requirement": "The initializer creates only files actually required by the implementation; .agentflow is the target project's workflow configuration/state location.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test: exact file-set assertion"
+    },
+    {
+      "id": "R-249",
+      "section": "§23.2",
+      "requirement": "The product does not create .opencode/ in the target repository merely to host framework profiles.",
+      "type": "security",
+      "milestone": "P3",
+      "verification": "test: .opencode absent after init and run"
+    },
+    {
+      "id": "R-250",
+      "section": "§23.3",
+      "requirement": "The initialized configuration has a documented schema/version, deterministic defaults, and clear required/optional fields.",
+      "type": "documentation",
+      "milestone": "P3",
+      "verification": "code inspection: docs + schema"
+    },
+    {
+      "id": "R-251",
+      "section": "§23.3",
+      "requirement": "Configuration is validated before execution.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test: invalid config blocks run"
+    },
+    {
+      "id": "R-252",
+      "section": "§23.3",
+      "requirement": "Compatibility behavior is defined for re-running initialization.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test"
+    },
+    {
+      "id": "R-253",
+      "section": "§23.4",
+      "requirement": "Fixture validation proves expected files are created and unexpected files are not created.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test"
+    },
+    {
+      "id": "R-254",
+      "section": "§23.4",
+      "requirement": "Fixture validation proves existing unrelated files remain unchanged and target project source files are untouched.",
+      "type": "security",
+      "milestone": "P3",
+      "verification": "test: checksums"
+    },
+    {
+      "id": "R-255",
+      "section": "§23.4",
+      "requirement": "Second init is safe/idempotent (fixture-proven).",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test"
+    },
+    {
+      "id": "R-256",
+      "section": "§23.4",
+      "requirement": "status can read the initialized state.",
+      "type": "behavior",
+      "milestone": "P3",
+      "verification": "test"
+    },
+    {
+      "id": "R-257",
+      "section": "§24",
+      "requirement": "P4 E2E runs in a disposable real Git repository outside the Agent Workflow Kit repository.",
+      "type": "process",
+      "milestone": "P4",
+      "verification": "process: harness setup"
+    },
+    {
+      "id": "R-258",
+      "section": "§24",
+      "requirement": "The main P4 E2E uses real OpenCode, not a fake CLI or mocked transport.",
+      "type": "process",
+      "milestone": "P4",
+      "verification": "process: harness inspection"
+    },
+    {
+      "id": "R-259",
+      "section": "§24",
+      "requirement": "The E2E starts with agentflow init and executes the full feature lifecycle through successful publishing.",
+      "type": "behavior",
+      "milestone": "P4",
+      "verification": "test"
+    },
+    {
+      "id": "R-260",
+      "section": "§24",
+      "requirement": "P4 proves: real invocation, real profile selection, real fixture feature, deterministic static/test/runtime/security verification, workspace isolation, runtime config isolation, profile restrictions, no arbitrary shell, verification environment restrictions, evidence freshness, approval integrity, Git publishing protections, real branch creation, real deterministic commit, safe push to disposable test remote, and Complete only after successful push.",
+      "type": "behavior",
+      "milestone": "P4",
+      "verification": "test: E2E assertions per boundary"
+    },
+    {
+      "id": "R-261",
+      "section": "§24",
+      "requirement": "A controlled failure enters the fixer and then re-verifies successfully where the fixture is designed for recovery.",
+      "type": "behavior",
+      "milestone": "P4",
+      "verification": "test"
+    },
+    {
+      "id": "R-262",
+      "section": "§24",
+      "requirement": "P4 documentation records exact prerequisites, OpenCode version, setup commands, workflow transitions, verification results, resulting branch, resulting commit, and push result.",
+      "type": "documentation",
+      "milestone": "P4",
+      "verification": "code inspection: report doc"
+    },
+    {
+      "id": "R-263",
+      "section": "§24",
+      "requirement": "No new workflow feature may be added solely to make P4 easier.",
+      "type": "process",
+      "milestone": "P4",
+      "verification": "code inspection: change scope"
+    },
+    {
+      "id": "R-264",
+      "section": "§25.1",
+      "requirement": "README explains: what the kit is, the problem it solves, who it is for, the end-to-end workflow, why deterministic verification matters, where humans approve work, how safe publishing works, OpenCode as the supported production adapter, and how the architecture is separated.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "manual/code inspection: README review"
+    },
+    {
+      "id": "R-265",
+      "section": "§25.2",
+      "requirement": "Architecture documentation covers boundaries among core contracts/state machine, orchestration, persistence, project verification, workspace isolation, OpenCode adapter, CLI, and publishing.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "code inspection: docs"
+    },
+    {
+      "id": "R-266",
+      "section": "§25.3",
+      "requirement": "The quick start shows the validated flow install → agentflow init → configure → start → run → approve plan → implementation/verification → final summary → approve push → branch/commit/push, and the exact commands match the shipped CLI.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "test: commands executed against shipped CLI"
+    },
+    {
+      "id": "R-267",
+      "section": "§25.4",
+      "requirement": "Docs state what .agentflow/ contains, what files the workflow creates/changes, that .opencode/ is not generated for framework profiles, where temporary OpenCode runtime config lives, and which files are user/project config versus framework runtime state.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "code inspection: docs"
+    },
+    {
+      "id": "R-268",
+      "section": "§25.5",
+      "requirement": "The README clearly identifies the plan approval and push approval boundaries.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-269",
+      "section": "§25.6",
+      "requirement": "Security documentation reflects implemented behavior only; no protection is claimed that the code does not enforce.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "manual: claims vs code audit"
+    },
+    {
+      "id": "R-270",
+      "section": "§25.7",
+      "requirement": "The README links/references the real P4 external-project demo as evidence the workflow works in practice.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "code inspection: link resolves"
+    },
+    {
+      "id": "R-271",
+      "section": "§25.8",
+      "requirement": "A contributor guide documents development setup, builds, tests, lint/typecheck, fixture setup, and milestone validation.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "code inspection"
+    },
+    {
+      "id": "R-272",
+      "section": "§25.9",
+      "requirement": "Documentation contains no outdated/hypothetical claims and does not claim support for unimplemented agent runtimes.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "manual review"
+    },
+    {
+      "id": "R-273",
+      "section": "§25.9",
+      "requirement": "No npm-install instructions appear before P6 is complete.",
+      "type": "documentation",
+      "milestone": "P5",
+      "verification": "code inspection: README"
+    },
+    {
+      "id": "R-274",
+      "section": "§25.9",
+      "requirement": "Every quick-start command is tested.",
+      "type": "process",
+      "milestone": "P5",
+      "verification": "process: scripted quick-start run"
+    },
+    {
+      "id": "R-275",
+      "section": "§26.1",
+      "requirement": "Package metadata finalized: name, version, description, license, repository metadata, homepage/docs, keywords, package exports, published file list, CLI binary metadata.",
+      "type": "process",
+      "milestone": "P6",
+      "verification": "code inspection: package.json"
+    },
+    {
+      "id": "R-276",
+      "section": "§26.2",
+      "requirement": "Generated npm tarballs contain no temporary directories, local machine paths, secrets, audit leftovers, development-only artifacts, or unintended source/test material.",
+      "type": "security",
+      "milestone": "P6",
+      "verification": "test: npm pack + content scan"
+    },
+    {
+      "id": "R-277",
+      "section": "§26.3",
+      "requirement": "The release process includes package build, package-content inspection, npm publish --dry-run (or equivalent), release/version decision, changelog/release notes, and final publication only after P1–P5 acceptance.",
+      "type": "process",
+      "milestone": "P6",
+      "verification": "process: release checklist/script"
+    },
+    {
+      "id": "R-278",
+      "section": "§26.4",
+      "requirement": "The GitHub repository has an accurate description, topic/tag set (only topics supported by the product), and release information.",
+      "type": "process",
+      "milestone": "P6",
+      "verification": "manual: GitHub settings/API (not fully local)"
+    },
+    {
+      "id": "R-279",
+      "section": "§26.5; §39",
+      "requirement": "A new developer can go discover → README → install → init → start/run → develop/verify/approve → publish without access to the development monorepo internals.",
+      "type": "process",
+      "milestone": "P6",
+      "verification": "manual: fresh-machine walkthrough"
+    },
+    {
+      "id": "R-280",
+      "section": "§27.1",
+      "requirement": "The framework itself owns state transitions, approvals, verification configuration, security gates, evidence binding, workspace boundaries, and Git publishing; agent output is treated as untrusted.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "code inspection + tests"
+    },
+    {
+      "id": "R-281",
+      "section": "§27.2",
+      "requirement": "The target repository cannot redefine framework control-plane authority: profile shadowing, configuration boundary crossing, plugin execution compromise, forged workflow response fields, verification rule tampering, and protected configuration modification are all blocked.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test: each attack fixture blocked"
+    },
+    {
+      "id": "R-282",
+      "section": "§27.5",
+      "requirement": "Evidence is tied to the relevant workflow revision/session, exact/reproducible command identity where applicable, working-tree fingerprint, fixer-history constraints, and the current final-gate state; stale evidence is invalid.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-283",
+      "section": "§27.7",
+      "requirement": "The publisher prevents unauthorized branch/commit operations and shell/argument injection (in addition to force/delete/protected-branch rules).",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-284",
+      "section": "§27.8",
+      "requirement": "Repository root, workspace identity, approved baseline, lease, and relevant repository state are validated before executing sensitive stages.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-285",
+      "section": "§27.8",
+      "requirement": "Workspace changes outside allowed scope block progression.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-286",
+      "section": "§27.9",
+      "requirement": "Persistence guards against path traversal, unsafe feature identifiers, unsafe slug/path construction, session cross-contamination, lock abuse, unsafe symlink behavior, and malformed artifact/approval records.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test: attack fixtures"
+    },
+    {
+      "id": "R-287",
+      "section": "§27.10",
+      "requirement": "The architecture supports independent static/dynamic security audits without undocumented assumptions; external audit findings are triaged against actual source behavior.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "manual: audit walkthrough (vague — see prd-issues)"
+    },
+    {
+      "id": "R-288",
+      "section": "§28.1",
+      "requirement": "The stage definition (not the model request) decides which OpenCode profile is permitted; a profile/role mismatch fails the execution.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-289",
+      "section": "§28.4",
+      "requirement": "Feature identifiers have a constrained format and path-safe derivation.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test: invalid ids rejected"
+    },
+    {
+      "id": "R-290",
+      "section": "§28.4",
+      "requirement": "Paths/filenames are normalized and traversal-resistant.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-291",
+      "section": "§28.5",
+      "requirement": "Workspace identifiers are derived from validated framework-controlled data, not directly from user-provided path spellings.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-292",
+      "section": "§28.6",
+      "requirement": "Approval records are validated when read and again before the sensitive action they authorize.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-293",
+      "section": "§28.7",
+      "requirement": "A push approval cannot authorize publishing unless the associated FinalGate status is exactly valid and current.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-294",
+      "section": "§29",
+      "requirement": "Durable artifacts exist for all categories: request, requirements/specification, plan, plan review, implementation result, code review, scope review, static/test/runtime verification, security review, fixer history, final gate, final summary, approval records, and publishing outcome.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test: artifact per category after E2E (supersedes §8 artifact list)"
+    },
+    {
+      "id": "R-295",
+      "section": "§29",
+      "requirement": "Artifacts make it possible to answer: what was requested, what was approved, what the agent did, what failed, what was fixed, what evidence passed, which exact repository state was verified, who/what approved publishing, what branch/commit was created, and whether the push succeeded.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test: post-run audit checklist"
+    },
+    {
+      "id": "R-296",
+      "section": "§30.3",
+      "requirement": "Separation of target project state, .agentflow/ configuration, and external OpenCode runtime state is preserved across initialization, execution, and cleanup.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test: all three phases"
+    },
+    {
+      "id": "R-297",
+      "section": "§31",
+      "requirement": "Project configuration explicitly declares: package manager where needed, static verification commands, test verification commands, runtime startup configuration, runtime readiness information, runtime acceptance endpoint/checks, timeouts/bounds within supported policy, and security verification inputs where required.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test: config schema covers all fields"
+    },
+    {
+      "id": "R-298",
+      "section": "§31",
+      "requirement": "The framework refuses to invent critical verification details merely because a project 'looks like' a particular stack.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test: missing explicit config → explicit error/deferred"
+    },
+    {
+      "id": "R-299",
+      "section": "§32",
+      "requirement": "All framework-owned child processes follow: structured argv, shell:false, bounded output/time, explicit cancellation/termination, process cleanup, controlled working directory, sanitized environment where repository code executes, and meaningful error/result classification.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test: shared runner contract suite"
+    },
+    {
+      "id": "R-300",
+      "section": "§32",
+      "requirement": "No user-facing feature may bypass the process-safety controls for convenience.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "code inspection: single bounded runner used everywhere"
+    },
+    {
+      "id": "R-301",
+      "section": "§33.1",
+      "requirement": "Unit tests cover state transitions, snapshot restoration, validation, persistence mutations, path rules, lock behavior, approval validation, evidence binding, Git flag firewall, CLI command handling, OpenCode parsing/configuration policy, and project verification configuration.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "process: suite inventory"
+    },
+    {
+      "id": "R-302",
+      "section": "§33.2",
+      "requirement": "Integration tests cover core+orchestration, orchestration+persistence, orchestration+workspace, orchestration+project verification, orchestration+OpenCode, and orchestration+publishing.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "process"
+    },
+    {
+      "id": "R-303",
+      "section": "§33.3",
+      "requirement": "Disposable fixture projects are maintained for static verification, tests, runtime servers, controlled failures, fixer recovery, external initialization, and safe publishing.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "process: fixtures exist"
+    },
+    {
+      "id": "R-304",
+      "section": "§33.4",
+      "requirement": "The full happy/failure/security/publishing E2E paths are proven; P4 specifically proves them using real OpenCode in a separate target repository.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "test (duplicate of §20/§24)"
+    },
+    {
+      "id": "R-305",
+      "section": "§33.5",
+      "requirement": "Security regression tests protect against: shell execution, environment credential leakage, profile shadowing, plugin/config boundary crossing, forged state/approval, stale evidence, scope escape, unsafe Git pushes, protected branch bypass, and verification-rule tampering.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "process: test inventory per boundary"
+    },
+    {
+      "id": "R-306",
+      "section": "§34",
+      "requirement": "Clear command discovery through --help.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-307",
+      "section": "§34",
+      "requirement": "Readable status output with explicit current workflow state and explicit blocked/approval state.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-308",
+      "section": "§34",
+      "requirement": "The CLI explicitly indicates when human approval is required.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-309",
+      "section": "§34",
+      "requirement": "A useful failure reason is surfaced to the user.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test"
+    },
+    {
+      "id": "R-310",
+      "section": "§34",
+      "requirement": "No silent bypasses of workflow controls.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test + code inspection"
+    },
+    {
+      "id": "R-311",
+      "section": "§34",
+      "requirement": "Non-interactive operation where appropriate.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test: commands never block on stdin (vague — see prd-issues)"
+    },
+    {
+      "id": "R-312",
+      "section": "§35",
+      "requirement": "No orphaned runtime processes where supported cleanup is available.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test: process table clean after run"
+    },
+    {
+      "id": "R-313",
+      "section": "§35",
+      "requirement": "No indefinite waits on external agent processes.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test: all agent waits timeout-bounded"
+    },
+    {
+      "id": "R-314",
+      "section": "§35",
+      "requirement": "No accidental repeated publishing.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test: second publish attempt blocked/identity-checked"
+    },
+    {
+      "id": "R-315",
+      "section": "§35",
+      "requirement": "No duplicate initialization damage.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test (duplicate of R-244/R-255)"
+    },
+    {
+      "id": "R-316",
+      "section": "§35",
+      "requirement": "Ability to resume/recover from persisted workflow state.",
+      "type": "behavior",
+      "milestone": "cross-cutting",
+      "verification": "test (duplicate of R-043/R-072)"
+    },
+    {
+      "id": "R-317",
+      "section": "§36",
+      "requirement": "Browser automation is not a mandatory verification mechanism in the core release.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "code inspection: no browser dependency in core verification"
+    },
+    {
+      "id": "R-318",
+      "section": "§36",
+      "requirement": "No unlimited autonomous agent loops.",
+      "type": "security",
+      "milestone": "cross-cutting",
+      "verification": "test: all agent stages bounded"
+    },
+    {
+      "id": "R-319",
+      "section": "§36",
+      "requirement": "No claims of support for multiple agents before their adapters exist.",
+      "type": "documentation",
+      "milestone": "cross-cutting",
+      "verification": "code inspection: docs claims vs adapters"
+    },
+    {
+      "id": "R-320",
+      "section": "§37.1 (future)",
+      "requirement": "A stable agent adapter interface lets additional runtimes integrate without changing the core state machine; adapters cannot own transitions or self-approve, and must use structured transport, bounded execution, capability probing, controlled permissions, repository/configuration boundary protection, a compatible response protocol, and deterministic error handling.",
+      "type": "security",
+      "milestone": "future (§37)",
+      "verification": "code inspection + adapter contract tests (not required for current baseline)"
+    },
+    {
+      "id": "R-321",
+      "section": "§37.2 (future)",
+      "requirement": "An optional Claude Code adapter implements the same workflow contract with no Claude-specific behavior in the core orchestrator, preserving approvals, deterministic verification, workspace isolation, environment restrictions, evidence freshness, and protected publishing.",
+      "type": "behavior",
+      "milestone": "future (§37)",
+      "verification": "adapter tests (when implemented)"
+    },
+    {
+      "id": "R-322",
+      "section": "§37.3 (future)",
+      "requirement": "An optional Codex adapter uses the same workflow contracts; Codex execution stays subordinate to the state machine, verification gates, approval records, and Git publisher.",
+      "type": "behavior",
+      "milestone": "future (§37)",
+      "verification": "adapter tests (when implemented)"
+    },
+    {
+      "id": "R-323",
+      "section": "§37.4 (future)",
+      "requirement": "An optional Freebuff adapter must not revive a second orchestration system or relax the core security model.",
+      "type": "behavior",
+      "milestone": "future (§37)",
+      "verification": "adapter tests + code inspection (when implemented)"
+    },
+    {
+      "id": "R-324",
+      "section": "§37.6 (future)",
+      "requirement": "Logical workflow roles (analyst/griller, spec/planner, implementation, code reviewer, verifier/reviewer, fixer, security reviewer) remain stable across runtimes and may map onto a small number of physical permission profiles.",
+      "type": "behavior",
+      "milestone": "future (§37)",
+      "verification": "code inspection (when implemented)"
+    },
+    {
+      "id": "R-325",
+      "section": "§37.7 (future)",
+      "requirement": "Multi-agent parallelism must not weaken approval ordering, state consistency, workspace integrity, evidence binding, or deterministic gate behavior.",
+      "type": "security",
+      "milestone": "future (§37)",
+      "verification": "parallel-mode tests (when implemented)"
+    },
+    {
+      "id": "R-326",
+      "section": "§37.8 (future)",
+      "requirement": "Alternative workspace providers (containers, remote workspaces, other backends) must satisfy the baseline/lease/scope/integrity contract.",
+      "type": "behavior",
+      "milestone": "future (§37)",
+      "verification": "provider contract tests (when implemented)"
+    },
+    {
+      "id": "R-327",
+      "section": "§37.9 (future)",
+      "requirement": "Runtime verification extensions beyond HTTP remain explicit and deterministic; browser automation only as an optional adapter meeting the same evidence/security requirements.",
+      "type": "behavior",
+      "milestone": "future (§37)",
+      "verification": "extension tests (when implemented)"
+    },
+    {
+      "id": "R-328",
+      "section": "§37.11 (future)",
+      "requirement": "External security audit tools/skills are advisory/audit inputs, read-only, never granted permission to alter the repository, and their findings enter gates only if explicitly integrated.",
+      "type": "security",
+      "milestone": "future (§37)",
+      "verification": "tool contract tests (when implemented)"
+    },
+    {
+      "id": "R-329",
+      "section": "§37.13 (future)",
+      "requirement": "All future integrations plug into the current workflow rather than replacing it.",
+      "type": "behavior",
+      "milestone": "future (§37)",
+      "verification": "code inspection (when implemented)"
+    },
+    {
+      "id": "R-330",
+      "section": "§38.3",
+      "requirement": "A change altering workflow safety, approval semantics, state transitions, evidence semantics, or publishing authority requires an explicit versioned product decision, not a silent adapter-level change.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "process: change-review checklist"
+    },
+    {
+      "id": "R-331",
+      "section": "§39",
+      "requirement": "A developer can obtain the product and understand how to use it without reading the implementation source first.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "manual: fresh-user walkthrough (duplicate of R-279)"
+    },
+    {
+      "id": "R-332",
+      "section": "§42",
+      "requirement": "Implementation-vs-PRD conflicts are resolved using the §42 priority order: human approval authority, deterministic verification, evidence/approval freshness and integrity, workspace/configuration boundaries, safe Git publishing, smallest implementation, explicit extensions.",
+      "type": "process",
+      "milestone": "cross-cutting",
+      "verification": "process: recorded decision log"
+    }
   ]
 }
