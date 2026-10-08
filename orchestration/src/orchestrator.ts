@@ -103,6 +103,7 @@ import {
   approvedScopeFromPlan,
   evaluateWorkspaceIntegrity,
   evaluateWorkspaceScope,
+  isFrameworkRecordingPath,
   isProtectedWorkspacePath,
   matchesScopePattern,
   subtractWorkspaceChanges,
@@ -493,8 +494,14 @@ function buildScopeEvidence(
     ...inspection.changes.renamed.flatMap((rename) => [rename.from, rename.to]),
   ];
 
+  // The record has to re-derive the verdict rather than merely describe the tree, so it applies the
+  // same exclusions the verdict does: a recording the scope check excuses (see
+  // `isFrameworkRecordingPath`) cannot be listed here as unauthorized. The paths still appear in
+  // `observedPaths` — the measurement saw them; only the verdict does not blame the stage for them.
   const unauthorized = observed.filter(
-    (path) => isProtectedWorkspacePath(path) || !approvedPatterns.some((pattern) => matchesScopePattern(pattern, path)),
+    (path) =>
+      !isFrameworkRecordingPath(path) &&
+      (isProtectedWorkspacePath(path) || !approvedPatterns.some((pattern) => matchesScopePattern(pattern, path))),
   );
 
   return {

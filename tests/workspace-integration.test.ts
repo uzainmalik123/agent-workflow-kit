@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { recordStageInvocation } from "@agent-workflow-kit/opencode";
 import {
   createWorkflowOrchestrator,
   type OrchestrationResult,
+  type StageExecutionRequest,
   type WorkStage,
 } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
@@ -77,17 +79,24 @@ interface Harness {
 function makeHarness(
   fixture: Fixture,
   onExecute: (directory: string) => Promise<void> = () => Promise.resolve(),
+  transport: (request: StageExecutionRequest) => Promise<void> = () => Promise.resolve(),
 ): Harness {
   const store = createFeatureSessionStore(fixture.root, { clock: () => fixedTimestamp });
   const directories = new Map<string, string>();
   const executor = new FakeStageExecutor({
     // Every stage records where it ran, and every post-approval stage is where a test wants a change
     // written. A pre-approval stage has no baseline, so the callback never touches the human's own
-    // checkout — the same distinction the framework itself makes.
-    after: (request) => {
+    // checkout — the same distinction the framework itself makes. The transport hook runs for every
+    // stage, after whatever the stage wrote, because the real adapter records the invocation while
+    // the stage is still running — in the same working directory the scope check reads back.
+    after: async (request) => {
       directories.set(request.stage, request.workspace.workingDirectory);
 
-      return request.workspace.baseline === null ? undefined : onExecute(request.workspace.workingDirectory);
+      if (request.workspace.baseline !== null) {
+        await onExecute(request.workspace.workingDirectory);
+      }
+
+      await transport(request);
     },
   }).configure("planning", { artifacts: [{ name: "plan", content: planApprovingSource() }] });
 
@@ -383,5 +392,209 @@ describe("a post-approval stage in a real worktree", () => {
     // run at all, and the worktree is untouched.
     expect(harness.executor.requestFor("implementation")).toBeUndefined();
     expect(git(opened.ok ? opened.workspace.workingDirectory : fixture.cacheRoot, "status", "--porcelain").trim()).toBe("");
+  });
+});
+
+/**
+ * The recorder and the scope guard meet in one directory. The transport writes
+ * `.agentflow/recordings/<featureId>/<stage>/<stamp>/{invocation.json,stdout.txt,stderr.txt}` into
+ * the stage's own working directory while the stage runs, and the post-stage inspection measures the
+ * same tree afterwards. The framework writing its own diagnostics is not a stage writing to a
+ * checkout nobody approved — but the guard must still refuse every other write, including one the
+ * agent put under `.agentflow/` itself, or it would be no guard at all.
+ */
+describe("a stage whose transport records its invocation", () => {
+  /**
+   * Runs `runNext` until a stage actually executes. The first call after `createFeature` only applies
+   * the workflow's own `advance` event (a `PASSIVE_ADVANCE_STATES` step, orchestrator.ts:639), and a
+   * test about the stage needs the call that runs the stage.
+   */
+  async function runStage(harness: Harness): Promise<OrchestrationResult> {
+    for (let step = 0; step < 40; step += 1) {
+      const result = await harness.orchestrator.runNext("F-001");
+
+      if (result.stage !== null) {
+        return result;
+      }
+
+      if (result.status !== "advanced") {
+        throw new Error(`The workflow stopped before a stage ran: ${result.status}`);
+      }
+    }
+
+    throw new Error("No stage ran.");
+  }
+
+  /** What the real adapter does when an invocation returns: write the recording, best-effort. */
+  async function recordInvocation(request: StageExecutionRequest): Promise<void> {
+    const written = await recordStageInvocation(
+      request.workspace.workingDirectory,
+      { featureId: request.feature.featureId, stage: request.stage },
+      {
+        command: "opencode",
+        args: ["run", "--standalone", "--agent", "agentflow-read", "--format", "json", "--prompt", "probe"],
+        cwd: request.workspace.workingDirectory,
+        startedAt: fixedTimestamp,
+        observation: {
+          termination: "exited",
+          exitCode: 0,
+          stdout: "{\"probe\":\"ok\"}\n",
+          stderr: "",
+          startedAt: fixedTimestamp,
+          durationMs: 7,
+        },
+        error: null,
+      },
+    );
+
+    if (written === null) {
+      throw new Error("The recording could not be written.");
+    }
+  }
+
+  /** What one recorded stage leaves on disk: the stamp directories, and the first one's files. */
+  async function recordingsOf(
+    root: string,
+    stage: WorkStage,
+  ): Promise<{ readonly stamps: readonly string[]; readonly files: readonly string[] }> {
+    const directory = join(root, ".agentflow", "recordings", "F-001", stage);
+    const stamps = await readdir(directory);
+    const [stamp] = stamps;
+    const files = stamp === undefined ? [] : await readdir(join(directory, stamp));
+
+    return { stamps, files: [...files].sort() };
+  }
+
+  it("completes a read stage that recorded itself, and keeps the recording on disk", async () => {
+    const fixture = await makeFixture();
+    const harness = makeHarness(fixture, undefined, recordInvocation);
+    await createFeature(harness);
+
+    const result = await runStage(harness);
+
+    expect(result.stage).toBe("grill");
+    expect(result.status).toBe("stage_completed");
+    expect(result.scope?.unauthorizedPaths).toEqual([]);
+    expect(await recordingsOf(fixture.root, "grill")).toEqual({
+      stamps: [expect.any(String)],
+      files: ["invocation.json", "stderr.txt", "stdout.txt"],
+    });
+  });
+
+  it("still refuses a read stage that wrote anything else, even under .agentflow", async () => {
+    const fixture = await makeFixture();
+    const harness = makeHarness(fixture, undefined, async (request) => {
+      await writeFile(
+        join(request.workspace.workingDirectory, ".agentflow", "notes.md"),
+        "where does this file belong?\n",
+        "utf8",
+      );
+      // A near-miss: the recording's own directory shape and stamp, but a file the recorder never
+      // writes. The exclusion is the exact recorder output, not the directory it lives in.
+      const forged = join(
+        request.workspace.workingDirectory,
+        ".agentflow",
+        "recordings",
+        "F-001",
+        "grill",
+        "20260405T060708Z-abcd",
+      );
+      await mkdir(forged, { recursive: true });
+      await writeFile(join(forged, "notes.md"), "not a recording\n", "utf8");
+      await recordInvocation(request);
+    });
+    await createFeature(harness);
+
+    const result = await runStage(harness);
+
+    expect(result.status).toBe("scope_violation");
+    expect(result.error?.code).toBe("scope_violation");
+    expect(result.error?.message).toContain(".agentflow/notes.md");
+    // Only the agent's files are blamed: the recording is still measured — a guard that stopped
+    // looking at it would be blind — but it is not treated as a stage write.
+    expect(result.scope?.unauthorizedPaths).toEqual([
+      ".agentflow/notes.md",
+      ".agentflow/recordings/F-001/grill/20260405T060708Z-abcd/notes.md",
+    ]);
+    expect(result.scope?.observedPaths).toContain(".agentflow/notes.md");
+    expect(
+      result.scope?.observedPaths.some(
+        (path) =>
+          path.startsWith(".agentflow/recordings/F-001/grill/20260405T060708Z-") && path.endsWith("/stdout.txt"),
+      ),
+    ).toBe(true);
+    // A pre-approval violation is reported and left on disk for the human to read, never reverted.
+    expect(result.scope?.restoredPaths).toEqual([]);
+    expect(result.scope?.removedPaths).toEqual([]);
+  });
+
+  it("keeps the recording when the stage fails", async () => {
+    const fixture = await makeFixture();
+    const harness = makeHarness(fixture, undefined, recordInvocation);
+    await createFeature(harness);
+    harness.executor.configure("grill", { error: new Error("the transport died") });
+
+    const result = await runStage(harness);
+
+    expect(result.status).toBe("executor_error");
+    expect(result.error?.message).toContain("the transport died");
+    expect((await recordingsOf(fixture.root, "grill")).files).toEqual([
+      "invocation.json",
+      "stderr.txt",
+      "stdout.txt",
+    ]);
+  });
+
+  it("keeps the recording when the stage's result is rejected", async () => {
+    const fixture = await makeFixture();
+    const harness = makeHarness(fixture, undefined, recordInvocation);
+    await createFeature(harness);
+    harness.executor.configure("grill", { raw: { nonsense: true } });
+
+    const result = await runStage(harness);
+
+    expect(result.status).toBe("rejected");
+    expect(result.error?.code).toBe("executor_malformed_result");
+    expect((await recordingsOf(fixture.root, "grill")).files).toEqual([
+      "invocation.json",
+      "stderr.txt",
+      "stdout.txt",
+    ]);
+  });
+
+  it("passes the guard for the stage after a recorded stage", async () => {
+    const fixture = await makeFixture();
+    const harness = makeHarness(fixture, undefined, recordInvocation);
+    await createFeature(harness);
+
+    const first = await runStage(harness);
+    const second = await runStage(harness);
+
+    expect(first.stage).toBe("grill");
+    expect(first.status).toBe("stage_completed");
+    expect(second.stage).toBe("planning");
+    expect(second.status).toBe("stage_completed");
+    expect((await recordingsOf(fixture.root, "grill")).stamps).toHaveLength(1);
+    expect((await recordingsOf(fixture.root, "planning")).stamps).toHaveLength(1);
+  });
+
+  it("reports the scope violation rather than the executor failure when a stage has both", async () => {
+    const fixture = await makeFixture();
+    const harness = makeHarness(fixture, undefined, async (request) => {
+      await writeFile(join(request.workspace.workingDirectory, "leftover.txt"), "half-written\n", "utf8");
+      await recordInvocation(request);
+    });
+    await createFeature(harness);
+    harness.executor.configure("grill", { error: new Error("the transport died") });
+
+    const result = await runStage(harness);
+
+    // Pre-existing precedence, pinned rather than changed: the scope verdict outranks the executor's
+    // failure (orchestration/src/orchestrator.ts, the check at the enforcement call and the
+    // executor-failure branch after it), so the executor's own error is not what the user sees.
+    expect(result.status).toBe("scope_violation");
+    expect(result.error?.code).toBe("scope_violation");
+    expect(result.error?.message).toContain("leftover.txt");
+    expect(result.error?.message).not.toContain("the transport died");
   });
 });
