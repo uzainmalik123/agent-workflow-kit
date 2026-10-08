@@ -557,6 +557,30 @@ export function isProtectedWorkspacePath(path: string): boolean {
   return WORKSPACE_PROTECTED_PATTERNS.some((pattern) => matchesScopePattern(pattern, path));
 }
 
+/**
+ * The framework's own invocation recording, in exactly the shape the recorder writes it:
+ * `.agentflow/recordings/<featureId>/<stage>/<stamp>-<suffix>/{invocation.json,stdout.txt,stderr.txt}`,
+ * with sanitized single-segment feature and stage names, the compact UTC stamp the recorder derives
+ * from `startedAt`, and its fixed four-hex-char suffix and three filenames.
+ *
+ * The recording is diagnostics the framework writes into the very tree the scope check measures, so
+ * it is not a stage write, and a guard that blamed a stage for it would fail every feature at its
+ * first recorded run. This is deliberately not an exclusion of `.agentflow/`: every other path under
+ * the workflow's own directory stays protected, so a file a stage put anywhere in there is still a
+ * violation. It is the exact shape rather than a prefix for the same reason — only a file at that
+ * location, with that name, behind that stamp is excused.
+ *
+ * The location mirrors `OPENCODE_RECORDINGS_DIRECTORY` in `adapters/opencode/src/diagnostics.ts`,
+ * where the install policy reserves it.
+ */
+const FRAMEWORK_RECORDING_PATH =
+  /^\.agentflow\/recordings\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/\d{8}T\d{6}Z-[0-9a-f]{4}\/(?:invocation\.json|stdout\.txt|stderr\.txt)$/u;
+
+/** Whether a path is the framework's own recording rather than something a stage wrote. */
+export function isFrameworkRecordingPath(path: string): boolean {
+  return FRAMEWORK_RECORDING_PATH.test(path);
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Scope and Git-state decisions                                                                   */
 /* -------------------------------------------------------------------------------------------- */
@@ -592,6 +616,13 @@ export function evaluateWorkspaceScope(
     category: "tracked" | "untracked",
     existedAtBaseline: boolean,
   ): void => {
+    // The framework's own recording is excused before the protected check below would otherwise blame
+    // every recorded stage for `.agentflow/**`; see `isFrameworkRecordingPath` for why the exclusion
+    // is this exact.
+    if (isFrameworkRecordingPath(path)) {
+      return;
+    }
+
     const entry: WorkspaceUnauthorizedPath = { path, category, existedAtBaseline };
 
     if (isProtectedWorkspacePath(path)) {
