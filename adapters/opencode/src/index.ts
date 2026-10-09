@@ -63,6 +63,7 @@ export {
   PROTECTED_PATH_PATTERNS,
   READ_ONLY_PERMISSION_RULES,
   SECRET_PATH_PATTERNS,
+  SHELL_ALLOWLIST,
   UNIVERSAL_ALLOWED_ACTIONS,
   UNIVERSAL_DENIAL_ACTIONS,
   WRITE_CAPABLE_PERMISSION_RULES,
@@ -232,6 +233,7 @@ export {
 export type { ArtifactTrackingMode, InstallPolicyEntry } from "./install-policy.js";
 
 export {
+  assertOpenCodeRuntimeConfigIntegrity,
   createOpenCodeRuntimeConfig,
   defaultRuntimeConfigDirectory,
   isInsideRepository,

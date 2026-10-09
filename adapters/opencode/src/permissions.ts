@@ -21,8 +21,9 @@ import { isWriteCapableProfile, profileForRole, rolesForProfile, type OpenCodePr
  *   auto-rejects a `permission.asked` request, which would break the stage run.
  *
  * Every rule set below therefore opens with a deny-everything rule and then re-allows only the exact
- * actions a role needs. That makes an `ask` outcome unreachable, and it also denies any action a
- * plugin might introduce, because nothing is allowed that was not asked for by name.
+ * actions a role needs - and, for the shell, only the exact resources {@link SHELL_ALLOWLIST} names.
+ * That makes an `ask` outcome unreachable, and it also denies any action a plugin might introduce,
+ * because nothing is allowed that was not asked for by name.
  */
 export type OpenCodePermissionEffect = "allow" | "deny" | "ask";
 
@@ -53,10 +54,14 @@ export const DENY_ALL_RULE: OpenCodePermissionRule = rule("*", "*", "deny");
 /**
  * Actions denied for every role, without exception.
  *
- * `shell: deny` is what makes "no agent receives Git commit or push authority" structural: with no
- * shell there is no `git commit` and no `git push`, and no project command execution either. Project
- * commands are not deferred, they are simply not the agent's to run: a deterministic framework process
- * executes them outside the session and hands the recorded result to the verifier. `subagent: deny` keeps roles
+ * `shell: deny` is the resource-wide denial D-1 is built on: it denies every command, so "no agent
+ * receives Git commit or push authority" stays structural - there is no `git commit` and no
+ * `git push`, and no project command execution either. Project commands are not deferred, they are
+ * simply not the agent's to run: a deterministic framework process executes them outside the
+ * session and hands the recorded result to the verifier. The one thing this denial does *not* do
+ * by itself is remove the `shell` tool from the agent's declared tool list, which is what the Zen
+ * free tier rejects; the single `allow shell pwd` rule that follows it is the whole of that
+ * exception, and {@link SHELL_ALLOWLIST} states it. `subagent: deny` keeps roles
  * separate - a reviewer cannot delegate to an implementer, and no role can collapse the workflow
  * into one generalist agent or bypass the orchestrator. `skill: deny` holds the line until skill
  * integration is implemented, so no role can pull in instructions from outside the repository.
@@ -81,6 +86,28 @@ export const UNIVERSAL_DENIAL_ACTIONS: readonly string[] = [
 
 /** Actions every role may use, and the only ones. */
 export const UNIVERSAL_ALLOWED_ACTIONS: readonly string[] = ["read", "glob", "grep"];
+
+/**
+ * The only shell resource either profile allows: the single no-op command `pwd`.
+ *
+ * Decision D-1. The `shell` action stays declared in both profiles, and the universal denial above
+ * still denies it for every resource - this list is what comes *after* that denial, so the two
+ * rules together read `deny shell *` then `allow shell pwd`, last match wins. `pwd` prints a
+ * directory and changes nothing: no file is written, no process other than itself is started, and
+ * there is no argument form that turns it into a side effect, because the allow is anchored to the
+ * whole value and `pwd --version`, `pwd; touch x`, `FOO=1 pwd`, and every other compound or
+ * argument form still match the deny that comes first.
+ *
+ * The list exists as data rather than as a literal rule so that "what the allowlist is" is one
+ * answer in one place: a rule added anywhere else in a ruleset would be caught by the exact-order
+ * tests, and a second entry here would widen both profiles at once.
+ *
+ * Why an allow exists at all: OpenCode Zen's free tier rejects an agent whose configuration removes
+ * the `bash` or `read` tool (403 FreeTierError, Task E), so removing `shell` costs the run its
+ * model. Declaring the tool and denying everything but one no-op keeps the operational property the
+ * gate needs and the security property the PRD states: no agent runs a command that does anything.
+ */
+export const SHELL_ALLOWLIST: readonly string[] = ["pwd"];
 
 /**
  * Paths an agent may never reach, in either direction.
@@ -144,6 +171,18 @@ function allowedRules(): readonly OpenCodePermissionRule[] {
   return UNIVERSAL_ALLOWED_ACTIONS.map((action) => rule(action, "*", "allow"));
 }
 
+/**
+ * `allow shell <resource>` for every entry of {@link SHELL_ALLOWLIST}.
+ *
+ * Placement is the whole of the contract: these rules come after `denialRules()`, which is where
+ * `shell` is denied for `*`, and before nothing that could deny the resource again. Under
+ * last-match-wins the deny therefore covers every command except the allowlisted ones, and the
+ * allow covers only what it names, exactly.
+ */
+function shellAllowRules(): readonly OpenCodePermissionRule[] {
+  return SHELL_ALLOWLIST.map((resource) => rule("shell", resource, "allow"));
+}
+
 function protectedReadDenials(): readonly OpenCodePermissionRule[] {
   return [
     ...PROTECTED_PATH_PATTERNS.map((resource) => rule("read", resource, "deny")),
@@ -164,11 +203,15 @@ function protectedEditDenials(): readonly OpenCodePermissionRule[] {
  * `edit` is named explicitly even though the leading deny already covers it. The explicit rule is
  * what an auditor reads first, and it is what OpenCode's own `debug` output shows as the deciding
  * rule for the edit, write, and patch tools.
+ *
+ * The shell pair is D-1: `deny shell *` from the universal denials, then `allow shell pwd`, in that
+ * order, and no other shell rule of any kind.
  */
 export const READ_ONLY_PERMISSION_RULES: OpenCodePermissionRuleset = [
   DENY_ALL_RULE,
   rule("edit", "*", "deny"),
   ...denialRules(),
+  ...shellAllowRules(),
   ...allowedRules(),
   ...protectedReadDenials(),
 ];
@@ -177,10 +220,15 @@ export const READ_ONLY_PERMISSION_RULES: OpenCodePermissionRuleset = [
  * The `agentflow-write` ruleset: the same surface, plus an `edit` allowance that is immediately
  * narrowed to deny the workflow and Git paths. The `edit *` allow comes after the universal denials
  * and before the protected-path denials, which is the order the last-match-wins rule requires.
+ *
+ * The shell pair is the same two rules, in the same order, as the read profile: `deny shell *` then
+ * `allow shell pwd`. The profile that may rewrite a project file still may not run a command that
+ * does anything.
  */
 export const WRITE_CAPABLE_PERMISSION_RULES: OpenCodePermissionRuleset = [
   DENY_ALL_RULE,
   ...denialRules(),
+  ...shellAllowRules(),
   ...allowedRules(),
   rule("edit", "*", "allow"),
   ...protectedEditDenials(),

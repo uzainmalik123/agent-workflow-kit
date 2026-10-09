@@ -82,7 +82,8 @@ Every ruleset therefore opens with `{"*", "*", "deny"}` and re-allows only the a
 | `edit` on a project file | `deny` | `allow` |
 | `edit` on `.agentflow`, `*.agentflow`, `*.agentflow.*`, `.git`, `*.git` | `deny` | `deny` |
 | `read` on workflow state, Git state, or `*.env` | `deny` | `deny` |
-| `shell` | `deny` | `deny` |
+| `shell` on any command except `pwd` | `deny` | `deny` |
+| `shell` on `pwd` | `allow` | `allow` |
 | `subagent` | `deny` | `deny` |
 | `skill` | `deny` | `deny` |
 | `webfetch`, `websearch` | `deny` | `deny` |
@@ -91,7 +92,7 @@ Every ruleset therefore opens with `{"*", "*", "deny"}` and re-allows only the a
 
 V2 renamed several actions, and the generated files use the current names: `bash` is `shell`, `task` is `subagent`, and the `edit` action covers the edit, write, and patch tools. A secret file is denied outright rather than left to an `ask` that nobody could answer.
 
-`shell: deny` is what makes "no agent receives commit or push authority" structural rather than a promise: with no shell there is no `git commit` and no `git push`, and no project command execution either. Project commands are not deferred, they are simply not the agent's to run: the project adapter executes them outside the session and hands the recorded result to the verifier, so an agent's route to a command result is the evidence, not the command. `agent-workflow.config.json` is also denied to `edit` for every role, because that file decides which commands the framework will run and an agent that could change it could redefine what "verified" means for the rest of the run. It stays readable, since a fixer repairing a failing check has a reason to know which command produced it. `subagent: deny` keeps the roles separate, because a reviewer cannot delegate to an implementer and no role can collapse the workflow into one generalist agent. `skill: deny` holds the line until skill integration exists, so no role can pull instructions in from outside the repository. A project's own `.gitignore` is deliberately editable: only version-control state is protected.
+`deny shell *` followed by `allow shell pwd` is what makes "no agent receives commit or push authority" structural rather than a promise: every command except the no-op is denied, so there is no `git commit` and no `git push`, and no project command execution either. `pwd` is the whole of the exception — it prints a directory and changes nothing, it is anchored to the whole value so `pwd; touch x`, `pwd --version`, and `FOO=1 pwd` all fall back to the deny that precedes it, and it exists only because OpenCode Zen's free tier rejects an agent whose configuration removes the shell tool outright (decision D-1): the tool is declared, and denied for everything it could do. Project commands are not deferred, they are simply not the agent's to run: the project adapter executes them outside the session and hands the recorded result to the verifier, so an agent's route to a command result is the evidence, not the command. `agent-workflow.config.json` is also denied to `edit` for every role, because that file decides which commands the framework will run and an agent that could change it could redefine what "verified" means for the rest of the run. It stays readable, since a fixer repairing a failing check has a reason to know which command produced it. `subagent: deny` keeps the roles separate, because a reviewer cannot delegate to an implementer and no role can collapse the workflow into one generalist agent. `skill: deny` holds the line until skill integration exists, so no role can pull instructions in from outside the repository. A project's own `.gitignore` is deliberately editable: only version-control state is protected.
 
 `matchesResourcePattern` is a faithful port of OpenCode's own wildcard matcher, so a decision made in a test is the decision the CLI makes at run time. Backslashes normalize to `/`, `*` stands for any run of characters including `/`, `?` stands for exactly one, a pattern ending in a space and a star also matches the bare value, and matching is anchored and case-insensitive only on Windows.
 
@@ -272,8 +273,8 @@ What holds is the ordering. The profile's own `permission:` block comes after th
 last matching rule, so the profile still decides:
 
 ```text
-read:  edit=deny   shell=deny
-write: edit=allow  shell=deny
+read:  edit=deny   shell=deny except pwd
+write: edit=allow  shell=deny except pwd
 ```
 
 That is the guarantee, and it is narrower than isolation. Two mechanisms back it up rather than one:
