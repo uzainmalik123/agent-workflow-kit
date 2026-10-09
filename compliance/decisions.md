@@ -97,3 +97,10 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 
 - **Status:** Proposed
 - **Decision:** the P4 real-OpenCode harness runs as a separate script (for example `pnpm e2e:real`) with a pinned OpenCode version and model, and saves raw transcripts. `pnpm verify` stays free of live-model calls (R-241).
+
+## D-14. `expectedFiles` is the single authoritative scope key
+
+- **Status:** Proposed
+- **Decision:** the plan's per-step `expectedFiles` array is the only input to approved-scope derivation. Prompts must name it and show an example. Scope derivation is NOT widened to read `declaredFileSet` or `steps[].files`. An empty derived scope is surfaced to the human as a warning at plan approval and does not block approval.
+- **Basis:** PRD PlanStep contract (compliance/requirements.json:193); R-263; human approval has top priority.
+- **Open:** whether an empty scope with declared files should become a hard refusal. That would change approval behavior and needs a versioned decision.

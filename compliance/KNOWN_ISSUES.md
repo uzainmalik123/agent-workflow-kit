@@ -55,6 +55,23 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Resolved in Task K
 - **Detail:** stage start/finish lines, 30-second heartbeats, and live tool-use lines are printed to stderr (`--quiet` disables them). The default stage timeout is 900 seconds (15 minutes) and can be changed with `--stage-timeout <seconds>`. The default may be too generous for free models.
 
+### P-11. Write stages do not see uncommitted or untracked files
+
+- **Status:** Confirmed (Task J); warning added in Task L
+- **Evidence:** write stages run in a detached worktree of the approved commit (`git worktree add --detach`, `adapters/workspace/src/provider.ts:300`). Untracked files neither block approval nor travel with the stage. Pre-approval stages (grill, planning, plan review) run in the human checkout and can see them.
+- **Guidance:** commit everything the feature needs before `agentflow run`.
+
+### P-12. The implementer wrote its output to a file
+
+- **Status:** Open until Task L
+- **Evidence:** the prompt renders artifacts with filenames (`### spec (spec.json)`) and the implementer role lacks the "never written to the repository" clause the read-only roles have. The agent wrote and edited `implementation.json`, triggering a scope violation. The stage took 508s, 91% of it model latency.
+
+### P-13. Planner output never authorizes any path (scope contract mismatch)
+
+- **Status:** Open until Task L. This blocks every real implementation run.
+- **Evidence (Task J):** `approvedScopeFromPlan` (`orchestration/src/workspace.ts:368-426`) reads only `steps[].expectedFiles`; a missing key is silently skipped, producing an empty scope. The planner is never told the key name; it wrote `declaredFileSet` and `steps[].files`. Reproduced on the real F-004 plan: derived patterns `[]`, and `multiply.mjs` and `implementation.json` both flagged. With `expectedFiles: ["multiply.mjs"]` only `implementation.json` is flagged.
+- **Also:** plan approval hashes the plan's bytes only, so a plan whose derived scope is empty can be approved without warning.
+
 ---
 
 ## Security-relevant
