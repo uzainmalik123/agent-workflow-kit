@@ -39,6 +39,22 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Documented here; README not yet updated
 - **Evidence:** the stage runner needs `--standalone`, which V1 (1.18.x) lacks. The capability probe correctly refuses V1. Verified working version: `opencode v2.0.24`.
 
+### P-7. One malformed model reply kills the run (no retry)
+
+- **Status:** Open
+- **Evidence (2026-10-09, Big Pickle, scratch runs):** 10 of 11 stage replies were valid fenced JSON. In one run the plan_review stage failed with "The OpenCode response contains no fenced JSON block" and the run stopped with `executor_error`. Sample is small; at this rate a feature with several model-driven stages would often fail somewhere.
+- **Next:** read the recording to classify the failure, then decide on a bounded retry (each attempt must still meet the strict contract; the contract is not weakened). Any retry must be recorded per attempt and must not apply to scope violations or credit and gate errors.
+
+### P-8. Write-stage recordings are in the workspace cache
+
+- **Status:** Open (Task K)
+- **Evidence:** the F-004 implementation recording was found under `~/.cache/agent-workflow-kit/workspaces/<hash>/.agentflow/recordings/`, not in the project's `.agentflow/`. Recordings for read stages are in the project. Users have no hint where to look.
+
+### P-9. No progress output and an unclear stage timeout
+
+- **Status:** Open (Task K)
+- **Evidence:** a planning stage ran 836s with exit 0 and no timeout; an implementation stage ran about 10 minutes before a scope violation; the CLI printed nothing meanwhile. The effective default timeout is unverified.
+
 ---
 
 ## Security-relevant
