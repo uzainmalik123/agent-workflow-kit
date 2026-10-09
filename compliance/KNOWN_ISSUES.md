@@ -43,11 +43,10 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ## Security-relevant
 
-### S-1. Malformed agent frontmatter silently produces an unrestricted agent
+### S-1. Malformed agent frontmatter silently produced an unrestricted agent
 
-- **Status:** Open. Needs a fail-closed test.
-- **Evidence:** observed in Task E when a hand-written probe config had broken YAML and passed for that reason. A code comment at `adapters/opencode/src/agents.ts:37-43` already names the hazard.
-- **Next:** a test that parses the generated agent file and asserts the effective permission rules, not just the file text. Required before D-1 is Accepted.
+- **Status:** Resolved in Task G (commit 7407743). After every runtime-config write and before OpenCode is spawned, `assertOpenCodeRuntimeConfigIntegrity` re-reads and parses the generated agent files and refuses malformed YAML, duplicate keys, missing or extra rules, and changed rule order. 11 tests cover it.
+- **Remaining:** the check cannot be exercised end to end through the executor without a test seam; the evaluator test is opt-in (`AGENTFLOW_OPENCODE_EVALUATOR=1`).
 
 ### S-2. Recordings contain full prompts and model output
 
