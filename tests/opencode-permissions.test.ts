@@ -5,6 +5,7 @@ import {
   PROTECTED_PATH_PATTERNS,
   READ_ONLY_PERMISSION_RULES,
   SECRET_PATH_PATTERNS,
+  SHELL_ALLOWLIST,
   UNIVERSAL_ALLOWED_ACTIONS,
   UNIVERSAL_DENIAL_ACTIONS,
   WRITE_CAPABLE_PERMISSION_RULES,
@@ -23,6 +24,7 @@ import {
   type OpenCodePermissionRuleset,
   type OpenCodeProfile,
 } from "@agent-workflow-kit/opencode";
+import { ALLOWED_SHELL_COMMAND, SHELL_COMMANDS_THAT_MUST_BE_DENIED } from "../fixtures/shell-commands.js";
 import { describe, expect, it } from "vitest";
 
 const PROJECT_FILE = "src/app.ts";
@@ -234,12 +236,47 @@ describe("capability denials shared by every profile", () => {
     }
   });
 
-  it("denies the shell outright, so nothing can commit or push", () => {
+  // "Every command that does something" rather than "the shell outright": since D-1 the `shell`
+  // action is declared with a `deny` for `*` followed by an `allow` for `pwd`, so the universal
+  // denial below is still what covers Git and every other command, and the single no-op that is
+  // allowed is asserted separately.
+  it("denies the shell for every command that does anything, so nothing can commit or push", () => {
     for (const profile of OPENCODE_PROFILES) {
       const rules = permissionRulesForProfile(profile);
 
       for (const command of ["git status", "git commit -m x", "git push origin main", "npm test", "ls"]) {
         expect(effectFor(rules, "shell", command)).toBe("deny");
+      }
+    }
+  });
+
+  /*
+   * Decision D-1: the shell tool stays declared in both profiles, denied for every resource, and
+   * then re-allowed for exactly one no-op command. The gate that made this necessary (OpenCode
+   * Zen's free tier rejects an agent whose config removes `bash` or `read`) is a provider quirk;
+   * the security claim is the ruleset below, which is what is asserted.
+   */
+  it("declares the shell tool with exactly two rules, deny then allow, in both profiles", () => {
+    expect(SHELL_ALLOWLIST).toEqual([ALLOWED_SHELL_COMMAND]);
+
+    for (const profile of OPENCODE_PROFILES) {
+      const shellRules = permissionRulesForProfile(profile).filter((entry) => entry.action === "shell");
+
+      expect(shellRules, profile).toEqual([
+        { action: "shell", resource: "*", effect: "deny" },
+        { action: "shell", resource: ALLOWED_SHELL_COMMAND, effect: "allow" },
+      ]);
+    }
+  });
+
+  it("allows exactly `pwd` and denies every compound, argument, and prefix form", () => {
+    for (const profile of OPENCODE_PROFILES) {
+      const rules = permissionRulesForProfile(profile);
+
+      expect(effectFor(rules, "shell", ALLOWED_SHELL_COMMAND), profile).toBe("allow");
+
+      for (const command of SHELL_COMMANDS_THAT_MUST_BE_DENIED) {
+        expect(effectFor(rules, "shell", command), `${profile}: ${command}`).toBe("deny");
       }
     }
   });

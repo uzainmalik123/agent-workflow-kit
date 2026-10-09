@@ -306,6 +306,12 @@ function resolvedReadOnlyRules(): Rule[] {
     out.push({ action, resource: "*", effect: "deny" });
   }
 
+  // D-1: the one shell resource either profile allows, always after the universal denials, which is
+  // where the generated file puts it. A fixture that left it out would no longer be "the ruleset a
+  // generated role resolves to", and the smoke test would then check the binary against a policy the
+  // framework never wrote.
+  out.push({ action: "shell", resource: "pwd", effect: "allow" });
+
   for (const action of ["read", "glob", "grep"]) {
     out.push({ action, resource: "*", effect: "allow" });
   }
@@ -326,6 +332,8 @@ function resolvedWriteCapableRules(): Rule[] {
   for (const action of UNIVERSAL_DENIALS) {
     out.push({ action, resource: "*", effect: "deny" });
   }
+
+  out.push({ action: "shell", resource: "pwd", effect: "allow" });
 
   for (const action of ["read", "glob", "grep"]) {
     out.push({ action, resource: "*", effect: "allow" });

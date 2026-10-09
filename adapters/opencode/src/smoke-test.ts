@@ -159,6 +159,10 @@ export interface OpenCodeSmokeTestCheck {
 
 function checksForProfile(profile: OpenCodeProfile): readonly OpenCodeSmokeTestCheck[] {
   const base: readonly OpenCodeSmokeTestCheck[] = [
+    // D-1, positive: the one command the allowlist names has to resolve to `allow` in the binary's
+    // own ruleset, not only in the file. Everything below it stays denied, so the pair the file
+    // writes (`deny shell *`, then `allow shell pwd`) is what the binary actually applies.
+    { action: "shell", resource: "pwd", expected: "allow" },
     { action: "shell", resource: "git status", expected: "deny" },
     { action: "shell", resource: "git commit -m x", expected: "deny" },
     { action: "shell", resource: "git push origin main", expected: "deny" },

@@ -315,7 +315,7 @@ describe("repository configuration still cannot widen a profile", () => {
 });
 
 describe("the permissions the runtime configuration carries", () => {
-  it("states the read profile as read-only with no shell, in the bytes written to disk", async () => {
+  it("states the read profile as read-only, with the shell denied to every command but pwd", async () => {
     const repository = await makeRoot();
     const runtime = await makeRoot();
 
@@ -328,9 +328,13 @@ describe("the permissions the runtime configuration carries", () => {
     expect(permissionRulesIn(contents)).toEqual(permissionRulesForProfile("agentflow-read"));
     expect(denied(permissionRulesIn(contents), "edit")).toBe(true);
     expect(denied(permissionRulesIn(contents), "shell")).toBe(true);
+    expect(shellRulesOf(permissionRulesIn(contents))).toEqual([
+      { action: "shell", resource: "*", effect: "deny" },
+      { action: "shell", resource: "pwd", effect: "allow" },
+    ]);
   });
 
-  it("states the write profile as able to edit and write, with no shell", async () => {
+  it("states the write profile as able to edit and write, with the shell denied to every command but pwd", async () => {
     const repository = await makeRoot();
     const runtime = await makeRoot();
 
@@ -341,11 +345,16 @@ describe("the permissions the runtime configuration carries", () => {
       "utf8",
     );
 
-    // Editing project files is what the write profile adds, and it adds nothing else: `shell` stays
-    // denied, so the profile that can rewrite a file still cannot run a command.
+    // Editing project files is what the write profile adds, and it adds nothing else: `shell` keeps
+    // the same two rules the read profile has (deny `*`, allow `pwd`), so the profile that can
+    // rewrite a file still cannot run a command that does anything.
     expect(permissionRulesIn(contents)).toEqual(permissionRulesForProfile("agentflow-write"));
     expect(allowed(permissionRulesIn(contents), "edit")).toBe(true);
     expect(denied(permissionRulesIn(contents), "shell")).toBe(true);
+    expect(shellRulesOf(permissionRulesIn(contents))).toEqual([
+      { action: "shell", resource: "*", effect: "deny" },
+      { action: "shell", resource: "pwd", effect: "allow" },
+    ]);
   });
 
   it("is not widened by an allow a repository config contributes ahead of the profile's own rules", async () => {
@@ -519,6 +528,16 @@ function allowed(rules: readonly Record<string, string>[], action: string): bool
   return rules.some(
     (rule) => rule["action"] === action && rule["effect"] === "allow" && rule["resource"] === "*",
   );
+}
+
+/**
+ * Every `shell` rule, in the order the file declares them.
+ *
+ * Order is the policy under last-match-wins, so a set or a "some rule exists" check would both miss
+ * what D-1 asserts: the deny has to be first and the single allow after it.
+ */
+function shellRulesOf(rules: readonly Record<string, string>[]): Record<string, string>[] {
+  return rules.filter((rule) => rule["action"] === "shell");
 }
 
 /** The adapter's own refusal, or a failure if the call resolved instead. */

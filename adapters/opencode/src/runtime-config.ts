@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { lstat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -10,6 +10,10 @@ import {
   renderOpenCodeProjectConfig,
 } from "./agents.js";
 import { OpenCodeAdapterError } from "./errors.js";
+import {
+  permissionRulesForProfile,
+  type OpenCodePermissionRule,
+} from "./permissions.js";
 import { OPENCODE_PROFILES, type OpenCodeProfile } from "./roles.js";
 
 /**
@@ -188,6 +192,11 @@ export async function createOpenCodeRuntimeConfig(
     files.push(file.path);
   }
 
+  // Re-read, parse, and compare what is now on disk, after every write and before the caller
+  // hands the directory to OpenCode. See `assertOpenCodeRuntimeConfigIntegrity` for why a write
+  // that cannot be read back into the intended rules has to stop here rather than at the model.
+  await assertOpenCodeRuntimeConfigIntegrity(directory);
+
   return { directory, repositoryRoot: root, files };
 }
 
@@ -232,5 +241,421 @@ export async function removeOpenCodeRuntimeConfig(directory: string): Promise<vo
       `Unable to remove the framework OpenCode configuration directory "${directory}".`,
       { cause: error },
     );
+  }
+}
+
+/* -------------------------------------------------------------------------- *
+ * Fail-closed verification of what was just written (decision D-1, condition 2)
+ * -------------------------------------------------------------------------- */
+
+/**
+ * A structural problem in an agent file's frontmatter.
+ *
+ * Internal to this module: every one of these is converted into an `OpenCodeAdapterError` before it
+ * leaves {@link assertOpenCodeRuntimeConfigIntegrity}, so a caller only ever sees a refusal.
+ */
+class FrontmatterProblem extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FrontmatterProblem";
+  }
+}
+
+/** The keys of one rule, and the only order this framework writes them in. */
+const RULE_KEYS = ["action", "resource", "effect"] as const;
+type RuleKey = (typeof RULE_KEYS)[number];
+
+/** `  - action: "..."` - the first key of a rule entry, at the sequence's own indentation. */
+const SEQUENCE_KEY_LINE = /^ {2}- ([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)$/u;
+/** `    resource: "..."` - a continuation key of the open rule. */
+const NESTED_KEY_LINE = /^ {4}([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)$/u;
+/** `description: "..."` - a top-level frontmatter field. */
+const TOP_LEVEL_KEY_LINE = /^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)$/u;
+
+const RULE_EFFECTS: readonly string[] = ["allow", "deny", "ask"];
+
+interface ParsedAgentFrontmatter {
+  /** The permission rules, in the order the file declares them. */
+  readonly rules: readonly OpenCodePermissionRule[];
+}
+
+/**
+ * Reads one scalar the way the emitter writes it: a JSON double-quoted string, which is also a
+ * valid YAML double-quoted scalar.
+ *
+ * A plain scalar such as `deny` is valid YAML, so this is deliberately stricter than YAML: the
+ * framework never writes one, and accepting it here would mean "the file parses" said nothing about
+ * "the file is the file we generated". Anything that is not a quoted string is a problem, not a
+ * value.
+ */
+function quotedScalar(value: string, where: string): string {
+  const trimmed = value.trim();
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+
+    if (typeof parsed === "string") {
+      return parsed;
+    }
+  } catch {
+    // Fall through to the refusal, which reports the text the file actually carries.
+  }
+
+  throw new FrontmatterProblem(
+    `${where} is not a quoted scalar the way this framework writes them, but is: ${trimmed}`,
+  );
+}
+
+/**
+ * Parses an agent file's frontmatter into the permission rules it declares.
+ *
+ * This is a strict reader for one exact shape - the shape `renderFrontmatter` writes - rather than a
+ * general YAML parser, and the strictness is the point. A YAML library would accept a document it
+ * can interpret, and OpenCode's own reader accepts a document it can interpret *or* silently
+ * discards one it cannot, which is how Task E's hand-broken config became an unrestricted agent.
+ * Here every line is either a field this framework writes, a rule entry in the order it writes them,
+ * a blank line, or a refusal. Duplicate keys are refused rather than resolved, because a duplicate
+ * key means two different intentions are in the file and only one of them will be enforced.
+ */
+function parseAgentFrontmatter(contents: string): ParsedAgentFrontmatter {
+  if (!contents.startsWith("---\n")) {
+    throw new FrontmatterProblem(
+      "the file does not open with a `---` frontmatter delimiter, so OpenCode would read no permissions from it at all",
+    );
+  }
+
+  const close = contents.indexOf("\n---", 3);
+
+  if (close === -1) {
+    throw new FrontmatterProblem("the `---` frontmatter is never closed");
+  }
+
+  const afterDelimiter = contents.slice(close + 4);
+
+  if (afterDelimiter !== "" && !afterDelimiter.startsWith("\n")) {
+    throw new FrontmatterProblem("the closing `---` delimiter is not on a line of its own");
+  }
+
+  const lines = contents.slice(4, close).split("\n");
+  const topLevelKeys = new Set<string>();
+  const rules: OpenCodePermissionRule[] = [];
+  let block: "permissions" | null = null;
+  let sawPermissions = false;
+  let open: { readonly keys: RuleKey[]; readonly values: Partial<Record<RuleKey, string>> } | null =
+    null;
+
+  const closeRule = (): void => {
+    if (open === null) {
+      return;
+    }
+
+    const missing = RULE_KEYS.filter((key) => open?.values[key] === undefined);
+
+    if (missing.length > 0) {
+      throw new FrontmatterProblem(
+        `the rule at entry ${String(rules.length + 1)} is incomplete: it has no ${missing.join(", ")}`,
+      );
+    }
+
+    const effect = open.values.effect;
+
+    if (effect === undefined || !RULE_EFFECTS.includes(effect)) {
+      throw new FrontmatterProblem(
+        `the effect of rule ${String(rules.length + 1)} is "${effect ?? ""}", which is not one of allow, deny, ask`,
+      );
+    }
+
+    rules.push({
+      action: open.values.action ?? "",
+      resource: open.values.resource ?? "",
+      effect: effect as OpenCodePermissionRule["effect"],
+    });
+    open = null;
+  };
+
+  for (const [index, line] of lines.entries()) {
+    const at = String(index + 1);
+
+    if (line.trim() === "") {
+      continue;
+    }
+
+    const sequence = SEQUENCE_KEY_LINE.exec(line);
+
+    if (sequence !== null) {
+      if (block !== "permissions") {
+        throw new FrontmatterProblem(
+          `line ${at} starts a rule entry outside the permissions list: ${line}`,
+        );
+      }
+
+      closeRule();
+
+      const key = sequence[1] ?? "";
+
+      if (key !== RULE_KEYS[0]) {
+        throw new FrontmatterProblem(
+          `line ${at} starts a rule with "${key}"; a rule entry begins with "action": ${line}`,
+        );
+      }
+
+      open = {
+        keys: [RULE_KEYS[0]],
+        values: {
+          action: quotedScalar(sequence[2] ?? "", `the action of rule ${String(rules.length + 1)}`),
+        },
+      };
+      continue;
+    }
+
+    const nested = NESTED_KEY_LINE.exec(line);
+
+    if (nested !== null) {
+      if (open === null) {
+        throw new FrontmatterProblem(
+          `line ${at} continues a rule that is not open, so which entry it belongs to is undecidable: ${line}`,
+        );
+      }
+
+      const key = nested[1] ?? "";
+
+      if (!RULE_KEYS.includes(key as RuleKey)) {
+        throw new FrontmatterProblem(
+          `line ${at} is not one of the keys a rule has (${RULE_KEYS.join(", ")}): ${line}`,
+        );
+      }
+
+      if (open.keys.includes(key as RuleKey)) {
+        throw new FrontmatterProblem(
+          `line ${at} repeats the key "${key}" in a single rule, which YAML rejects as a duplicate key and a reader would otherwise resolve in either direction: ${line}`,
+        );
+      }
+
+      const expected = RULE_KEYS[open.keys.length];
+
+      if (key !== expected) {
+        throw new FrontmatterProblem(
+          `line ${at} writes "${key}" where "${expected ?? "no further key"}" belongs; this framework writes a rule as action, resource, effect, in that order: ${line}`,
+        );
+      }
+
+      open.keys.push(key);
+      open.values[key] = quotedScalar(
+        nested[2] ?? "",
+        `the ${key} of rule ${String(rules.length + 1)}`,
+      );
+      continue;
+    }
+
+    const top = TOP_LEVEL_KEY_LINE.exec(line);
+
+    if (top !== null) {
+      closeRule();
+
+      const key = top[1];
+
+      if (key === undefined) {
+        throw new FrontmatterProblem(`line ${at} carries a key this reader cannot read: ${line}`);
+      }
+
+      if (topLevelKeys.has(key)) {
+        throw new FrontmatterProblem(
+          `line ${at} repeats the top-level key "${key}", which YAML rejects as a duplicate key: ${line}`,
+        );
+      }
+
+      topLevelKeys.add(key);
+
+      if (key === "permissions") {
+        if ((top[2] ?? "").trim() !== "") {
+          throw new FrontmatterProblem(
+            `line ${at} gives "permissions" a value; this framework writes it as a bare key followed by the rule list: ${line}`,
+          );
+        }
+
+        block = "permissions";
+        sawPermissions = true;
+        continue;
+      }
+
+      // Validated rather than collected: a `description:` or a `mode:` written any other way than
+      // the emitter writes it means the file is not the file this framework generated, and that is a
+      // refusal. What the comparison below needs from the frontmatter is the rules alone.
+      quotedScalar(top[2] ?? "", `the "${key}" field on line ${at}`);
+      block = null;
+      continue;
+    }
+
+    throw new FrontmatterProblem(
+      `line ${at} is neither a field nor a rule entry the way this framework writes them: ${line}`,
+    );
+  }
+
+  closeRule();
+
+  if (!sawPermissions) {
+    throw new FrontmatterProblem(
+      "the frontmatter declares no permissions list, so OpenCode would resolve this agent from its own policy instead of the framework's",
+    );
+  }
+
+  if (rules.length === 0) {
+    throw new FrontmatterProblem("the permissions list is empty");
+  }
+
+  return { rules };
+}
+
+function ruleKey(rule: OpenCodePermissionRule): string {
+  return `${rule.action}\u0000${rule.resource}\u0000${rule.effect}`;
+}
+
+function describeRule(rule: OpenCodePermissionRule): string {
+  return `{ action: ${JSON.stringify(rule.action)}, resource: ${JSON.stringify(rule.resource)}, effect: ${JSON.stringify(rule.effect)} }`;
+}
+
+/**
+ * Compares the rules read off disk with the rules this profile is meant to carry.
+ *
+ * The failures are reported separately because they are different mistakes: a missing or extra rule
+ * is a different capability set, a repeated rule is two intentions in one file, and a pure reorder
+ * is the same capabilities under a different last-match-wins outcome. The order message says so
+ * explicitly, because "the same rules in a different order" reads as harmless to anyone who has not
+ * internalized that in V2 the order *is* the policy.
+ */
+function assertRulesMatch(
+  profile: OpenCodeProfile,
+  path: string,
+  actual: readonly OpenCodePermissionRule[],
+): void {
+  const intended = permissionRulesForProfile(profile);
+
+  const actualKeys = new Set(actual.map(ruleKey));
+  const intendedKeys = new Set(intended.map(ruleKey));
+  const missing = intended.filter((rule) => !actualKeys.has(ruleKey(rule)));
+  const unexpected = actual.filter((rule) => !intendedKeys.has(ruleKey(rule)));
+
+  if (missing.length > 0 || unexpected.length > 0) {
+    const parts: string[] = [];
+
+    if (actual.length !== intended.length) {
+      parts.push(
+        `the file carries ${String(actual.length)} rules and the framework generates ${String(intended.length)}`,
+      );
+    }
+
+    if (missing.length > 0) {
+      parts.push(`a rule the file does not carry: ${missing.map(describeRule).join(", ")}`);
+    }
+
+    if (unexpected.length > 0) {
+      parts.push(
+        `a rule the file carries that is not generated: ${unexpected.map(describeRule).join(", ")}`,
+      );
+    }
+
+    throw new FrontmatterProblem(`${parts.join("; ")} (compared against "${path}")`);
+  }
+
+  if (actual.length !== intended.length) {
+    throw new FrontmatterProblem(
+      `the file carries ${String(actual.length)} rules and the framework generates ${String(intended.length)}, and every intended rule is already present, so one of them is written twice (compared against "${path}")`,
+    );
+  }
+
+  for (const [index, intendedRule] of intended.entries()) {
+    const found = actual[index];
+
+    if (found === undefined || ruleKey(found) !== ruleKey(intendedRule)) {
+      throw new FrontmatterProblem(
+        `the same rules are present in a different order at entry ${String(index)}, and order is the policy: it should be ${describeRule(intendedRule)} but is ${found === undefined ? "missing" : describeRule(found)}. Under last-match-wins that changes what is allowed.`,
+      );
+    }
+  }
+}
+
+function refuseIntegrity(profile: OpenCodeProfile, path: string, detail: string): never {
+  throw new OpenCodeAdapterError(
+    "opencode_configuration_tampered",
+    `Refusing to run the "${profile}" agent: the framework-written configuration at "${path}" could not be read back into the permission rules Agent Workflow Kit generates. ${detail} This check runs after the file is written and before OpenCode is started, because a frontmatter OpenCode cannot parse is read as absent, which leaves the base allow-everything policy in force - the failure Task E observed. Restore the file rather than bypassing this check; Agent Workflow Kit rewrites it on the next configuration write.`,
+  );
+}
+
+/**
+ * Re-reads the generated agent files in `directory` and refuses unless each one parses back into
+ * exactly the rules its profile is meant to carry, in the same order.
+ *
+ * ## Why re-reading is a separate step
+ *
+ * Writing a file proves the bytes left this process; it does not prove the bytes on disk are the
+ * ones OpenCode will read, and it says nothing about whether those bytes still *mean* what they
+ * meant. Every failure this catches ends the same way in OpenCode: a frontmatter the loader cannot
+ * parse is skipped, the agent falls back to the base `{"*","*","allow"}` policy, and a restricted
+ * profile becomes an unrestricted one with no error and no log line. That is Task E's observation,
+ * and it is why this reads the file back instead of trusting the write.
+ *
+ * What it refuses: a missing, symlinked, or unreadable file; malformed structure (a line that is
+ * neither a field nor a rule entry, a rule in the wrong key order, an incomplete rule, an unquoted
+ * scalar, an unclosed or absent `---`); duplicate keys, at the top level and inside a rule; a
+ * missing rule or an extra one; and the same rules in a different order.
+ *
+ * It runs inside {@link createOpenCodeRuntimeConfig}, after every write and before the directory is
+ * returned to the executor, which passes it to the transport as `OPENCODE_CONFIG_DIR` immediately
+ * before `opencode run` is spawned. A stage that reaches the model therefore reaches it with a
+ * ruleset that was proven to be the intended one, and a stage that cannot be proven refuses instead.
+ *
+ * This is not a substitute for the repository-side check in `configuration-integrity.ts`: that one
+ * proves a repository has not redefined a profile, and this one proves the framework's own bytes
+ * still say what the framework means.
+ */
+export async function assertOpenCodeRuntimeConfigIntegrity(directory: string): Promise<void> {
+  const root = resolve(directory);
+
+  for (const profile of OPENCODE_PROFILES) {
+    const relativePath = runtimeAgentFileForProfile(profile);
+    const path = join(root, relativePath);
+    let contents: string;
+
+    try {
+      const stats = await lstat(path);
+
+      if (stats.isSymbolicLink()) {
+        refuseIntegrity(
+          profile,
+          path,
+          "The path is a symbolic link, so what would be loaded is not the file this framework wrote.",
+        );
+      }
+
+      if (!stats.isFile()) {
+        refuseIntegrity(profile, path, "The path is not a regular file.");
+      }
+
+      contents = await readFile(path, "utf8");
+    } catch (error) {
+      if (error instanceof OpenCodeAdapterError) {
+        throw error;
+      }
+
+      const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+
+      refuseIntegrity(
+        profile,
+        path,
+        missing
+          ? "The file does not exist, so the profile would resolve from some other definition or not at all."
+          : "The file could not be read, so what OpenCode would load from it is unknown.",
+      );
+    }
+
+    try {
+      assertRulesMatch(profile, path, parseAgentFrontmatter(contents).rules);
+    } catch (error) {
+      if (error instanceof FrontmatterProblem) {
+        refuseIntegrity(profile, path, error.message);
+      }
+
+      throw error;
+    }
   }
 }

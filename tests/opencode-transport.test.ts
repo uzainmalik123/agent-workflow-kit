@@ -653,6 +653,37 @@ describe("invocation recordings", () => {
     expect(await readFile(join(directory, "stderr.txt"), "utf8")).toBe("a warning");
   });
 
+  /**
+   * What the child was handed, read back from the recording a real spawn writes, rather than what
+   * the builder returned.
+   *
+   * Every option except the executable is production's: this is `createOpenCodeCliTransport()` as
+   * `apps/cli/src/stack.ts` builds it, with `autoApprove` never set. `--auto` approves everything
+   * the generated rules do not explicitly deny, so its absence from the child's own argv is the
+   * property that keeps permission decisions inside the ruleset.
+   */
+  it("sends no auto-approve flag to the child when the caller did not ask for one", async () => {
+    const root = await makeRoot();
+    const fake = fakeOpenCode('process.stdout.write("the answer");');
+    const transport = createOpenCodeCliTransport(fake);
+
+    await transport.run(requestFor({ workingDirectory: root }));
+
+    const manifest = await recordingManifest(root);
+
+    expect(manifest.args).toEqual([
+      ...fake.extraArgs,
+      "run",
+      "--standalone",
+      "--agent",
+      "planner",
+      "--format",
+      "default",
+      STAGE_PROMPT,
+    ]);
+    expect(manifest.args).not.toContain("--auto");
+  });
+
   it("records a non-zero exit with its code and its captured streams", async () => {
     const root = await makeRoot();
     const transport = createOpenCodeCliTransport(
