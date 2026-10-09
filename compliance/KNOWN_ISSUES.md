@@ -11,26 +11,31 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 ## Product blockers
 
 ### P-1. No real model has returned a stage result yet
+
 - **Status:** Open
 - **Evidence:** Task C runs ended before any model reply. `stdout.txt` was empty in every recording. Whether real models follow the strict structured-JSON response protocol is **unverified**.
 - **Next:** resolve P-2, then re-run Task C and read the raw reply.
 
 ### P-2. Zen free tier rejects the framework's restricted agents (403 FreeTierError)
+
 - **Status:** Open. See decision D-1 in `compliance/decisions.md`.
 - **Evidence (Task E, 19 probes):** the free tier fails exactly when the selected agent's configuration removes the `bash` or `read` tool. Both `agentflow-read` and `agentflow-write` deny shell, so both fail. The same model works with OpenCode's default agent, with or without `--standalone`. The 403 comes from the server, not a local refusal. `glob` and `grep` are not required, and denying `edit` is harmless.
 - **Not verified:** the server's actual logic. No HTTP payload was captured, so this is a behavioral correlation. The gate has changed several times and may change again.
 - **Workaround:** use a provider with your own key through `--model provider/model`. Free Zen is best-effort.
 
 ### P-3. The real-OpenCode end-to-end harness is not committed
+
 - **Status:** Open
 - **Evidence:** `E2E_TEST_REPORT.md` references `tests/e2e-external-project.test.mjs`, which does not exist in the repository.
 - **Next:** add a committed opt-in harness (D-12), then prove the full lifecycle through push, the fixer recovery path, and runtime verification with a small HTTP fixture.
 
 ### P-4. A repository with no commits fails with a raw git error
+
 - **Status:** Resolved per the Task C report (a `--model` change and a no-commits precheck were merged); not independently re-checked here.
 - **Evidence:** a fresh `git init` with zero commits failed at grilling with `git rev-parse HEAD failed`.
 
 ### P-5. OpenCode V2 is required
+
 - **Status:** Documented here; README not yet updated
 - **Evidence:** the stage runner needs `--standalone`, which V1 (1.18.x) lacks. The capability probe correctly refuses V1. Verified working version: `opencode v2.0.24`.
 
@@ -39,31 +44,45 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 ## Security-relevant
 
 ### S-1. Malformed agent frontmatter silently produces an unrestricted agent
+
 - **Status:** Open. Needs a fail-closed test.
 - **Evidence:** observed in Task E when a hand-written probe config had broken YAML and passed for that reason. A code comment at `adapters/opencode/src/agents.ts:37-43` already names the hazard.
 - **Next:** a test that parses the generated agent file and asserts the effective permission rules, not just the file text. Required before D-1 is Accepted.
 
 ### S-2. Recordings contain full prompts and model output
+
 - **Status:** Mitigated, with a gap
 - **Evidence:** recordings include argv with the complete prompt, plus stdout and stderr, under `.agentflow/recordings/`. Task D made `agentflow init` write `.agentflow/.gitignore` containing `*`, and a test shows the publisher stages no `.agentflow/` path.
 - **Gap:** if a different `.agentflow/.gitignore` already exists, init leaves it alone and only warns (exit 0), so protection may be silently missing. **Decision needed:** make that case fail or tell the user how to fix it.
 
 ### S-3. The publisher adapter has no refusal of its own for `.agentflow/` paths
+
 - **Status:** Decision needed
 - **Evidence (Task D):** the adapter stages exactly the paths it is given (`publisher.ts:513`); only the orchestration scope check (`orchestrator.ts`, protected list in `orchestration/src/workspace.ts:48-59`) keeps `.agentflow/` out. Adding an adapter-level refusal changes publishing behavior and needs an explicit decision (PRD R-263).
 
-### S-4. Recorder files trip the framework's own scope guard and mask the real error
-- **Status:** In progress (Task F)
-- **Evidence:** a Big Pickle run reported `scope_violation` because the recorder wrote `.agentflow/recordings/...` into the checkout during a read-only stage. The underlying failure was a `non_zero_exit` (the 403). Do not blanket-exclude `.agentflow/` from the guard.
-- **To report:** which error the user sees when both occur.
+### S-4. Recorder files tripped the framework's own scope guard
+
+- **Status:** Resolved in Task F (commit d1b4c8f). The guard now excuses exactly `.agentflow/recordings/<id>/<stage>/<stamp>/{invocation.json,stdout.txt,stderr.txt}`. Near-miss paths and all other `.agentflow/**` paths remain violations. Tests cover this.
 
 ### S-5. Executor failures are not recorded in `events.jsonl`
+
 - **Status:** Open, needs review
 - **Evidence (Task C):** after an `executor_error`, `events.jsonl` held only the draft to grilling transition. Only the CLI output and the recording captured the failure. Check against the PRD's audit-completeness requirements (§29, R-294, R-295).
 
 ### S-6. Stale OpenCode runtime directories accumulate
+
 - **Status:** Open, low severity
 - **Evidence (Task E):** about 300 `opencode-*` directories under `/tmp/agent-workflow-kit/`, each holding generated agent configs. No cleanup exists.
+
+### S-7. A scope violation hides the executor error
+
+- **Status:** Open (Task H)
+- **Evidence (Task F, Q7):** when both occur, the scope check at `orchestrator.ts:2020` returns before the executor-failure branch, so the user never sees the executor error. This is why a real 403 appeared as `scope_violation`.
+
+### S-8. Recordings in publish worktrees and in fix stages are unverified
+
+- **Status:** Open (Task H)
+- **Evidence:** in a post-approval worktree there is no `.agentflow/.gitignore`, so recordings appear as untracked changes. It is unproven that the publisher never stages them (the "inert" claim in Task F conflicts with `approvedPathsOf` being used for `request.paths`). `evaluateFixIntegrity` would also reject a recorded fixing stage.
 
 ---
 
