@@ -9,6 +9,7 @@ import {
   assertNoRepositoryConfigBoundaryCrossing,
 } from "./configuration-integrity.js";
 import { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
+import { stageRecordingFolder } from "./diagnostics.js";
 import {
   assertNoProjectLocalPlugins,
   type FindProjectLocalPluginsOptions,
@@ -27,7 +28,12 @@ import {
   profileForStage,
   type OpenCodeProfile,
 } from "./roles.js";
-import { DEFAULT_TIMEOUT_MS, type OpenCodeTransport } from "./transport.js";
+import {
+  DEFAULT_TIMEOUT_MS,
+  type OpenCodeTransport,
+  type StageProgressCallback,
+  type StageProgressEvent,
+} from "./transport.js";
 
 export interface OpenCodeStageExecutorOptions {
   readonly transport: OpenCodeTransport;
@@ -75,6 +81,16 @@ export interface OpenCodeStageExecutorOptions {
    * a mounted volume. A path inside the repository is refused rather than used.
    */
   readonly runtimeConfigDirectory?: string;
+  /**
+   * Live progress from every stage this executor runs, or nothing when no callback is supplied.
+   *
+   * The executor emits `stage_started`, `stage_finished`, and `stage_failed` — it is the layer that
+   * knows when a stage began and how long it took — and forwards its own callback to the transport
+   * so the transport can emit `activity` lines as the child produces them. It changes no request, no
+   * response, no recording, and no stage result: a callback that throws is caught here rather than
+   * allowed to fail a stage that was otherwise fine.
+   */
+  readonly onProgress?: StageProgressCallback;
 }
 
 /**
@@ -125,6 +141,78 @@ export class OpenCodeStageExecutor implements StageExecutor {
   }
 
   async execute(request: StageExecutionRequest): Promise<StageExecutionResult> {
+    const startedAtMs = Date.now();
+    this.#emit({ type: "stage_started", stage: request.stage });
+
+    try {
+      const result = await this.#runStage(request);
+      const elapsedMs = Date.now() - startedAtMs;
+      this.#emit({ type: "stage_finished", stage: request.stage, elapsedMs });
+
+      // A stage that answered "failed" ran to completion and reported its own failure, which is a
+      // different shape from a throw but the same question for a human reading the output: where is
+      // what it actually did.
+      if (result.outcome === "failed") {
+        this.#emit({
+          type: "stage_failed",
+          stage: request.stage,
+          elapsedMs,
+          recordingFolder: this.#recordingFolderFor(request),
+        });
+      }
+
+      return result;
+    } catch (error) {
+      // Finished first, failed second: the stage did end, and then it ended badly. Emitting them in
+      // that order keeps two lines reading as one account of one run.
+      const elapsedMs = Date.now() - startedAtMs;
+      this.#emit({ type: "stage_finished", stage: request.stage, elapsedMs });
+      this.#emit({
+        type: "stage_failed",
+        stage: request.stage,
+        elapsedMs,
+        recordingFolder: this.#recordingFolderFor(request),
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Delivers one progress event, if anybody is listening.
+   *
+   * A callback that throws is swallowed. Progress is a display of a run that is already happening;
+   * a broken writer must not be able to turn a stage that ran fine into an executor failure, which
+   * is the same discipline the recorder follows for the same reason.
+   */
+  #emit(event: StageProgressEvent): void {
+    try {
+      this.#options.onProgress?.(event);
+    } catch {
+      // Ignored by design; see the comment above.
+    }
+  }
+
+  /**
+   * The directory this stage's recordings are written into, absolute.
+   *
+   * Read from the workspace the request names rather than from the directory the run happened in,
+   * because it is emitted on the failure path too — where the point is to tell a human where to
+   * look, and the request's workspace is the directory the recorder would have used.
+   */
+  #recordingFolderFor(request: StageExecutionRequest): string {
+    return stageRecordingFolder(resolve(request.workspace.workingDirectory), {
+      featureId: request.feature.featureId,
+      stage: request.stage,
+    });
+  }
+
+  /**
+   * The body of a stage run: every refusal, the prompt, the transport call, and the response parse.
+   *
+   * Split out from {@link execute} only so that `execute` can bracket it with the progress events
+   * that describe it; nothing about the order of the checks below changed when it moved.
+   */
+  async #runStage(request: StageExecutionRequest): Promise<StageExecutionResult> {
     const profile = profileForStage(request.stage);
     const agent = agentForProfile(profile);
     const workingDirectory = this.#workingDirectoryFor(request);
@@ -260,6 +348,9 @@ export class OpenCodeStageExecutor implements StageExecutor {
         model: this.#options.model ?? null,
         timeoutMs: this.#options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         signal: this.#options.signal ?? null,
+        // The transport relays tool-use lines into the same callback the executor reports its own
+        // stage events on, so one listener sees one ordered account of the run.
+        ...(this.#options.onProgress === undefined ? {} : { onProgress: this.#options.onProgress }),
       });
     } catch (error) {
       if (isOpenCodeAdapterError(error)) {

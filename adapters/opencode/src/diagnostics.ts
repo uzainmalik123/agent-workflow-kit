@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { resolveInsideRoot } from "@agent-workflow-kit/project";
 import { isOpenCodeAdapterError } from "./errors.js";
 import type { ProcessOutcomeObservation } from "./process.js";
@@ -108,6 +108,34 @@ export function describeRecordingError(error: unknown): { code: string; message:
   }
 
   return null;
+}
+
+/**
+ * The folder a stage's recordings land in: `<workingDirectory>/.agentflow/recordings/<feature>/<stage>/`,
+ * absolute.
+ *
+ * Derived from exactly the parts {@link recordStageInvocation} derives its own path from, so a
+ * caller that prints this folder is pointing at the directory the recorder writes into — including
+ * for a write stage, whose working directory is a worktree under the user's cache directory and
+ * whose recordings therefore never appear in the project's own `.agentflow/`.
+ *
+ * It is a *folder*, not a run: it holds one subdirectory per invocation, newest last by name. A
+ * failure message points here because a reader can then see every attempt rather than only the one
+ * that happened to be in the message.
+ */
+export function stageRecordingFolder(
+  workingDirectory: string,
+  identity: StageInvocationIdentity,
+): string {
+  const feature = safeRecordingSegment(identity.featureId);
+  const stage = safeRecordingSegment(identity.stage);
+  const root = resolve(workingDirectory, OPENCODE_RECORDINGS_DIRECTORY);
+
+  if (feature.length === 0 || stage.length === 0) {
+    return root;
+  }
+
+  return resolve(root, feature, stage);
 }
 
 /**

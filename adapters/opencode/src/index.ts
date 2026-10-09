@@ -138,7 +138,19 @@ export type {
   OpenCodeRawResult,
   OpenCodeTransport,
   OpenCodeTransportRequest,
+  StageProgressCallback,
+  StageProgressEvent,
 } from "./transport.js";
+
+export {
+  createActivityRelay,
+  createLineBuffer,
+  extractToolUseLine,
+  stripAnsiCodes,
+  PROGRESS_LINE_MAX_CHARS,
+  TOOL_USE_MARKERS,
+} from "./progress.js";
+export type { ActivityRelay, LineBuffer } from "./progress.js";
 
 export {
   buildOpenCodeInvocation,
@@ -170,6 +182,7 @@ export {
   OPENCODE_RECORDINGS_DIRECTORY,
   recordStageInvocation,
   safeRecordingSegment,
+  stageRecordingFolder,
 } from "./diagnostics.js";
 export type {
   RecordedInvocation,

@@ -95,6 +95,16 @@ export interface ChildProcessRequest {
    * refused as an unknown field. See `child-environment.ts`.
    */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * Observes one chunk of one stream *while the child is still running*, before the outcome exists.
+   *
+   * Observation only, and it cannot influence what the runner reports: the captures, the byte
+   * ceiling, the deadline, and the outcome are decided exactly as they are without it, and a
+   * callback that throws is swallowed rather than allowed to fail a run. It exists so a caller
+   * streaming a stage to a human can show a line when the process wrote it, not when it exited —
+   * the same distinction that separates a heartbeat from a post-mortem.
+   */
+  readonly onStreamChunk?: (stream: "stdout" | "stderr", chunk: string) => void;
 }
 
 export interface ProcessStreamCapture {
@@ -443,14 +453,31 @@ function launchChild(
       }
     };
 
+    const observe = (stream: "stdout" | "stderr", chunk: string): void => {
+      const observer = request.onStreamChunk;
+
+      if (observer === undefined) {
+        return;
+      }
+
+      try {
+        observer(stream, chunk);
+      } catch {
+        // A watcher that throws is a broken watcher, not a broken run. The capture already holds
+        // the chunk, so nothing is lost and the outcome is untouched either way.
+      }
+    };
+
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout.write(chunk);
+      observe("stdout", chunk);
       account(stdout);
     });
     child.stderr.on("data", (chunk: string) => {
       stderr.write(chunk);
+      observe("stderr", chunk);
       account(stderr);
     });
 

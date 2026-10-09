@@ -1,7 +1,10 @@
 import { Command } from "commander";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/project";
+import { DEFAULT_TIMEOUT_MS, type StageProgressCallback } from "@agent-workflow-kit/opencode";
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
+import { createStageProgressReporter } from "./progress.js";
+import { findLatestRecording } from "./recordings.js";
 import { createRealStack, type OrchestratorStack } from "./stack.js";
 import { join, dirname, resolve } from "node:path";
 import { mkdir, writeFile, readFile, lstat } from "node:fs/promises";
@@ -20,6 +23,14 @@ try {
 
 const MAX_RUN_ATTEMPTS = 100;
 
+/** The options `agentflow run` declares. */
+interface RunCommandOptions {
+  readonly verbose?: boolean;
+  readonly model?: string;
+  readonly quiet?: boolean;
+  readonly stageTimeout?: string;
+}
+
 /**
  * What a command needs from the stack: the orchestrator it drives and the store whose sessions it
  * reads, plus the optional runtime preflight described on {@link OrchestratorStack}.
@@ -30,6 +41,10 @@ export type CliStack = OrchestratorStack;
 export interface CliStackRequest {
   /** The model to ask OpenCode for; `null` leaves the choice to OpenCode's own default. */
   readonly model?: string | null;
+  /** Live progress from the stages the stack's executor runs; absent means no progress at all. */
+  readonly onProgress?: StageProgressCallback;
+  /** The per-stage budget in milliseconds; absent means the adapter's own default. */
+  readonly stageTimeoutMs?: number;
 }
 
 /**
@@ -320,6 +335,42 @@ function resolveRunModel(flag: string | undefined): string | null {
 }
 
 /**
+ * The per-stage budget in milliseconds, from `--stage-timeout <seconds>`.
+ *
+ * The default is not restated here: it is `DEFAULT_TIMEOUT_MS` itself — 900 000 ms, i.e. **900
+ * seconds (15 minutes)**, the same value the executor uses when it is given no budget at all — so
+ * the flag's help text, this conversion, and the executor's default cannot drift apart. The value
+ * has not changed; only where a caller can state it has.
+ *
+ * A flag that is not a whole number of seconds of at least one is refused before a stack is built,
+ * exactly as an unusable `--model` is: an unusable value is this command's answer rather than a
+ * surprise inside a stage's invocation.
+ */
+function resolveStageTimeoutMs(flag: string | undefined): number {
+  if (flag === undefined) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+
+  if (!/^[0-9]+$/u.test(flag)) {
+    throw new Error(
+      `Invalid --stage-timeout value: ${JSON.stringify(flag)} must be a whole number of seconds.`,
+    );
+  }
+
+  const timeoutMs = Number(flag) * 1000;
+
+  if (timeoutMs < 1000) {
+    throw new Error("Invalid --stage-timeout value: the timeout must be at least 1 second.");
+  }
+
+  if (!Number.isSafeInteger(timeoutMs)) {
+    throw new Error(`Invalid --stage-timeout value: ${JSON.stringify(flag)} is too large a number of seconds.`);
+  }
+
+  return timeoutMs;
+}
+
+/**
  * Whether `git rev-parse HEAD` resolves, i.e. the repository has at least one commit.
  *
  * `run` checks this before the workflow is touched: a stage diffs, verifies, and eventually
@@ -392,7 +443,21 @@ export function createCli(options: CreateCliOptions = {}): Command {
         }
         const session = await store.load(targetFeatureId);
 
-        console.log(formatStatus(session));
+        // Where the last stage ran and what it left behind, when it ran at all. Read-only and
+        // best-effort: a feature with no recording, and a machine with no cache to search, gets
+        // exactly the output this command produced before it existed.
+        const latest = await findLatestRecording(repoRoot, targetFeatureId);
+        const lines = [formatStatus(session)];
+
+        if (latest !== null) {
+          lines.push(`Last stage: ${latest.stage}`);
+          lines.push(
+            `Last stage elapsed: ${String(Math.max(0, Math.round(latest.durationMs / 1000)))}s`,
+          );
+          lines.push(`Recording folder: ${latest.folder}`);
+        }
+
+        console.log(lines.join("\n"));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Error: ${message}`);
@@ -447,12 +512,21 @@ export function createCli(options: CreateCliOptions = {}): Command {
       "--model <model>",
       "Model to ask OpenCode for, as provider/model; falls back to AGENTFLOW_MODEL, then to OpenCode's own default model",
     )
-    .action(async (featureId: string | undefined, opts: { verbose?: boolean; model?: string }) => {
+    .option(
+      "--quiet",
+      "No live stage progress on stderr (a failed stage still names its recording folder)",
+    )
+    .option(
+      "--stage-timeout <seconds>",
+      `Per-stage timeout in seconds (default: ${String(DEFAULT_TIMEOUT_MS / 1000)})`,
+    )
+    .action(async (featureId: string | undefined, opts: RunCommandOptions) => {
       try {
         const repoRoot = getRepoRoot(cwd());
         // Resolved and validated before anything is built, so an unusable value is this command's
         // answer rather than a surprise inside a stage's invocation.
         const model = resolveRunModel(opts.model);
+        const stageTimeoutMs = resolveStageTimeoutMs(opts.stageTimeout);
 
         // Before the stack exists and before any session is read: a repository with no commits
         // cannot diff, verify, or publish, so the run stops here with that answer.
@@ -462,7 +536,16 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
-        const stack = createStack(repoRoot, { model });
+        // Progress goes to stderr through one reporter owned by this command: stage start/finish
+        // lines and the 30s heartbeat, silenced entirely by --quiet.
+        const reporter = createStageProgressReporter(
+          opts.quiet === true ? { quiet: true } : {},
+        );
+        const stack = createStack(repoRoot, {
+          model,
+          onProgress: reporter,
+          stageTimeoutMs,
+        });
         const orchestrator = stack.orchestrator;
 
         const targetFeatureId = await getTargetFeatureId(stack.store, exit, featureId);

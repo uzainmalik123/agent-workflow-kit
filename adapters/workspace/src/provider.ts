@@ -629,7 +629,16 @@ export class GitWorkspaceProvider implements ProjectWorkspaceProvider {
   }
 }
 
-function defaultCacheRoot(): string {
+/**
+ * Where worktrees live by default: `$XDG_CACHE_HOME/agent-workflow-kit/workspaces`, else
+ * `~/.cache/agent-workflow-kit/workspaces`.
+ *
+ * Exported because the same directory is where a write stage's recordings end up — under
+ * `<workspace>/.agentflow/recordings/…` — and a command that wants to *find* those recordings has to
+ * resolve the root the same way the provider that wrote them did, rather than guessing at the path
+ * from a description of it.
+ */
+export function defaultCacheRoot(): string {
   const xdg = process.env["XDG_CACHE_HOME"];
 
   if (xdg !== undefined && xdg !== "" && isAbsolute(xdg)) {

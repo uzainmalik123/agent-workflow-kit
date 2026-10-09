@@ -25,6 +25,13 @@ export interface FakeOpenCodeBehavior {
   readonly error?: Error;
   /** Resolve after this delay, which is how a slow run is simulated. */
   readonly delayMs?: number;
+  /**
+   * Progress lines the fake relays through the request's callback while it runs, in order.
+   *
+   * This is the seam the progress tests need: the real transport relays the child's tool-use lines,
+   * and a fake that could not emit any would leave the executor's forwarding untested.
+   */
+  readonly activity?: readonly string[];
   /** Answer under a different agent id, to prove a mismatched response is refused. */
   readonly agent?: string;
 }
@@ -189,6 +196,12 @@ export class FakeOpenCodeTransport implements OpenCodeTransport {
       ...this.#byAgent.get(request.agent),
       ...this.#byStage.get(request.stage),
     };
+
+    if (behavior.activity !== undefined) {
+      for (const line of behavior.activity) {
+        request.onProgress?.({ type: "activity", stage: request.stage, line });
+      }
+    }
 
     if (behavior.delayMs !== undefined) {
       await sleep(behavior.delayMs);

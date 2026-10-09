@@ -1,4 +1,4 @@
-export { GitWorkspaceProvider, type GitWorkspaceProviderOptions } from "./provider.js";
+export { GitWorkspaceProvider, type GitWorkspaceProviderOptions, defaultCacheRoot } from "./provider.js";
 export { WorkspaceAdapterError, WORKSPACE_ADAPTER_ERROR_CODES, type WorkspaceAdapterErrorCode } from "./errors.js";
 export { acquireLease, leaseIsHeldByALiveProcess, processIsAlive, releaseLease, DEFAULT_LEASE_TTL_MS } from "./lease.js";
 export { parseStatus, trackedStateFrom, type ParsedStatus, type TrackedState } from "./status.js";

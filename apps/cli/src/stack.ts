@@ -1,4 +1,5 @@
 import { createOpenCodeCliTransport, createOpenCodeStageExecutor } from "@agent-workflow-kit/opencode";
+import type { StageProgressCallback } from "@agent-workflow-kit/opencode";
 import { createWorkflowOrchestrator } from "@agent-workflow-kit/orchestration";
 import type { WorkflowOrchestrator, WorkflowOrchestratorOptions } from "@agent-workflow-kit/orchestration";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
@@ -44,6 +45,17 @@ export interface RealStackOptions {
    * how OpenCode's own configured default is left to decide the model.
    */
   readonly model?: string | null;
+  /**
+   * Live progress from every stage the real executor runs. Absent means no progress at all: the
+   * executor emits nothing, the transport observes nothing, and the run is exactly the one it was
+   * before progress existed.
+   */
+  readonly onProgress?: StageProgressCallback;
+  /**
+   * The per-stage budget in milliseconds. Absent means the adapter's own default, `DEFAULT_TIMEOUT_MS`
+   * — 900 seconds — which is also the value the CLI's `--stage-timeout <seconds>` documents.
+   */
+  readonly stageTimeoutMs?: number;
 }
 
 /**
@@ -72,6 +84,8 @@ export function createRealStack(repoRoot: string, options: RealStackOptions = {}
     transport,
     projectRoot: repoRoot,
     model: options.model ?? null,
+    ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+    ...(options.stageTimeoutMs === undefined ? {} : { timeoutMs: options.stageTimeoutMs }),
   });
 
   const workspace = new GitWorkspaceProvider();

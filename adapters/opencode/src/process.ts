@@ -32,6 +32,11 @@ export interface RunProcessOptions {
   /** Names the run in a failure message without ever including the argument list. */
   readonly label: string;
   /**
+   * Observes a stream chunk while the child is still running — see the runner's own field of the
+   * same name. Optional, observation only, and it cannot change the result or the refusal.
+   */
+  readonly onStreamChunk?: (stream: "stdout" | "stderr", chunk: string) => void;
+  /**
    * Observes the raw child outcome, on success and failure alike, for a caller that records what
    * actually ran. The callback is synchronous and cannot change the outcome: this function keeps
    * sole ownership of the refusal policy, and a failed run still rejects with the same errors.
@@ -107,7 +112,11 @@ function reasonSuffix(reason: ProcessFailureReason | null): string {
  *   request, or artifact content is ever interpreted by a shell;
  * - the environment is inherited only because a provider credential is required, and it is never
  *   echoed into a result, a log line, or an error message;
- * - stdout and stderr are captured separately, each with a byte cap that stops a runaway run;
+ * - stdout and stderr are captured separately, each with a byte cap that stops a runaway run.
+ *   They are *buffers*, not a live view: nothing outside this function sees a byte until the child
+ *   exits, which is why a caller that must show progress while the run is happening asks for
+ *   `onStreamChunk` — the same chunks, delivered as they arrive, unable to change the capture, the
+ *   cap, or the outcome;
  * - a timeout or an abort terminates the child and rejects, it never resolves with partial output;
  * - a non-zero exit is reported with the exit code and a bounded stderr excerpt, and the argument
  *   list, which for a stage run contains the prompt, is never included in the message.
@@ -143,6 +152,7 @@ export async function runProcess(
     // inherits, `inheritEnv: false` scrubs through `buildStageRunEnvironment` first.
     inheritEnv: options.inheritEnv !== false,
     ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.onStreamChunk === undefined ? {} : { onStreamChunk: options.onStreamChunk }),
     signal: options.signal ?? null,
   });
 
@@ -174,7 +184,7 @@ export async function runProcess(
   if (outcome.termination === "timed_out") {
     throw new OpenCodeAdapterError(
       "transport_timeout",
-      `${options.label} exceeded its ${String(options.timeoutMs)}ms budget.`,
+      `${options.label} exceeded its ${String(options.timeoutMs)}ms budget after ${String(outcome.durationMs)}ms.`,
     );
   }
 

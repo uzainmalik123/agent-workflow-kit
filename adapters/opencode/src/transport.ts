@@ -5,6 +5,39 @@ import type {
 } from "@agent-workflow-kit/orchestration";
 
 /**
+ * Live progress from one stage run.
+ *
+ * Optional everywhere it appears: a caller that does not supply a callback gets exactly the
+ * behaviour it had before these events existed. Nothing here changes a request, a response, a
+ * recording, or a stage result — the events are observations of a run that is already happening,
+ * and the printing decision belongs to whoever supplied the callback (the CLI prints to stderr).
+ *
+ * They live beside the transport request because both ends of the wire — the executor, which owns
+ * the stage's lifetime, and the transport, which can see the child's output as it arrives — emit
+ * into the same callback.
+ */
+export type StageProgressEvent =
+  /** The executor has begun a stage, before any preflight or prompt work. */
+  | { readonly type: "stage_started"; readonly stage: WorkStage }
+  /** One tool-use line, already stripped of escapes and bounded, as it arrived from the child. */
+  | { readonly type: "activity"; readonly stage: WorkStage; readonly line: string }
+  /** The stage returned or threw. Emitted for every stage, success or failure alike. */
+  | { readonly type: "stage_finished"; readonly stage: WorkStage; readonly elapsedMs: number }
+  /**
+   * The stage failed: it threw, or it reported `outcome: "failed"`. `recordingFolder` is the
+   * absolute directory that stage's invocation recordings land in — which for a write stage is
+   * under the workspace cache, and is otherwise the last place a user would think to look.
+   */
+  | {
+      readonly type: "stage_failed";
+      readonly stage: WorkStage;
+      readonly elapsedMs: number;
+      readonly recordingFolder: string;
+    };
+
+export type StageProgressCallback = (event: StageProgressEvent) => void;
+
+/**
  * How this adapter asks OpenCode to run a role.
  *
  * The executor depends on this port rather than on a child process, so the exact invocation is a
@@ -40,6 +73,14 @@ export interface OpenCodeTransportRequest {
   readonly model: string | null;
   readonly timeoutMs: number;
   readonly signal: AbortSignal | null;
+  /**
+   * Live progress from this run, or nothing when the caller does not want any.
+   *
+   * The transport emits `activity` events only. `stage_started`, `stage_finished`, and
+   * `stage_failed` belong to the executor, which is the layer that knows when a stage began and
+   * how long it took; a transport that emitted them could report a start it did not cause.
+   */
+  readonly onProgress?: StageProgressCallback;
 }
 
 /**
@@ -60,4 +101,16 @@ export interface OpenCodeTransport {
   run(request: OpenCodeTransportRequest): Promise<OpenCodeRawResult>;
 }
 
+/**
+ * The default per-stage budget: 900 000 ms — **900 seconds, fifteen minutes** — set here and nowhere
+ * else. The executor uses it when no `timeoutMs` is supplied, and the CLI's `--stage-timeout
+ * <seconds>` converts to milliseconds against this same value, so the help text and the behaviour
+ * cannot drift apart.
+ *
+ * It is deliberately larger than five minutes: a planning stage has been observed to run for 836
+ * seconds and still succeed, and a budget shorter than the work it is meant to allow would turn a
+ * slow-but-good stage into a `transport_timeout`. The budget is enforced by the shared runner's
+ * deadline, which terminates the child and is reported as `transport_timeout` with the elapsed
+ * time — never as a partial result.
+ */
 export const DEFAULT_TIMEOUT_MS = 900_000;

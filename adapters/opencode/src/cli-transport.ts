@@ -9,6 +9,7 @@ import {
   type RunProcessResult,
 } from "./process.js";
 import { describeRecordingError, recordStageInvocation } from "./diagnostics.js";
+import { createActivityRelay, type ActivityRelay } from "./progress.js";
 import { OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE } from "./runtime-config.js";
 import {
   type OpenCodeRawResult,
@@ -321,6 +322,11 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
 
     let result: RunProcessResult;
     let observation: ProcessOutcomeObservation | null = null;
+    // When a caller wants progress, the child's stderr is offered line by line while the run is
+    // happening. When it does not, no observer exists at all: the run is byte-for-byte the one it
+    // was before this option existed.
+    const relay: ActivityRelay | null =
+      request.onProgress === undefined ? null : createActivityRelay(request.stage, request.onProgress);
 
     try {
       result = await runProcess(invocation.command, invocation.args, {
@@ -334,12 +340,16 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
         inheritEnv: false,
         env: environment.env,
         ...(request.signal == null ? {} : { signal: request.signal }),
+        ...(relay === null ? {} : { onStreamChunk: relay.onChunk }),
         label,
         onOutcome: (outcome) => {
           observation = outcome;
         },
       });
     } catch (error) {
+      // A final unterminated tool line — the child wrote it and exited before a newline — is still
+      // worth showing, so it is offered before the refusal leaves this function.
+      relay?.flush();
       // The recording is written before the refusal leaves this function, so even a failed run
       // leaves behind what it actually received and said. Best-effort: it cannot mask `error`.
       await this.#recordInvocation(request, invocation, observation, error);
@@ -351,6 +361,7 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
       throw new OpenCodeAdapterError("transport_failed", `${label} failed.`, { cause: error });
     }
 
+    relay?.flush();
     await this.#recordInvocation(request, invocation, observation, null);
 
     if (format === "json") {
