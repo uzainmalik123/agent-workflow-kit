@@ -47,13 +47,13 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ### P-8. Write-stage recordings are in the workspace cache
 
-- **Status:** Open (Task K)
-- **Evidence:** the F-004 implementation recording was found under `~/.cache/agent-workflow-kit/workspaces/<hash>/.agentflow/recordings/`, not in the project's `.agentflow/`. Recordings for read stages are in the project. Users have no hint where to look.
+- **Status:** Mitigated (Task K, commit 3db4aee)
+- **Detail:** recordings still live under `~/.cache/agent-workflow-kit/workspaces/<hash>/`, but a failed stage now prints its recording folder, and `agentflow status <id>` prints the last stage's folder.
 
 ### P-9. No progress output and an unclear stage timeout
 
-- **Status:** Open (Task K)
-- **Evidence:** a planning stage ran 836s with exit 0 and no timeout; an implementation stage ran about 10 minutes before a scope violation; the CLI printed nothing meanwhile. The effective default timeout is unverified.
+- **Status:** Resolved in Task K
+- **Detail:** stage start/finish lines, 30-second heartbeats, and live tool-use lines are printed to stderr (`--quiet` disables them). The default stage timeout is 900 seconds (15 minutes) and can be changed with `--stage-timeout <seconds>`. The default may be too generous for free models.
 
 ---
 
