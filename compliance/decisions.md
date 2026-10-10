@@ -98,6 +98,15 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 - **Status:** Proposed
 - **Decision:** the P4 real-OpenCode harness runs as a separate script (for example `pnpm e2e:real`) with a pinned OpenCode version and model, and saves raw transcripts. `pnpm verify` stays free of live-model calls (R-241).
 
+## D-13. Plan-review findings are resolved by the human at the plan approval gate
+
+- **Status:** Accepted (option b of Task I)
+- **Context:** Task I proved that a `plan_review` `needs_fix` can never be repaired: the fixer has no authority over the plan, the plan is digest-locked before approval, and the fixer's scope is derived from the plan under review. Every path ends in `feature_failed` after up to 5 wasted attempts.
+- **Decision:** a `needs_fix` outcome from `plan_review` does not enter the fixer. The feature advances to `AwaitingPlanApproval` with the review stored as part of the approved artifact bytes (it is already one of the three digests approval freezes). The CLI shows the findings at the gate. Approving a plan with unresolved findings requires an explicit acknowledgement flag. An `agentflow abandon <id>` command lets the human end a feature that should not proceed.
+- **Not changed:** the state machine, the fixer's authority, scope derivation, and the digest lock. The fixer still handles code-stage failures only. Core transitions that list Plan Review as a legal fix-return state remain, unused in practice.
+- **Rejected:** letting the fixer edit the plan (option c). It erodes the guarantee that the human approves text no agent authored.
+- **Follow-up (optional):** a bounded replanning loop (option a) needs its own versioned decision (PRD §38.3, R-263).
+
 ## D-14. `expectedFiles` is the single authoritative scope key
 
 - **Status:** Proposed

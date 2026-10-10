@@ -39,6 +39,11 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Documented here; README not yet updated
 - **Evidence:** the stage runner needs `--standalone`, which V1 (1.18.x) lacks. The capability probe correctly refuses V1. Verified working version: `opencode v2.0.24`.
 
+### P-6. A plan_review needs_fix dead-ends in the fixer
+
+- **Status:** Confirmed by Task I; fix specified in D-13 (Task N)
+- **Evidence:** the fixer is authorized to write zero paths, has no output slot for the plan, and cannot change its digest (hashed before human approval). Every path ends in `feature_failed` after up to 5 attempts, or an unresumable `fixing` state. The fix guard and the pre-approval scope check also contradict each other (a path the plan names is writable under one and refused under the other).
+
 ### P-7. One malformed model reply kills the run (no retry)
 
 - **Status:** Open
@@ -83,6 +88,16 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 - **Status:** Open, low severity
 - **Evidence (Task L report):** `final-summary.ts:154-186` matches entries against exact observed paths, so a glob entry can never be "observed" and its step reports partial.
+
+### P-16. The CLI hides findings and offers no way out of a failed feature
+
+- **Status:** Open (Task N)
+- **Evidence (Task I):** review findings are never rendered; `agentflow status` omits the error and fix attempts; there is no resume, retry, or abandon command; `failFeature()` is unwired. Re-running a stuck feature burns the remaining attempts. The error message is not persisted on the session.
+
+### P-17. A CLI test exercises a copy of the run loop
+
+- **Status:** Open, low severity
+- **Evidence:** `tests/cli-run-unit.test.ts:16-89` reimplements the loop instead of invoking `createCli()`, so the real command tree's `Workflow error ... exit(1)` path is untested.
 
 ---
 
