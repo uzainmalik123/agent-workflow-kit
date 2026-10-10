@@ -73,6 +73,17 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Resolved in Task L (prompt names the key; approval warns). The derivation was deliberately NOT widened: `approvedScopeFromPlan` still reads only `steps[].expectedFiles` (D-14, R-263).
 - **Evidence:** the planner role names `steps[].expectedFiles` and says files named anywhere else authorize nothing (`adapters/opencode/src/roles.ts`); the planning prompt carries a "Plan artifact shape" section whose JSON is `PLAN_EXAMPLE` (`adapters/opencode/src/prompts.ts`). `tests/plan-scope-contract.test.ts` feeds that same exported constant through `approvedScopeFromPlan`, asserts the patterns are non-empty and authorize exactly the example's files, that files outside them are unauthorized, and that `declaredFileSet`/`steps[].files` still derive nothing — so the prompt example and the derivation cannot drift apart silently. `agentflow approve plan` derives the scope from the stored plan with the same exported `approvedScopeFromPlan` and, when it yields zero patterns, prints a warning that implementation will fail the scope check without blocking approval (`apps/cli/src/commands.ts`, `tests/cli-warnings.test.ts`).
 
+### P-14. plan_review replies rejected: model returns bare JSON without the fence
+
+- **Status:** Open (Task M)
+- **Evidence (recordings, 2026-10-09/10, Big Pickle):** two plan_review replies (7,149 B and 6,536 B) were complete, plausible JSON with zero fence lines; one reply was empty (0 B). Earlier replies from other stages had fences. The contract (exactly one fenced block) rejected the unfenced replies as "no fenced JSON block". Parse failures show exit 0 and no error in `invocation.json`.
+- **Unverified:** why the fence was omitted, and whether it correlates with reply length.
+
+### P-15. Final summary cannot match glob entries in expectedFiles
+
+- **Status:** Open, low severity
+- **Evidence (Task L report):** `final-summary.ts:154-186` matches entries against exact observed paths, so a glob entry can never be "observed" and its step reports partial.
+
 ---
 
 ## Security-relevant

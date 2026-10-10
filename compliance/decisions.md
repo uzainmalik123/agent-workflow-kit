@@ -104,3 +104,16 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 - **Decision:** the plan's per-step `expectedFiles` array is the only input to approved-scope derivation. Prompts must name it and show an example. Scope derivation is NOT widened to read `declaredFileSet` or `steps[].files`. An empty derived scope is surfaced to the human as a warning at plan approval and does not block approval.
 - **Basis:** PRD PlanStep contract (compliance/requirements.json:193); R-263; human approval has top priority.
 - **Open:** whether an empty scope with declared files should become a hard refusal. That would change approval behavior and needs a versioned decision.
+
+## D-15. Bounded retry for malformed model replies
+
+- **Status:** Proposed
+- **Decision:** a reply that fails the response contract (malformed, empty, or schema-invalid) is retried up to 2 times with a fresh invocation and a one-line rejection notice. The contract itself is not weakened. Transport errors, timeouts, scope violations, and provider errors are never retried. Every attempt is recorded.
+- **Basis:** a single formatting miss from a free model currently kills a stage. PRD §10.8 and R-263 (adapter hardening, no workflow change).
+
+## D-16. Accepting a bare-JSON-only reply as a valid response
+
+- **Status:** Proposed. Decide after Task M's retry results.
+- **Context:** see P-14. Models sometimes return the correct JSON object without the markdown fence.
+- **Decision (draft):** a reply is accepted if it is exactly one fenced JSON block with nothing after it (today's rule), OR if the whole trimmed reply is a single JSON object and nothing else. Prose before or after, two objects, or an object in the middle of text are rejected. The same schema validation applies to both forms.
+- **Basis:** the contract's purpose is unambiguous extraction with no prose smuggling; a bare-object-only reply preserves that. It does change PRD §10.8 and needs a versioned decision.
