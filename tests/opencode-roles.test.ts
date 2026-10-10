@@ -264,6 +264,20 @@ describe("workflow authority limits", () => {
     }
   });
 
+  // P-12: the implementer wrote `implementation.json` because the prompt renders artifacts with
+  // filenames while its role never said the response comes back in the reply. The sentence is one
+  // string in both write roles, so a test can hold the wording still rather than a paraphrase.
+  it("tells every write-capable role that the structured response is returned, never written to a file", () => {
+    expect(WRITE_CAPABLE_ROLES).toEqual(["implementer", "fixer"]);
+
+    const sentence =
+      "The structured response is returned in your reply and is NEVER written to a file: do not create or edit `implementation.json` or any other artifact filename in the repository.";
+
+    for (const role of WRITE_CAPABLE_ROLES) {
+      expect(roleDefinition(role).prohibited.join("\n")).toContain(sentence);
+    }
+  });
+
   it("tells the implementer to report a finding instead of fixing it", () => {
     expect(roleDefinition("implementer").prohibited.join(" ")).toMatch(
       /do not fix a finding you notice/i,

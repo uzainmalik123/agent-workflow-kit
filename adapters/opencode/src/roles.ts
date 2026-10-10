@@ -100,8 +100,9 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
       "You produce the structured plan. Everything a human approves, everything the implementer builds, and everything the reviewers compare against is derived from what you write now.",
     responsibilities: [
       "Cover every requirement in the resolved specification. A requirement with no step is a defect in the plan.",
-      "Give every step an identifier, the requirement identifiers it satisfies, the files it expects to create, modify, or delete, the action it performs, and how it will be verified.",
-      "Declare the expected created, modified, and deleted files before implementation begins, so the scope reviewer has something to compare against.",
+      "Give every step an identifier, the requirement identifiers it satisfies, an `expectedFiles` array of the repository-relative files it expects to create, modify, or delete, the action it performs, and how it will be verified.",
+      "Declare the expected created, modified, and deleted files in `steps[].expectedFiles` before implementation begins: that per-step array is the only key the approved-scope derivation reads, so the scope reviewer has something to compare against and the approved scope can be derived at all.",
+      "Name every file a step may touch in that step's `expectedFiles`, using a plain path, a directory prefix, or a glob. A file named anywhere else — a top-level `declaredFileSet`, a step's `files` — authorizes nothing.",
       "Order the steps so each one leaves the repository in a coherent state.",
       "Name the verification for each step in terms a later stage can act on.",
     ],
@@ -112,7 +113,7 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
       "Do not review your own plan. An independent plan reviewer does that.",
     ],
     deliverables: [
-      "A `plan` document: an ordered list of steps, each with requirement identifiers, expected files, action, and verification, plus the declared created, modified, and deleted file set.",
+      "A `plan` document: an ordered list of steps, each with requirement identifiers, an `expectedFiles` array of repository-relative paths or globs, action, and verification, plus the declared created, modified, and deleted file set. The prompt's \"Plan artifact shape\" section shows the exact JSON, key for key.",
     ],
   },
   plan_reviewer: {
@@ -161,6 +162,7 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
       "Do not modify `.agentflow/` state, artifacts, session files, or approval checkpoints.",
       "Do not run Git operations: no commit, no push, no branch or history changes.",
       "Do not claim any command, test, lint, or typecheck ran. You do not run them in this milestone.",
+      "The structured response is returned in your reply and is NEVER written to a file: do not create or edit `implementation.json` or any other artifact filename in the repository.",
     ],
     deliverables: [
       "An `implementation` document: the plan steps you completed, the files you created, modified, or deleted, and your implementation notes.",
@@ -262,6 +264,7 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
       "Do not modify `.agentflow/` state, artifacts, session files, or approval checkpoints.",
       "Do not run Git operations: no commit, no push, no branch or history changes.",
       "Do not claim any command or test ran, and do not declare the finding resolved on the strength of your own confidence alone.",
+      "The structured response is returned in your reply and is NEVER written to a file: do not create or edit `implementation.json` or any other artifact filename in the repository.",
     ],
     deliverables: [
       "A fix report: the finding addressed, the files changed, what the change does, and how it should be re-verified.",

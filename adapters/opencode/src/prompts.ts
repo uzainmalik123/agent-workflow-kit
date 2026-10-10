@@ -1,3 +1,4 @@
+import type { Plan } from "@agent-workflow-kit/core";
 import type { FeatureArtifactName } from "@agent-workflow-kit/persistence";
 import { isTextArtifactName } from "@agent-workflow-kit/persistence";
 import {
@@ -38,6 +39,38 @@ function bulletList(items: readonly string[]): string {
 function fence(language: string, body: string): string {
   return ["```" + language, body, "```"].join("\n");
 }
+
+/**
+ * The concrete plan the planner prompt shows, and the exact object the scope contract test derives
+ * an approved scope from.
+ *
+ * One constant, two consumers: {@link renderPlanShape} renders this value verbatim into the planner's
+ * prompt, and `tests/plan-scope-contract.test.ts` feeds the same object to `approvedScopeFromPlan`
+ * and asserts the derived patterns authorize exactly the files named here. A change either side
+ * cannot honour — a renamed key, a step that drops `expectedFiles` — fails that test instead of
+ * teaching a model to write a plan from which no write is ever authorized, which is how P-13
+ * happened.
+ */
+export const PLAN_EXAMPLE = {
+  featureId: "F-001",
+  summary: "Add a multiply helper and a test that pins its behaviour.",
+  steps: [
+    {
+      id: "STEP-1",
+      description: "Implement the multiply helper.",
+      requirementIds: ["REQ-1"],
+      expectedFiles: ["src/multiply.mjs"],
+      verification: "Run the helper with two numbers and check the product.",
+    },
+    {
+      id: "STEP-2",
+      description: "Cover the helper with a test.",
+      requirementIds: ["REQ-1"],
+      expectedFiles: ["tests/multiply.test.mjs"],
+      verification: "node --test tests/multiply.test.mjs",
+    },
+  ],
+} as const satisfies Plan;
 
 function renderContextEntry(entry: StageArtifactContext): string {
   const isText = isTextArtifactName(entry.name);
@@ -104,6 +137,38 @@ function renderOutputs(request: StageExecutionRequest): string {
     "",
     "You never choose a filename, a storage location, or a workflow transition. The orchestrator",
     "owns all of that.",
+  ].join("\n");
+}
+
+/**
+ * The shape of the `plan` artifact, rendered for the one stage that produces it.
+ *
+ * The example is shown rather than described because the load-bearing detail is one key inside a
+ * large JSON object: `steps[].expectedFiles` is the only input the approved-scope derivation reads.
+ * A plan that names its files anywhere else — a top-level `declaredFileSet`, a step's `files` —
+ * derives an empty scope, so the first write of the implementation stage is a scope violation. The
+ * derivation itself is never widened to compensate: the prompt is where the contract is taught.
+ */
+function renderPlanShape(request: StageExecutionRequest): string {
+  if (!request.outputs.some((spec) => spec.name === "plan")) {
+    return "";
+  }
+
+  return [
+    "## Plan artifact shape",
+    "",
+    "Return the `plan` artifact as the JSON object below, with these keys. Every step carries an",
+    "`expectedFiles` array of repository-relative paths or globs: a plain path, a directory prefix",
+    "ending in `/`, or a glob using `*`, `**`, `?`, or `[...]`. Each entry may name a file the step",
+    "creates or a file it modifies — the array is the plan's whole authorization, and a protected",
+    "path listed there is dropped rather than honored.",
+    "",
+    "That per-step array is the only thing the framework reads when it derives the file scope a human",
+    "approves. A step without `expectedFiles` authorizes no file at all, and neither a top-level",
+    "`declaredFileSet` nor a step's `files` key is read. Only files this plan may create, modify, or",
+    "delete belong in `expectedFiles`.",
+    "",
+    fence("json", JSON.stringify(PLAN_EXAMPLE, null, 2)),
   ].join("\n");
 }
 
@@ -573,6 +638,7 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
   const { request, projectInstructions = null } = input;
   const definition = roleDefinition(request.role);
   const profile = profileForRole(request.role);
+  const planShape = renderPlanShape(request);
 
   const sections: string[] = [
     `# Agent Workflow Kit: ${definition.label} on stage \`${request.stage}\``,
@@ -597,6 +663,7 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
     ...(request.fix === null ? [] : [renderFixerAuthority(request, request.fix)]),
     ["## Routed context", "", renderContext(request)].join("\n"),
     ["## Output slots you may fill", "", renderOutputs(request)].join("\n"),
+    ...(planShape === "" ? [] : [planShape]),
     ...(request.verification === null || request.verification === undefined
       ? []
       : [renderEvidence(request.verification)]),

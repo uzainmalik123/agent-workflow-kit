@@ -2,6 +2,8 @@ import { Command } from "commander";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/project";
 import { DEFAULT_TIMEOUT_MS, type StageProgressCallback } from "@agent-workflow-kit/opencode";
+import { approvedScopeFromPlan } from "@agent-workflow-kit/orchestration";
+import { parseStatus } from "@agent-workflow-kit/workspace";
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
 import { createStageProgressReporter } from "./progress.js";
 import { findLatestRecording } from "./recordings.js";
@@ -386,6 +388,92 @@ async function hasInitialCommit(repoRoot: string): Promise<boolean> {
   }
 }
 
+/** How many untracked paths the warning lists before it summarizes the rest. */
+const UNTRACKED_LIST_LIMIT = 10;
+
+/**
+ * The untracked paths Git reports, or none at all when the status cannot be taken.
+ *
+ * A warning is best-effort by construction: a repository whose status cannot be read — no Git, a
+ * broken index, a record the parser refuses — produces no warning rather than a command that fails
+ * on its way to being helpful. `-z` and `--untracked-files=all` are the same report the workspace
+ * adapter reads, so what this prints is what Git actually said, one literal path at a time.
+ */
+async function untrackedFiles(repoRoot: string): Promise<readonly string[]> {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      { cwd: repoRoot, encoding: "utf8" },
+    );
+
+    return parseStatus(stdout).untracked;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Warns that untracked files will not reach the write stages, and says why in framework terms.
+ *
+ * This is information, never a gate: it prints and the command continues exactly as it did before.
+ * The reason is P-11 — a write stage runs in a detached worktree of the approved commit, so a file
+ * nobody committed is invisible to it, while the pre-approval stages that ran in this checkout saw
+ * it perfectly well. Saying that at the two commands where the surprise lands is cheaper than a
+ * scope violation deep inside an implementation stage.
+ */
+async function warnAboutUntrackedFiles(repoRoot: string): Promise<void> {
+  const untracked = await untrackedFiles(repoRoot);
+
+  if (untracked.length === 0) {
+    return;
+  }
+
+  const shown = untracked.slice(0, UNTRACKED_LIST_LIMIT);
+  const remaining = untracked.length - shown.length;
+  const list =
+    remaining === 0 ? shown.join(", ") : `${shown.join(", ")}, and ${String(remaining)} more`;
+
+  console.warn(
+    `Warning: ${String(untracked.length)} untracked file(s) will not be seen by write stages: ${list}. ` +
+      "Write stages run in a worktree of the approved commit and will not see them; only committed work travels. " +
+      "Commit them first.",
+  );
+}
+
+/**
+ * The scope-warning text for one feature's stored plan, or `null` when the plan authorizes
+ * something.
+ *
+ * The derivation is the orchestrator's own exported `approvedScopeFromPlan`, on the artifact as it
+ * is stored — the same bytes approval is about to accept, read for a warning and for nothing else.
+ * Nothing here approves, refuses, or widens anything: an unreadable plan derives no patterns, the
+ * warning says so, and the approval decision stays exactly where it was (D-14, R-263).
+ */
+async function planScopeWarning(
+  store: CliStack["store"],
+  featureId: string,
+): Promise<string | null> {
+  let plan: unknown;
+
+  try {
+    plan = await store.readArtifact(featureId, "plan");
+  } catch {
+    plan = undefined;
+  }
+
+  const outcome = approvedScopeFromPlan(plan);
+
+  if (!outcome.ok || outcome.patterns.length > 0) {
+    return null;
+  }
+
+  return (
+    `Warning: the plan for ${featureId} derives an approved scope of zero file patterns, so implementation will fail the scope check. ` +
+    "Approval is not blocked. Each step must list `expectedFiles` — the only key the scope derivation reads — before the write stages can touch a file."
+  );
+}
+
 /**
  * Builds the CLI's command tree.
  *
@@ -536,6 +624,11 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
+        // At run start, before anything is built: a file nobody committed is invisible to the write
+        // stages this run may reach, which is a surprise worth stating once rather than at the scope
+        // check (P-11). Best-effort, and it never changes what the run does.
+        await warnAboutUntrackedFiles(repoRoot);
+
         // Progress goes to stderr through one reporter owned by this command: stage start/finish
         // lines and the 30s heartbeat, silenced entirely by --quiet.
         const reporter = createStageProgressReporter(
@@ -629,11 +722,26 @@ export function createCli(options: CreateCliOptions = {}): Command {
     .action(async (featureId: string | undefined) => {
       try {
         const repoRoot = getRepoRoot(cwd());
+
+        // Before the gate is touched: uncommitted work will not travel to the worktree the write
+        // stages run in, and this is the last command that runs in this checkout (P-11). A warning
+        // only — approval proceeds exactly as it did before it existed.
+        await warnAboutUntrackedFiles(repoRoot);
+
         const stack = createStack(repoRoot, {});
 
         const targetFeatureId = await getTargetFeatureId(stack.store, exit, featureId);
         if (targetFeatureId === null) {
           return;
+        }
+
+        // Derived from the stored plan before approval completes, so a plan that authorizes nothing
+        // is visible to the human who is about to accept it. It prints and never blocks: the
+        // approval below runs whether or not there was anything to warn about (D-14, R-263).
+        const scopeWarning = await planScopeWarning(stack.store, targetFeatureId);
+
+        if (scopeWarning !== null) {
+          console.warn(scopeWarning);
         }
 
         const result = await stack.orchestrator.approvePlan(targetFeatureId);

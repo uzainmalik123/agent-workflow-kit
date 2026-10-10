@@ -1,6 +1,6 @@
 # Known issues
 
-Last updated: 2026-10-08
+Last updated: 2026-10-10
 
 This file records what is known to be broken, risky, or unproven in agent-workflow-kit. Each entry says where the evidence came from. If a claim is not backed by a command output or a file reference, it says "unverified".
 
@@ -59,18 +59,19 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 - **Status:** Confirmed (Task J); warning added in Task L
 - **Evidence:** write stages run in a detached worktree of the approved commit (`git worktree add --detach`, `adapters/workspace/src/provider.ts:300`). Untracked files neither block approval nor travel with the stage. Pre-approval stages (grill, planning, plan review) run in the human checkout and can see them.
+- **Warning (Task L):** `agentflow run` at start and `agentflow approve plan` list untracked files from `git status --porcelain=v1 -z --untracked-files=all` and warn that write stages run in a worktree of the approved commit and will not see them. Advisory only, tested with the fake stack in `tests/cli-warnings.test.ts`.
 - **Guidance:** commit everything the feature needs before `agentflow run`.
 
 ### P-12. The implementer wrote its output to a file
 
-- **Status:** Open until Task L
-- **Evidence:** the prompt renders artifacts with filenames (`### spec (spec.json)`) and the implementer role lacks the "never written to the repository" clause the read-only roles have. The agent wrote and edited `implementation.json`, triggering a scope violation. The stage took 508s, 91% of it model latency.
+- **Status:** Resolved in Task L (prompt side)
+- **Evidence:** the implementer and the fixer now each carry the sentence "The structured response is returned in your reply and is NEVER written to a file: do not create or edit `implementation.json` or any other artifact filename in the repository." (`adapters/opencode/src/roles.ts`), which reaches both write-capable prompts. `tests/opencode-roles.test.ts` asserts the sentence for every write-capable role; `tests/opencode-prompts.test.ts` asserts it in both rendered prompts.
+- **Not verified:** whether a real model follows it — unverified until P-1 is resolved. The old evidence stands: the stage took 508s, 91% of it model latency, and the agent wrote and edited `implementation.json`, triggering a scope violation.
 
 ### P-13. Planner output never authorizes any path (scope contract mismatch)
 
-- **Status:** Open until Task L. This blocks every real implementation run.
-- **Evidence (Task J):** `approvedScopeFromPlan` (`orchestration/src/workspace.ts:368-426`) reads only `steps[].expectedFiles`; a missing key is silently skipped, producing an empty scope. The planner is never told the key name; it wrote `declaredFileSet` and `steps[].files`. Reproduced on the real F-004 plan: derived patterns `[]`, and `multiply.mjs` and `implementation.json` both flagged. With `expectedFiles: ["multiply.mjs"]` only `implementation.json` is flagged.
-- **Also:** plan approval hashes the plan's bytes only, so a plan whose derived scope is empty can be approved without warning.
+- **Status:** Resolved in Task L (prompt names the key; approval warns). The derivation was deliberately NOT widened: `approvedScopeFromPlan` still reads only `steps[].expectedFiles` (D-14, R-263).
+- **Evidence:** the planner role names `steps[].expectedFiles` and says files named anywhere else authorize nothing (`adapters/opencode/src/roles.ts`); the planning prompt carries a "Plan artifact shape" section whose JSON is `PLAN_EXAMPLE` (`adapters/opencode/src/prompts.ts`). `tests/plan-scope-contract.test.ts` feeds that same exported constant through `approvedScopeFromPlan`, asserts the patterns are non-empty and authorize exactly the example's files, that files outside them are unauthorized, and that `declaredFileSet`/`steps[].files` still derive nothing — so the prompt example and the derivation cannot drift apart silently. `agentflow approve plan` derives the scope from the stored plan with the same exported `approvedScopeFromPlan` and, when it yields zero patterns, prints a warning that implementation will fail the scope check without blocking approval (`apps/cli/src/commands.ts`, `tests/cli-warnings.test.ts`).
 
 ---
 

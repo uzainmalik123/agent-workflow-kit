@@ -95,7 +95,7 @@ export type {
   WriteOpenCodeProjectFilesOptions,
 } from "./agents.js";
 
-export { buildStagePrompt } from "./prompts.js";
+export { PLAN_EXAMPLE, buildStagePrompt } from "./prompts.js";
 export type { BuildStagePromptInput } from "./prompts.js";
 
 export {

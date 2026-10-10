@@ -184,6 +184,22 @@ describe("prompt contents", () => {
     expect(prompt).toContain("`needs_fix` is available");
   });
 
+  it("tells every write-capable stage that the response is returned, never written to a file", () => {
+    const sentence =
+      "The structured response is returned in your reply and is NEVER written to a file: do not create or edit `implementation.json` or any other artifact filename in the repository.";
+
+    expect(promptFor("implementation")).toContain(sentence);
+    expect(
+      promptFor("fixing", {
+        fixReturnState: WorkflowState.RuntimeVerification,
+        fix: testFixerContract({ failedStage: WorkflowState.RuntimeVerification, failedVerification: "runtime" }),
+      }),
+    ).toContain(sentence);
+
+    // Read-only roles never file their output, so they keep their own shorter rule.
+    expect(promptFor("code_review")).not.toContain(sentence);
+  });
+
   it("tells the fixer which finding it must repair", () => {
     const prompt = promptFor("fixing", { fixReturnState: WorkflowState.RuntimeVerification, fix: testFixerContract({ failedStage: WorkflowState.RuntimeVerification, failedVerification: "runtime" }) });
 
