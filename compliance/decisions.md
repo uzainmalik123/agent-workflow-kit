@@ -107,7 +107,7 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 
 ## D-15. Bounded retry for malformed model replies
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Decision:** a reply that fails the response contract (malformed, empty, or schema-invalid) is retried up to 2 times with a fresh invocation and a one-line rejection notice. The contract itself is not weakened. Transport errors, timeouts, scope violations, and provider errors are never retried. Every attempt is recorded.
 - **Basis:** a single formatting miss from a free model currently kills a stage. PRD §10.8 and R-263 (adapter hardening, no workflow change).
 

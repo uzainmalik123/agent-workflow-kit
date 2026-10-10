@@ -75,9 +75,9 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ### P-14. plan_review replies rejected: model returns bare JSON without the fence
 
-- **Status:** Open (Task M)
-- **Evidence (recordings, 2026-10-09/10, Big Pickle):** two plan_review replies (7,149 B and 6,536 B) were complete, plausible JSON with zero fence lines; one reply was empty (0 B). Earlier replies from other stages had fences. The contract (exactly one fenced block) rejected the unfenced replies as "no fenced JSON block". Parse failures show exit 0 and no error in `invocation.json`.
-- **Unverified:** why the fence was omitted, and whether it correlates with reply length.
+- **Status:** Mitigated in Task M (commit 9514be1), not yet verified with a real model
+- **Detail:** malformed, empty, and schema-invalid replies are now retried up to 2 times (`--format-retries <n>`, 0 disables) with a one-line rejection notice, and a reminder line to fence the reply is appended to every prompt. Each attempt is recorded with its outcome in `invocation.json`. The contract is unchanged.
+- **Open:** retry behavior for write stages (workspace state between attempts) and whether the stage timeout applies per attempt are unconfirmed.
 
 ### P-15. Final summary cannot match glob entries in expectedFiles
 
