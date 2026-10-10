@@ -120,6 +120,17 @@ function fakeStackFactory(
     ],
   });
 
+  // An explicit passing review: since Task N2 the approval gate fails closed, and these tests are
+  // about the warnings around approval, not about the review — so the review approves.
+  executor.configure("plan_review", {
+    artifacts: [
+      {
+        name: "plan_review",
+        content: { verdict: "pass", summary: "The plan covers the requirements.", findings: [] },
+      },
+    ],
+  });
+
   return (repoRoot) =>
     createOrchestratorStack(repoRoot, {
       executor,

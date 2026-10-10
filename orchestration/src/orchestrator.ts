@@ -2131,8 +2131,8 @@ export class WorkflowOrchestrator {
 
     // D-13: a plan-review verdict is the human's to act on, not the fixer's. `plan_review` reporting
     // `needs_fix` commits its artifact and advances to the approval gate, where the findings are read
-    // and the human decides — approving, abandoning, or editing the plan. Every other fixable stage
-    // keeps its route to the fixer; the fixer's authority over code-stage defects is untouched.
+    // and the human decides — approving or abandoning. Every other fixable stage keeps its route to
+    // the fixer; the fixer's authority over code-stage defects is untouched.
     const routesToHumanGate = stage === "plan_review" && effective.outcome === "needs_fix";
 
     // Finalization is the only mutation a stage result can cause. It runs without any lock held

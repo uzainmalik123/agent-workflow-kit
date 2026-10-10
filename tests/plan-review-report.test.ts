@@ -2,17 +2,20 @@ import {
   formatFindings,
   formatPlanReview,
   PLAN_REVIEW_LINE_LIMIT,
+  PLAN_REVIEW_RESOLVED_VERDICTS,
+  PLAN_REVIEW_UNREADABLE_REASON,
   planReviewReport,
 } from "@agent-workflow-kit/orchestration";
 import { describe, expect, it } from "vitest";
 
 /**
- * How a stored `plan_review` artifact is read for the human at the gate (D-13).
+ * How a stored `plan_review` artifact is read for the human at the gate (D-13, N2).
  *
  * The document is model-authored: no schema defines its shape, so the reader has to be tolerant
- * about what it finds and precise about what it concludes. The two conclusions that matter are the
- * ones the approval gate acts on — a verdict asking for a fix, and a finding at `error` severity —
- * and neither may be invented from a document that said nothing.
+ * about what it finds and fail closed about what it concludes (P-18). Only a verdict in
+ * PLAN_REVIEW_RESOLVED_VERDICTS with no `error`-severity finding is resolved; everything else —
+ * including a document that says nothing at all — is unresolved, because a silent document must
+ * never read as an approving one.
  */
 
 describe("reading a stored plan review", () => {
@@ -37,6 +40,7 @@ describe("reading a stored plan review", () => {
       line: 12,
     });
     expect(report.unresolved).toBe(true);
+    expect(report.reason).toContain("needs_fix");
   });
 
   it("falls back to `outcome` when the document called its verdict that", () => {
@@ -44,6 +48,7 @@ describe("reading a stored plan review", () => {
 
     expect(report.verdict).toBe("needs_fix");
     expect(report.unresolved).toBe(true);
+    expect(report.reason).toContain("needs_fix");
   });
 
   it("is unresolved when a finding is an error, whatever the verdict says", () => {
@@ -53,6 +58,7 @@ describe("reading a stored plan review", () => {
     });
 
     expect(report.unresolved).toBe(true);
+    expect(report.reason).toContain("success");
   });
 
   it("is resolved when the findings stop at warnings", () => {
@@ -62,16 +68,52 @@ describe("reading a stored plan review", () => {
     });
 
     expect(report.unresolved).toBe(false);
+    expect(report.reason).toBeNull();
   });
 
-  it("records nothing from a document that says nothing", () => {
-    for (const artifact of [undefined, null, "not json at all", 42, [], { featureId: "F-001" }]) {
-      expect(planReviewReport(artifact)).toEqual({
+  it("accepts exactly the exported resolved verdicts, case- and separator-insensitively", () => {
+    expect([...PLAN_REVIEW_RESOLVED_VERDICTS]).toEqual([
+      "pass",
+      "passed",
+      "approved",
+      "ok",
+      "success",
+    ]);
+
+    for (const verdict of ["pass", "Pass", "PASS", " pass ", "passed", "approved", "ok", "success"]) {
+      const report = planReviewReport({ verdict, findings: [] });
+      expect(report.unresolved).toBe(false);
+      expect(report.reason).toBeNull();
+    }
+  });
+
+  it("is unresolved for any other verdict, including unknown strings", () => {
+    for (const verdict of ["needs_fix", "looks fine", "maybe", ""]) {
+      const report = planReviewReport({ verdict, findings: [] });
+
+      expect(report.unresolved).toBe(true);
+
+      if (verdict === "") {
+        // An empty verdict is no verdict: the report is empty and unreadable.
+        expect(report.reason).toBe(PLAN_REVIEW_UNREADABLE_REASON);
+      } else {
+        expect(report.reason).toContain(verdict);
+      }
+    }
+  });
+
+  it("fails closed on a missing, unparseable, or empty artifact", () => {
+    for (const artifact of [undefined, null, "not json at all", 42, [], { featureId: "F-001" }, {}]) {
+      const report = planReviewReport(artifact);
+
+      expect(report).toEqual({
         verdict: null,
         summary: null,
         findings: [],
-        unresolved: false,
+        unresolved: true,
+        reason: PLAN_REVIEW_UNREADABLE_REASON,
       });
+      expect(report.reason).toBe("review could not be read");
     }
   });
 
@@ -106,11 +148,24 @@ describe("reading a stored plan review", () => {
 });
 
 describe("rendering a stored plan review", () => {
-  it("renders nothing when there is nothing to show", () => {
-    expect(formatPlanReview(planReviewReport(undefined))).toEqual([]);
+  it("renders nothing when the review is resolved with no findings", () => {
     expect(
       formatPlanReview(planReviewReport({ verdict: "success", findings: [] })),
     ).toEqual([]);
+    expect(
+      formatPlanReview(
+        planReviewReport({ verdict: "Pass", findings: [{ severity: "info", message: "Nice" }] }),
+      ),
+    ).not.toEqual([]);
+  });
+
+  it("renders the unreadable reason instead of nothing", () => {
+    expect(formatPlanReview(planReviewReport(undefined))).toEqual([
+      "Plan review: review could not be read",
+    ]);
+    expect(formatPlanReview(planReviewReport({}))).toEqual([
+      "Plan review: review could not be read",
+    ]);
   });
 
   it("renders the verdict, the summary, and every finding on its own line", () => {

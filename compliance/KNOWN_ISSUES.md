@@ -99,6 +99,13 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Open, low severity
 - **Evidence:** `tests/cli-run-unit.test.ts:16-89` reimplements the loop instead of invoking `createCli()`, so the real command tree's `Workflow error ... exit(1)` path is untested.
 
+### P-18. The plan-review gate fails open on unreadable reviews
+
+- **Status:** Mitigated in Task N2 (this branch); one gap remains open, see below
+- **Evidence (Task N, `orchestration/src/plan-review.ts`):** a stored `plan_review` artifact that is missing, unparseable, or in an unrecognized shape yielded an empty report with `unresolved: false`, so `approve plan` proceeded without `--accept-findings` and without showing findings, even if the stage outcome was `needs_fix`. The reader trusted the model-authored artifact shape.
+- **Fix (Task N2):** the reader fails closed. Only a verdict in `PLAN_REVIEW_RESOLVED_VERDICTS` (`pass`, `passed`, `approved`, `ok`, `success`, case- and separator-insensitive) with no `error`-severity finding is resolved; a missing, unparseable, or empty artifact is unresolved with the reason "review could not be read", and the `approve plan` refusal names the verdict value or that reason. Covered in `tests/plan-review-report.test.ts` and `tests/cli-d13-plan-review-gate.test.ts`.
+- **Remaining (open):** an inconsistent reviewer — stage outcome `needs_fix` with an artifact verdict that reads as resolved — cannot be detected at approval time: the outcome is not persisted (session, events, and recordings carry no stage outcome; both outcomes commit the same `advance` event), and deriving it would need a new session field, which was not added. A reviewer that both reports `needs_fix` and writes a passing verdict with no error findings bypasses the gate. Options: accept the gap, persist the outcome (schema change, versioned decision), or treat the artifact verdict as authoritative.
+
 ---
 
 ## Security-relevant

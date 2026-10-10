@@ -494,10 +494,10 @@ async function warnAboutUntrackedFiles(repoRoot: string): Promise<void> {
  *
  * Derived from the `plan_review` artifact alone — no session field carries a verdict or a finding
  * (D-13), and the artifact is the same bytes approval digests. An artifact that cannot be read is
- * treated as a review that recorded nothing: this never fails a command, because a display that
- * cannot be produced must not stop the decision it was going to inform. The gate below is the only
- * caller that acts on the answer, and it acts only when the document positively says something is
- * unresolved.
+ * an unresolved review, never a clean one (N2, fail closed: P-18): this never fails a command,
+ * because a display that cannot be produced must not stop the decision it was going to inform. The
+ * gate below is the only caller that acts on the answer, and it refuses without `--accept-findings`
+ * whenever the review is unresolved, for whatever reason.
  */
 async function storedPlanReview(
   store: CliStack["store"],
@@ -615,9 +615,12 @@ export function createCli(options: CreateCliOptions = {}): Command {
         }
 
         // The review findings this feature's plan reviewer recorded, wherever the workflow has got
-        // to since. Read-only and best-effort like the rest of this command: a feature with no
-        // review records nothing here (P-16, D-13).
-        lines.push(...formatPlanReview(await storedPlanReview(store, targetFeatureId)));
+        // to since. Read-only and best-effort like the rest of this command: before the review has
+        // run there is no artifact and nothing is shown, while a present-but-unreadable artifact says
+        // so rather than reading as clean (P-16, D-13, N2).
+        if (session.artifacts.plan_review.status === "present") {
+          lines.push(...formatPlanReview(await storedPlanReview(store, targetFeatureId)));
+        }
 
         console.log(lines.join("\n"));
       } catch (error: unknown) {
@@ -845,16 +848,18 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
-        // D-13: a plan-review verdict belongs to the human at this gate, so unresolved findings make
-        // this command stop unless they are acknowledged with --accept-findings. The gate reads the
-        // stored review and nothing else — the orchestrator's approval, its digests, and what it
-        // accepts are exactly what they were before the flag existed, and a review that recorded
-        // nothing leaves approval as unblocked as it always was.
+        // D-13: a plan-review verdict belongs to the human at this gate, so an unresolved review
+        // makes this command stop unless it is acknowledged with --accept-findings. The gate reads
+        // the stored review and nothing else — the orchestrator's approval, its digests, and what it
+        // accepts are exactly what they were before the flag existed. N2 fails this closed (P-18):
+        // only a verdict in PLAN_REVIEW_RESOLVED_VERDICTS with no error-severity finding approves
+        // without the flag, so a missing, unparseable, or unknown review refuses rather than passing
+        // silently. This makes the approval rule stricter; D-13 is Accepted and this flag covers it.
         const review = await storedPlanReview(stack.store, targetFeatureId);
 
         if (review.unresolved && opts.acceptFindings !== true) {
           console.error(
-            `Plan approval refused: the plan review left unresolved findings for ${targetFeatureId}.`,
+            `Plan approval refused for ${targetFeatureId}: ${review.reason ?? "unresolved review"}.`,
           );
 
           for (const line of formatPlanReview(review)) {

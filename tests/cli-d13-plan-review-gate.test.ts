@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkflowState, type ReviewFinding } from "@agent-workflow-kit/core";
@@ -218,6 +218,26 @@ async function sessionAt(repoRoot: string): Promise<FeatureSession> {
 }
 
 /**
+ * Removes the stored `plan_review` bytes while leaving the session's `present` reference alone.
+ *
+ * That is the shape of a review that went missing after its stage ran: the session claims an
+ * artifact that no read can produce, so the gate must fail closed on it.
+ */
+async function deleteReviewArtifact(repoRoot: string): Promise<void> {
+  const featuresRoot = join(repoRoot, ".agentflow", "features");
+  const entries = await readdir(featuresRoot);
+  const directory = entries.find(
+    (entry) => entry === "F-001" || entry.startsWith("F-001-"),
+  );
+
+  if (directory === undefined) {
+    throw new Error('Feature directory for "F-001" not found.');
+  }
+
+  await unlink(join(featuresRoot, directory, "plan-review.json"));
+}
+
+/**
  * The orchestrator harness the first test drives, with no workspace provider at all.
  *
  * A pre-approval stage never needs one — it reads the repository root — so this is the smallest
@@ -387,19 +407,20 @@ describe("the plan review is shown where the human has to act on it", () => {
     expect(status.stdout).toContain("[warning] src/app.ts is named by no step");
   });
 
-  it("says nothing when the review recorded nothing to act on", async () => {
+  it("says the review could not be read when the artifact is empty", async () => {
     const repoRoot = await makeRepo();
     const executor = executorReviewing({ content: { featureId: "F-001" }, outcome: "success" });
     await runToPlanGate(repoRoot, executor);
 
+    // Fail closed (N2): an empty review is unresolved, so status shows the reason rather than
+    // reading the silence as approval.
     const status = await runCli(["status", "F-001"], {
       repoRoot,
       createStack: stackFactory(executor),
     });
 
     expect(status.exitCodes).toEqual([]);
-    expect(status.stdout).not.toContain("Plan review:");
-    expect(status.stdout).not.toContain("findings");
+    expect(status.stdout).toContain("Plan review: review could not be read");
   });
 });
 
@@ -459,6 +480,148 @@ describe("approving over unresolved findings", () => {
   });
 });
 
+describe("fail-closed approval gate (N2)", () => {
+  /**
+   * Each case states the stored review and what `approve plan` must do with it. The gate fails
+   * closed (P-18): only a passing verdict with no `error`-severity finding approves without
+   * `--accept-findings`. `refusalWhy` is the text the refusal must name — the verdict value, or
+   * "review could not be read" — and `null` means approval succeeds without the flag.
+   */
+  interface GateCase {
+    readonly name: string;
+    readonly review: unknown;
+    readonly deleteArtifact: boolean;
+    readonly refusalWhy: string | null;
+  }
+
+  const cases: readonly GateCase[] = [
+    {
+      name: "missing artifact",
+      review: undefined,
+      deleteArtifact: true,
+      refusalWhy: "review could not be read",
+    },
+    {
+      name: "empty object",
+      review: {},
+      deleteArtifact: false,
+      refusalWhy: "review could not be read",
+    },
+    {
+      name: 'the string "not json"',
+      review: "not json",
+      deleteArtifact: false,
+      refusalWhy: "review could not be read",
+    },
+    {
+      name: 'verdict "pass" with an error-severity finding',
+      review: {
+        verdict: "pass",
+        findings: [{ severity: "error", message: "Step STEP-1 has no test" }],
+      },
+      deleteArtifact: false,
+      refusalWhy: 'verdict "pass"',
+    },
+    {
+      name: 'verdict "needs_fix"',
+      review: { verdict: "needs_fix", findings: [] },
+      deleteArtifact: false,
+      refusalWhy: 'verdict "needs_fix"',
+    },
+    {
+      name: 'unknown verdict "looks fine"',
+      review: { verdict: "looks fine", findings: [] },
+      deleteArtifact: false,
+      refusalWhy: 'verdict "looks fine"',
+    },
+    {
+      name: 'verdict "Pass"',
+      review: { verdict: "Pass", findings: [] },
+      deleteArtifact: false,
+      refusalWhy: null,
+    },
+  ];
+
+  /** A repo at the plan gate whose stored review is the case's, reached with a clean review. */
+  async function setupGateRepo(
+    gateCase: GateCase,
+  ): Promise<{ readonly repoRoot: string; readonly executor: FakeStageExecutor }> {
+    const repoRoot = await makeRepo();
+    const executor = executorReviewing({ content: CLEAN_REVIEW, outcome: "success" });
+    await runToPlanGate(repoRoot, executor);
+
+    if (gateCase.deleteArtifact) {
+      await deleteReviewArtifact(repoRoot);
+    } else {
+      await createFeatureSessionStore(repoRoot).writeArtifact(
+        "F-001",
+        "plan_review",
+        gateCase.review,
+      );
+    }
+
+    return { repoRoot, executor };
+  }
+
+  for (const gateCase of cases) {
+    it(
+      gateCase.refusalWhy === null
+        ? `${gateCase.name}: approves without --accept-findings`
+        : `${gateCase.name}: refuses without --accept-findings and names why`,
+      async () => {
+        const { repoRoot, executor } = await setupGateRepo(gateCase);
+        const refused = await runCli(["approve", "plan", "F-001"], {
+          repoRoot,
+          createStack: stackFactory(executor),
+        });
+
+        if (gateCase.refusalWhy === null) {
+          // Expected result: resolved (passing verdict, no error findings), so approval succeeds
+          // without the flag.
+          expect(refused.exitCodes).toEqual([]);
+          expect(refused.stdout).toContain("Plan approved. Workflow advanced to implementing");
+          return;
+        }
+
+        // Expected result: unresolved, so the CLI's own gate refuses before the orchestrator is
+        // reached — nothing is approved and the state does not move.
+        expect(refused.exitCodes).toEqual([1]);
+        expect(refused.stderr).toContain("Plan approval refused");
+        expect(refused.stderr).toContain(gateCase.refusalWhy);
+
+        const untouched = await sessionAt(repoRoot);
+        expect(untouched.machine.state).toBe(WorkflowState.AwaitingPlanApproval);
+        expect(untouched.approvals.plan).toBeNull();
+      },
+    );
+
+    it(`${gateCase.name}: with --accept-findings`, async () => {
+      const { repoRoot, executor } = await setupGateRepo(gateCase);
+      const acknowledged = await runCli(["approve", "plan", "F-001", "--accept-findings"], {
+        repoRoot,
+        createStack: stackFactory(executor),
+      });
+
+      if (gateCase.deleteArtifact) {
+        // Expected result: the flag acknowledges the review, but approval digests the artifact
+        // bytes and there are none, so the orchestrator — not the gate — refuses.
+        expect(acknowledged.exitCodes).toEqual([1]);
+        expect(acknowledged.stderr).toContain("Plan approval failed");
+        expect(acknowledged.stdout).not.toContain("Plan approved");
+        return;
+      }
+
+      // Expected result: the explicit acknowledgement carries the approval through.
+      expect(acknowledged.exitCodes).toEqual([]);
+      expect(acknowledged.stdout).toContain("Plan approved. Workflow advanced to implementing");
+
+      const session = await sessionAt(repoRoot);
+      expect(session.machine.state).toBe(WorkflowState.Implementing);
+      expect(session.approvals.plan).not.toBeNull();
+    });
+  }
+});
+
 describe("agentflow abandon", () => {
   it("ends a feature at the gate, and refuses one the machine says is terminal", async () => {
     const repoRoot = await makeRepo();
@@ -495,5 +658,50 @@ describe("agentflow abandon", () => {
       'State "failed" is terminal and cannot process event "fail".',
     );
     expect(again.stdout).toContain("Abandoning F-001: Again");
+  });
+
+  it("ends a feature from fixing, where `fail` is legal", async () => {
+    const repoRoot = await makeRepo();
+    const executor = executorReviewing({ content: CLEAN_REVIEW, outcome: "success" });
+    executor.configure("code_review", {
+      outcome: "needs_fix",
+      findings: [findingFor("F-001", "The implementation skips step 2")],
+    });
+    await startFeature(repoRoot, executor);
+
+    const stack = stackFactory(executor)(repoRoot, {});
+    const orchestrator = stack.orchestrator;
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const session = await stack.store.load("F-001");
+
+      if (session.machine.state === WorkflowState.Fixing) {
+        break;
+      }
+
+      if (session.machine.state === WorkflowState.AwaitingPlanApproval) {
+        await orchestrator.approvePlan("F-001");
+        continue;
+      }
+
+      if (session.machine.state === WorkflowState.Failed) {
+        throw new Error("Feature failed while driving to fixing.");
+      }
+
+      await orchestrator.runNext("F-001");
+    }
+
+    expect((await stack.store.load("F-001")).machine.state).toBe(WorkflowState.Fixing);
+
+    const abandoned = await runCli(["abandon", "F-001", "--reason", "Implementation is wrong"], {
+      repoRoot,
+      createStack: stackFactory(executor),
+    });
+
+    expect(abandoned.exitCodes).toEqual([]);
+    expect(abandoned.stdout).toContain(
+      "Feature F-001 abandoned; the workflow reached terminal state failed.",
+    );
+    expect((await sessionAt(repoRoot)).machine.state).toBe(WorkflowState.Failed);
   });
 });

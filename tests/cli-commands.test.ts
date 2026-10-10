@@ -91,7 +91,9 @@ function fakeStackFactory(
 ): (repoRoot: string, request: CliStackRequest) => CliStack {
   // The three pre-approval stages write the documents the next one reads, so the loop behaves as it
   // does with a model: grill and spec out of `grill`, plan out of `planning`, and `plan_review`
-  // approving what the defaults hand back.
+  // approving what the defaults hand back. The review carries an explicit passing verdict: since
+  // Task N2 the approval gate fails closed, and a verdict-less document refuses without
+  // `--accept-findings`.
   executor.configure("grill", {
     artifacts: [
       { name: "grill", content: { featureId: "F-001", decisions: [] } },
@@ -111,6 +113,14 @@ function fakeStackFactory(
       {
         name: "plan",
         content: { schemaVersion: 1, featureId: "F-001", summary: "A plan.", steps: [] },
+      },
+    ],
+  });
+  executor.configure("plan_review", {
+    artifacts: [
+      {
+        name: "plan_review",
+        content: { verdict: "pass", summary: "The plan covers the requirements.", findings: [] },
       },
     ],
   });
