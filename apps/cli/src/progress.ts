@@ -32,8 +32,8 @@ export interface StageProgressReporterOptions {
   readonly timers?: ProgressTimers;
   readonly heartbeatMs?: number;
   /**
-   * Suppresses progress — the started line, activity, heartbeats, and the finished line — but not
-   * the failure line that names a stage's recording folder.
+   * Suppresses progress — the started line, activity, heartbeats, reply-retry lines, and the
+   * finished line — but not the failure line that names a stage's recording folder.
    *
    * That exception is deliberate: `--quiet` promises no progress, and "your stage failed, its
    * evidence is here" is not progress. It is the one line a quiet run still owes a human.
@@ -97,6 +97,15 @@ export function createStageProgressReporter(
     }
 
     if (quiet) {
+      return;
+    }
+
+    if (event.type === "format_retry") {
+      // "grill: reply rejected (malformed_response), retry 1 of 2" — the retry is progress, so it
+      // is silenced by --quiet exactly like the lines around it.
+      write(
+        `${event.stage}: reply rejected (${event.code}), retry ${String(event.retry)} of ${String(event.maxRetries)}`,
+      );
       return;
     }
 

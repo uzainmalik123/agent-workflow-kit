@@ -95,7 +95,7 @@ export type {
   WriteOpenCodeProjectFilesOptions,
 } from "./agents.js";
 
-export { PLAN_EXAMPLE, buildStagePrompt } from "./prompts.js";
+export { PLAN_EXAMPLE, RESPONSE_FENCE_REMINDER, buildStagePrompt } from "./prompts.js";
 export type { BuildStagePromptInput } from "./prompts.js";
 
 export {
@@ -174,6 +174,7 @@ export type {
 export type { ProcessOutcomeObservation } from "./process.js";
 
 export {
+  annotateInvocationOutcome,
   describeRecordingError,
   INVOCATION_MANIFEST_FILENAME,
   INVOCATION_SEGMENT_MAX_LENGTH,
@@ -185,6 +186,7 @@ export {
   stageRecordingFolder,
 } from "./diagnostics.js";
 export type {
+  InvocationOutcomeAnnotation,
   RecordedInvocation,
   StageInvocationIdentity,
   StageInvocationRecording,
@@ -231,7 +233,14 @@ export type {
   RunOpenCodeConfigSmokeTestOptions,
 } from "./smoke-test.js";
 
-export { createOpenCodeStageExecutor, OpenCodeStageExecutor } from "./executor.js";
+export {
+  createOpenCodeStageExecutor,
+  DEFAULT_FORMAT_RETRIES,
+  formatReplyRejectionNotice,
+  OpenCodeStageExecutor,
+  REJECTED_REPLY_EXCERPT_MAX_CHARS,
+  RETRYABLE_REPLY_FAILURES,
+} from "./executor.js";
 export type { OpenCodeStageExecutorOptions } from "./executor.js";
 
 export {

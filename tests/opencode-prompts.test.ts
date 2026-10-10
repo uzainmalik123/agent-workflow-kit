@@ -4,7 +4,7 @@ import {
   type StageExecutionRequest,
   type VerificationEvidenceBundle,
 } from "@agent-workflow-kit/orchestration";
-import { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES, buildStagePrompt } from "@agent-workflow-kit/opencode";
+import { AGENTS_MD_PRECEDENCE, FRAMEWORK_HARD_RULES, RESPONSE_FENCE_REMINDER, buildStagePrompt } from "@agent-workflow-kit/opencode";
 import { describe, expect, it } from "vitest";
 import { testFixerContract } from "../fixtures/fix-contract.js";
 import { testWorkspaceContext } from "../fixtures/workspace.js";
@@ -217,6 +217,45 @@ describe("prompt contents", () => {
 
     expect(prompt).toContain('```json\n{\n  "requirements": []\n}\n```');
     expect(prompt).toContain("```markdown\n# Request\n\nSign in.\n```");
+  });
+});
+
+describe("prompt recency: the fence reminder is the last line", () => {
+  const instructions = {
+    path: "AGENTS.md",
+    content: "# Repository\n\nTests before code.",
+    truncated: false,
+    originalLength: 24,
+  };
+
+  it("ends every stage prompt with the single exported reminder line", () => {
+    const stages = Object.keys(STAGE_DEFINITIONS) as StageExecutionRequest["stage"][];
+
+    expect(stages.length).toBeGreaterThan(0);
+
+    for (const stage of stages) {
+      for (const projectInstructions of [null, instructions]) {
+        const prompt = promptFor(stage, {}, projectInstructions);
+
+        // One constant, one position: the reminder is the last line and appears exactly once.
+        expect(prompt.endsWith(`${RESPONSE_FENCE_REMINDER}\n`)).toBe(true);
+        expect(prompt.split(RESPONSE_FENCE_REMINDER)).toHaveLength(2);
+
+        // And it comes after everything — the response protocol, the repository instructions when
+        // there are any, and the framework-rules block that used to be the prompt's last word.
+        expect(prompt.indexOf(RESPONSE_FENCE_REMINDER)).toBeGreaterThan(
+          prompt.indexOf("## Response protocol"),
+        );
+        expect(prompt.indexOf(RESPONSE_FENCE_REMINDER)).toBeGreaterThan(
+          prompt.indexOf("## Agent Workflow Kit framework rules"),
+        );
+      }
+    }
+  });
+
+  it("states the contract the parser enforces, in the parser's own terms", () => {
+    expect(RESPONSE_FENCE_REMINDER).toContain("```json");
+    expect(RESPONSE_FENCE_REMINDER).toContain("nothing before or after it");
   });
 });
 

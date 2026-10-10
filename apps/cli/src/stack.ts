@@ -56,6 +56,12 @@ export interface RealStackOptions {
    * — 900 seconds — which is also the value the CLI's `--stage-timeout <seconds>` documents.
    */
   readonly stageTimeoutMs?: number;
+  /**
+   * How many extra attempts a stage gets when its reply fails the response contract. Absent means
+   * the adapter's own default, `DEFAULT_FORMAT_RETRIES` — 2 — which is also the value the CLI's
+   * `--format-retries <n>` documents; `0` disables retries.
+   */
+  readonly formatRetries?: number;
 }
 
 /**
@@ -86,6 +92,7 @@ export function createRealStack(repoRoot: string, options: RealStackOptions = {}
     model: options.model ?? null,
     ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     ...(options.stageTimeoutMs === undefined ? {} : { timeoutMs: options.stageTimeoutMs }),
+    ...(options.formatRetries === undefined ? {} : { formatRetries: options.formatRetries }),
   });
 
   const workspace = new GitWorkspaceProvider();

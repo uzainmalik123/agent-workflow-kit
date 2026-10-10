@@ -8,7 +8,12 @@ import {
   assertNoProjectProfileShadow,
   assertNoRepositoryConfigBoundaryCrossing,
 } from "./configuration-integrity.js";
-import { OpenCodeAdapterError, isOpenCodeAdapterError } from "./errors.js";
+import { annotateInvocationOutcome } from "./diagnostics.js";
+import {
+  OpenCodeAdapterError,
+  isOpenCodeAdapterError,
+  type OpenCodeAdapterErrorCode,
+} from "./errors.js";
 import { stageRecordingFolder } from "./diagnostics.js";
 import {
   assertNoProjectLocalPlugins,
@@ -30,10 +35,121 @@ import {
 } from "./roles.js";
 import {
   DEFAULT_TIMEOUT_MS,
+  type OpenCodeRawResult,
   type OpenCodeTransport,
   type StageProgressCallback,
   type StageProgressEvent,
 } from "./transport.js";
+
+/**
+ * How many *extra* attempts a stage gets when its reply fails the response contract (D-15).
+ *
+ * The default is not restated anywhere else: the CLI's `--format-retries <n>` documents this value,
+ * `0` disables retries entirely, and a caller that supplies nothing gets it. It exists because a
+ * single formatting miss — a reply with no fenced JSON block, or the right JSON without the fence —
+ * used to kill a whole stage while the recording showed a clean exit 0 (P-14). Retrying does not
+ * weaken the contract: every attempt must still satisfy exactly one fenced JSON block and the full
+ * validation, and the retry line tells the model exactly what it was rejected for.
+ */
+export const DEFAULT_FORMAT_RETRIES = 2;
+
+/**
+ * The refusals a retry can fix, and the only ones.
+ *
+ * These three are statements about the *shape* of a reply: it had no fence, it was empty, or it
+ * failed validation. A fresh invocation with a rejection notice is a proportionate answer to any of
+ * them. Everything else is something else entirely — a timeout or a non-zero exit is a failed run,
+ * a mismatched agent or a cancelled transport is a broken run — and re-running those on the theory
+ * that the model might format better would hide a real failure behind a loop.
+ */
+export const RETRYABLE_REPLY_FAILURES: readonly OpenCodeAdapterErrorCode[] = [
+  "empty_response",
+  "malformed_response",
+  "invalid_result",
+];
+
+/**
+ * The one appended line a retry prompt carries, naming the code the previous reply was refused
+ * with. It is a fresh invocation — identical prompt, nothing carried over but this line — so the
+ * model is told what went wrong in the only message it will see.
+ */
+export function formatReplyRejectionNotice(code: string): string {
+  return `Your previous reply was rejected: ${code}. Reply with exactly one fenced JSON block and nothing after it.`;
+}
+
+/** The prompt for a retry: the same prompt, plus exactly one appended line. */
+function promptWithRejectionNotice(prompt: string, code: string): string {
+  const base = prompt.endsWith("\n") ? prompt : `${prompt}\n`;
+
+  return `${base}${formatReplyRejectionNotice(code)}\n`;
+}
+
+/** The longest excerpt of a rejected reply the failure message quotes, in characters. */
+export const REJECTED_REPLY_EXCERPT_MAX_CHARS = 200;
+
+/**
+ * The first {@link REJECTED_REPLY_EXCERPT_MAX_CHARS} characters of a reply, with C0, DEL, and C1
+ * control characters removed. Written as a scanner rather than a regular expression for the same
+ * reason `stripAnsiCodes` is: a literal regex carrying control characters is exactly what a linter
+ * should refuse, and the reply is model output — the one string in this system that must never
+ * reach a terminal with its escape sequences intact. The scanner also does the bounding, so the
+ * cut lands between characters rather than inside one.
+ */
+function rejectedReplyExcerpt(text: string): string {
+  let out = "";
+  let length = 0;
+
+  for (const character of text) {
+    const code = character.codePointAt(0) ?? 0;
+
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+      continue;
+    }
+
+    if (length >= REJECTED_REPLY_EXCERPT_MAX_CHARS) {
+      break;
+    }
+
+    out += character;
+    length += 1;
+  }
+
+  return out;
+}
+
+/**
+ * The shape of a rejected reply, as the failure message states it: how many bytes it was, and its
+ * first {@link REJECTED_REPLY_EXCERPT_MAX_CHARS} characters with control characters stripped. The
+ * byte length is the real one, because the bytes are what the parser was handed; the excerpt is
+ * bounded and plain, because it is model output travelling through an error message.
+ */
+function describeRejectedReply(reply: string): string {
+  return (
+    `${String(Buffer.byteLength(reply, "utf8"))} bytes; first ` +
+    `${String(REJECTED_REPLY_EXCERPT_MAX_CHARS)} characters (control characters stripped): ` +
+    JSON.stringify(rejectedReplyExcerpt(reply))
+  );
+}
+
+/**
+ * The refusal a stage ends with once every attempt has been rejected: the same code, the same
+ * underlying reason, and — because a bare parse error answers none of the questions a human asks
+ * next — how many attempts it took, what the last reply looked like, and where every attempt is
+ * recorded.
+ */
+function replyRejectedError(
+  error: OpenCodeAdapterError,
+  attempts: number,
+  reply: string,
+  recordingFolder: string,
+): OpenCodeAdapterError {
+  return new OpenCodeAdapterError(
+    error.code,
+    `The OpenCode reply was rejected with "${error.code}" after ${String(attempts)} ` +
+      `${attempts === 1 ? "attempt" : "attempts"}: ${error.message} ` +
+      `Last reply: ${describeRejectedReply(reply)}. Recording folder: ${recordingFolder}`,
+  );
+}
 
 export interface OpenCodeStageExecutorOptions {
   readonly transport: OpenCodeTransport;
@@ -50,6 +166,15 @@ export interface OpenCodeStageExecutorOptions {
   readonly model?: string | null;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal | null;
+  /**
+   * How many extra attempts a stage gets when its reply fails the response contract —
+   * `malformed_response`, `empty_response`, or `invalid_result`. Defaults to
+   * {@link DEFAULT_FORMAT_RETRIES} when absent; `0` means exactly one attempt. Each retry is a
+   * fresh OpenCode invocation with the identical prompt plus one appended rejection line, and
+   * every attempt is recorded. Nothing else is retried: a timeout, a non-zero exit, or a
+   * transport failure is a failed run, not a rejected reply.
+   */
+  readonly formatRetries?: number;
   /**
    * Repository guidance, overriding the file lookup. Always subordinate to the framework rules.
    */
@@ -104,6 +229,8 @@ export interface OpenCodeStageExecutorOptions {
  *   -> framework runtime configuration (the two profiles, written outside the repository)
  *   -> OpenCodeTransport              (substitutable; the real one spawns the CLI)
  *   -> structured response parsing     (a fenced JSON payload, never prose)
+ *   -> bounded reply retry             (format refusals only; fresh invocation, same prompt plus
+ *                                       one rejection line, up to {@link DEFAULT_FORMAT_RETRIES})
  *   -> StageExecutionResult
  * ```
  *
@@ -112,7 +239,9 @@ export interface OpenCodeStageExecutorOptions {
  * timeout, a non-zero exit, malformed output, a mismatched feature or stage, a forbidden artifact
  * name, a smuggled workflow field, or repository-supplied OpenCode plugin code is thrown as an
  * `OpenCodeAdapterError` so the orchestrator reports an executor failure instead of trusting the
- * agent.
+ * agent. The reply retry is the one place a refusal is followed by another invocation, and it is
+ * bounded and scoped to the three refusals that are statements about a reply's shape (D-15): the
+ * contract every attempt must satisfy is exactly the one that refused the attempt before it.
  *
  * The two preflight checks answer different questions and neither substitutes for the other. The plugin
  * preflight asks whether the repository ships OpenCode code at all. The profile shadow check asks
@@ -130,6 +259,17 @@ export class OpenCodeStageExecutor implements StageExecutor {
   readonly #projectRoot: string;
 
   constructor(options: OpenCodeStageExecutorOptions) {
+    const formatRetries = options.formatRetries;
+
+    // Refused here rather than clamped: a retry count that is not a whole non-negative number is
+    // a caller's bug, and silently rounding it would decide how many model invocations a stage
+    // may spend.
+    if (formatRetries !== undefined && (!Number.isSafeInteger(formatRetries) || formatRetries < 0)) {
+      throw new RangeError(
+        `formatRetries must be a non-negative whole number; received ${String(formatRetries)}.`,
+      );
+    }
+
     this.#transport = options.transport;
     this.#options = options;
     this.#projectRoot = resolve(options.projectRoot);
@@ -207,7 +347,8 @@ export class OpenCodeStageExecutor implements StageExecutor {
   }
 
   /**
-   * The body of a stage run: every refusal, the prompt, the transport call, and the response parse.
+   * The body of a stage run: every refusal, the prompt, the transport call, the response parse,
+   * and the bounded retry of a reply the contract refused.
    *
    * Split out from {@link execute} only so that `execute` can bracket it with the progress events
    * that describe it; nothing about the order of the checks below changed when it moved.
@@ -252,30 +393,112 @@ export class OpenCodeStageExecutor implements StageExecutor {
     });
 
     const runtimeConfig = await this.#runtimeConfigFor(workingDirectory);
-    const raw = await this.#invoke(agent, profile, prompt, request, workingDirectory, runtimeConfig);
+    const maxRetries = this.#formatRetries();
 
-    if (raw.agent !== agent) {
-      throw new OpenCodeAdapterError(
-        "transport_failed",
-        `The OpenCode transport answered for agent "${raw.agent}" but was asked to run "${agent}".`,
+    let attempt = 0;
+    let attemptPrompt = prompt;
+
+    for (;;) {
+      attempt += 1;
+
+      const raw = await this.#invoke(
+        agent,
+        profile,
+        attemptPrompt,
+        request,
+        workingDirectory,
+        runtimeConfig,
       );
+
+      // An agent mismatch is the transport answering for the wrong capability set, not a reply
+      // this model could improve by trying again. Neither is a non-zero exit: the run itself
+      // failed, and a retry would re-spend a stage on a process that already said it could not
+      // finish.
+      if (raw.agent !== agent) {
+        throw new OpenCodeAdapterError(
+          "transport_failed",
+          `The OpenCode transport answered for agent "${raw.agent}" but was asked to run "${agent}".`,
+        );
+      }
+
+      if (raw.exitCode !== 0) {
+        await this.#recordReplyOutcome(raw, attempt, "non_zero_exit");
+        throw new OpenCodeAdapterError(
+          "non_zero_exit",
+          `The OpenCode run for agent "${agent}" exited with code ${String(raw.exitCode)}.`,
+        );
+      }
+
+      try {
+        if (raw.text.trim().length === 0) {
+          throw new OpenCodeAdapterError(
+            "empty_response",
+            `The OpenCode run for agent "${agent}" returned no response text.`,
+          );
+        }
+
+        const result = parseStageResponse(raw.text, request);
+
+        // The verdict lands in the recording the transport already wrote: a run that exited 0
+        // with no error says nothing about whether its reply was usable, which is exactly why a
+        // refused reply used to be invisible in the recording table.
+        await this.#recordReplyOutcome(raw, attempt, "accepted");
+
+        return result;
+      } catch (error) {
+        if (!isOpenCodeAdapterError(error)) {
+          throw error;
+        }
+
+        await this.#recordReplyOutcome(raw, attempt, error.code);
+
+        if (!RETRYABLE_REPLY_FAILURES.includes(error.code)) {
+          throw error;
+        }
+
+        if (attempt > maxRetries) {
+          throw replyRejectedError(
+            error,
+            attempt,
+            raw.text,
+            this.#recordingFolderFor(request),
+          );
+        }
+
+        this.#emit({
+          type: "format_retry",
+          stage: request.stage,
+          code: error.code,
+          retry: attempt,
+          maxRetries,
+        });
+        attemptPrompt = promptWithRejectionNotice(prompt, error.code);
+      }
+    }
+  }
+
+  /** The retry budget for replies that failed the response contract. */
+  #formatRetries(): number {
+    return this.#options.formatRetries ?? DEFAULT_FORMAT_RETRIES;
+  }
+
+  /**
+   * Writes this attempt's reply verdict into the invocation's own manifest, when the transport
+   * recorded one. Best-effort, like the recording itself: a verdict that cannot be written never
+   * changes the stage's outcome.
+   */
+  async #recordReplyOutcome(
+    raw: OpenCodeRawResult,
+    attempt: number,
+    responseOutcome: string,
+  ): Promise<void> {
+    const manifestPath = raw.recordingManifestPath;
+
+    if (manifestPath === undefined || manifestPath === null) {
+      return;
     }
 
-    if (raw.exitCode !== 0) {
-      throw new OpenCodeAdapterError(
-        "non_zero_exit",
-        `The OpenCode run for agent "${agent}" exited with code ${String(raw.exitCode)}.`,
-      );
-    }
-
-    if (raw.text.trim().length === 0) {
-      throw new OpenCodeAdapterError(
-        "empty_response",
-        `The OpenCode run for agent "${agent}" returned no response text.`,
-      );
-    }
-
-    return parseStageResponse(raw.text, request);
+    await annotateInvocationOutcome(manifestPath, { attempt, responseOutcome });
   }
 
   /**

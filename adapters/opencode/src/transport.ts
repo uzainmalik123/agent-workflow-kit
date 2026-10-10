@@ -21,6 +21,20 @@ export type StageProgressEvent =
   | { readonly type: "stage_started"; readonly stage: WorkStage }
   /** One tool-use line, already stripped of escapes and bounded, as it arrived from the child. */
   | { readonly type: "activity"; readonly stage: WorkStage; readonly line: string }
+  /**
+   * A reply was refused by the response contract and the stage is being retried: `code` is the
+   * refusal (`malformed_response`, `empty_response`, `invalid_result`), `retry` is which retry this
+   * is (1-based), `maxRetries` is how many the adapter is allowed. Emitted only for those three
+   * refusals — a timeout or a non-zero exit is a failed run, not a rejected reply, and is never
+   * announced as a retry because it never causes one.
+   */
+  | {
+      readonly type: "format_retry";
+      readonly stage: WorkStage;
+      readonly code: string;
+      readonly retry: number;
+      readonly maxRetries: number;
+    }
   /** The stage returned or threw. Emitted for every stage, success or failure alike. */
   | { readonly type: "stage_finished"; readonly stage: WorkStage; readonly elapsedMs: number }
   /**
@@ -95,6 +109,15 @@ export interface OpenCodeRawResult {
   readonly stderr: string;
   /** The agent's response text, as extracted from the transport's own output format. */
   readonly text: string;
+  /**
+   * The absolute path of this run's `invocation.json`, or `null` when nothing was recorded.
+   *
+   * Whether the reply *parses* is knowledge the transport does not have: parsing happens after the
+   * run returns, in the executor. This path is the seam that lets the executor write that verdict
+   * into the recording the transport already wrote, so a reply the contract refused is visible in
+   * the recording instead of looking like the clean exit 0 it was.
+   */
+  readonly recordingManifestPath?: string | null;
 }
 
 export interface OpenCodeTransport {

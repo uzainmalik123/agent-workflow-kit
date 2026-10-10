@@ -1,7 +1,11 @@
 import { Command } from "commander";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/project";
-import { DEFAULT_TIMEOUT_MS, type StageProgressCallback } from "@agent-workflow-kit/opencode";
+import {
+  DEFAULT_FORMAT_RETRIES,
+  DEFAULT_TIMEOUT_MS,
+  type StageProgressCallback,
+} from "@agent-workflow-kit/opencode";
 import { approvedScopeFromPlan } from "@agent-workflow-kit/orchestration";
 import { parseStatus } from "@agent-workflow-kit/workspace";
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
@@ -31,6 +35,7 @@ interface RunCommandOptions {
   readonly model?: string;
   readonly quiet?: boolean;
   readonly stageTimeout?: string;
+  readonly formatRetries?: string;
 }
 
 /**
@@ -47,6 +52,11 @@ export interface CliStackRequest {
   readonly onProgress?: StageProgressCallback;
   /** The per-stage budget in milliseconds; absent means the adapter's own default. */
   readonly stageTimeoutMs?: number;
+  /**
+   * How many extra attempts a stage gets when its reply fails the response contract; absent means
+   * the adapter's own default, and `0` disables retries.
+   */
+  readonly formatRetries?: number;
 }
 
 /**
@@ -373,6 +383,38 @@ function resolveStageTimeoutMs(flag: string | undefined): number {
 }
 
 /**
+ * The reply-retry budget, from `--format-retries <n>`.
+ *
+ * The default is not restated here: it is `DEFAULT_FORMAT_RETRIES` itself — 2 — the same value the
+ * executor uses when it is given no budget at all, so the flag's help text, this conversion, and
+ * the adapter's default cannot drift apart. `0` is a real answer and disables retries: it restores
+ * the single-attempt behaviour exactly.
+ *
+ * Like an unusable `--stage-timeout`, a value that is not a whole non-negative number is refused
+ * before a stack is built: how many model invocations a stage may spend is this command's answer,
+ * not a surprise inside a stage.
+ */
+function resolveFormatRetries(flag: string | undefined): number {
+  if (flag === undefined) {
+    return DEFAULT_FORMAT_RETRIES;
+  }
+
+  if (!/^[0-9]+$/u.test(flag)) {
+    throw new Error(
+      `Invalid --format-retries value: ${JSON.stringify(flag)} must be a whole number of retries.`,
+    );
+  }
+
+  const retries = Number(flag);
+
+  if (!Number.isSafeInteger(retries)) {
+    throw new Error(`Invalid --format-retries value: ${JSON.stringify(flag)} is too large.`);
+  }
+
+  return retries;
+}
+
+/**
  * Whether `git rev-parse HEAD` resolves, i.e. the repository has at least one commit.
  *
  * `run` checks this before the workflow is touched: a stage diffs, verifies, and eventually
@@ -608,6 +650,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
       "--stage-timeout <seconds>",
       `Per-stage timeout in seconds (default: ${String(DEFAULT_TIMEOUT_MS / 1000)})`,
     )
+    .option(
+      "--format-retries <n>",
+      `Extra attempts when a stage reply fails the response contract: malformed, empty, or schema-invalid (default: ${String(DEFAULT_FORMAT_RETRIES)}, 0 disables)`,
+    )
     .action(async (featureId: string | undefined, opts: RunCommandOptions) => {
       try {
         const repoRoot = getRepoRoot(cwd());
@@ -615,6 +661,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
         // answer rather than a surprise inside a stage's invocation.
         const model = resolveRunModel(opts.model);
         const stageTimeoutMs = resolveStageTimeoutMs(opts.stageTimeout);
+        const formatRetries = resolveFormatRetries(opts.formatRetries);
 
         // Before the stack exists and before any session is read: a repository with no commits
         // cannot diff, verify, or publish, so the run stops here with that answer.
@@ -638,6 +685,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
           model,
           onProgress: reporter,
           stageTimeoutMs,
+          formatRetries,
         });
         const orchestrator = stack.orchestrator;
 

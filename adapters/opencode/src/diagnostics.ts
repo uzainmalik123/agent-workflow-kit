@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { resolveInsideRoot } from "@agent-workflow-kit/project";
 import { isOpenCodeAdapterError } from "./errors.js";
@@ -14,7 +14,8 @@ import type { ProcessOutcomeObservation } from "./process.js";
  *
  * ```text
  * <workingDirectory>/.agentflow/recordings/<featureId>/<stage>/<startedAt>-<suffix>/
- *   invocation.json   command, argv, cwd, startedAt, durationMs, exitCode, termination, error kind
+ *   invocation.json   command, argv, cwd, startedAt, durationMs, exitCode, termination, error kind,
+ *                     plus the executor's reply verdict — attempt number and response outcome
  *   stdout.txt        the raw stdout capture
  *   stderr.txt        the raw stderr capture
  * ```
@@ -191,5 +192,53 @@ export async function recordStageInvocation(
     return { directory, manifestPath, stdoutPath, stderrPath };
   } catch {
     return null;
+  }
+}
+
+/**
+ * What one attempt at a stage's reply turned out to be: which numbered attempt it was, and how the
+ * response protocol judged its reply — `accepted`, or the refusal code (`malformed_response`,
+ * `empty_response`, `invalid_result`).
+ *
+ * This is the answer to the question the manifest could not answer when it was written. A recording
+ * of a run that exited 0 with no error looks, by itself, like a run that worked — and a reply the
+ * contract refused is exactly that shape. The verdict is therefore written back into the same
+ * manifest, beside the argv, streams, and exit code it describes.
+ */
+export interface InvocationOutcomeAnnotation {
+  /** 1 for the first attempt, incrementing for each retry of the same stage. */
+  readonly attempt: number;
+  /** `accepted`, or the adapter error code the reply was refused with. */
+  readonly responseOutcome: string;
+}
+
+/**
+ * Writes a reply verdict into an invocation's manifest, keeping every field already there.
+ *
+ * Best-effort, like every write in this module: a manifest that cannot be read or rewritten leaves
+ * the recording exactly as the transport made it, and a stage's outcome never changes because a
+ * diagnostic annotation failed.
+ */
+export async function annotateInvocationOutcome(
+  manifestPath: string,
+  annotation: InvocationOutcomeAnnotation,
+): Promise<void> {
+  try {
+    const text = await readFile(manifestPath, "utf8");
+    const parsed = JSON.parse(text) as unknown;
+
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return;
+    }
+
+    const annotated = {
+      ...(parsed as Record<string, unknown>),
+      attempt: annotation.attempt,
+      responseOutcome: annotation.responseOutcome,
+    };
+
+    await writeFile(manifestPath, `${JSON.stringify(annotated, null, 2)}\n`, "utf8");
+  } catch {
+    // Best-effort by design; see the comment above.
   }
 }

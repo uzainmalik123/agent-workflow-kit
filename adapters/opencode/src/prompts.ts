@@ -24,6 +24,19 @@ export interface BuildStagePromptInput {
   readonly projectInstructions?: ProjectInstructions | null;
 }
 
+/**
+ * The last line of every stage prompt, without exception.
+ *
+ * The fence rule lives in the middle of a very long prompt — the response protocol section is
+ * followed by the repository instructions and then by the framework-rules block, and a model that
+ * reads recency more strongly than position drops the fence exactly there (P-14). One constant,
+ * appended after everything else, so the rule the parser enforces is also the last thing the model
+ * was told. It is a restatement, not a new rule: the contract it repeats is the one
+ * `response-protocol.ts` validates against.
+ */
+export const RESPONSE_FENCE_REMINDER =
+  "Reminder: your whole reply must be exactly one fenced code block that starts with ```json on its own line and ends with ``` on its own line, with nothing before or after it.";
+
 const ARTIFACT_KIND_MEANING: Readonly<Record<StageArtifactOutputSpec["kind"], string>> = {
   document: "The orchestrator stores this value as the whole artifact.",
   section:
@@ -631,8 +644,9 @@ function renderSecurityEvidence(record: SecurityReviewEvidence): string {
  * allowed outputs, and the repository's own guidance. It never contains the rest of the feature
  * history, artifacts the orchestrator did not route, the session document, unrelated repository
  * files, policies, or skills. The one thing it adds beyond the request is the deterministic evidence
- * for a verification stage, and it adds it only when the orchestrator collected it. The framework rules are last, which is what gives them precedence
- * over the repository guidance above them.
+ * for a verification stage, and it adds it only when the orchestrator collected it. The framework rules are last among the
+ * governing sections, which is what gives them precedence over the repository guidance above them,
+ * and {@link RESPONSE_FENCE_REMINDER} is the very last line, after everything.
  */
 export function buildStagePrompt(input: BuildStagePromptInput): string {
   const { request, projectInstructions = null } = input;
@@ -691,6 +705,10 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
       bulletList(FRAMEWORK_HARD_RULES),
     ].join("\n"),
   );
+
+  // Last, after the framework rules, in every prompt for every stage: the one rule the response
+  // parser will judge the reply by, restated at the position a model reads most strongly.
+  sections.push(RESPONSE_FENCE_REMINDER);
 
   return `${sections.join("\n\n")}\n`;
 }

@@ -9,6 +9,7 @@ import {
   type RunProcessResult,
 } from "./process.js";
 import { describeRecordingError, recordStageInvocation } from "./diagnostics.js";
+import type { RecordedInvocation } from "./diagnostics.js";
 import { createActivityRelay, type ActivityRelay } from "./progress.js";
 import { OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE } from "./runtime-config.js";
 import {
@@ -362,7 +363,10 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
     }
 
     relay?.flush();
-    await this.#recordInvocation(request, invocation, observation, null);
+    // Where this run's recording landed, handed back so the executor can write the reply verdict
+    // into the same manifest once it has parsed the reply: parsing happens after this function
+    // returns, so the transport cannot know the verdict when it writes the recording.
+    const recording = await this.#recordInvocation(request, invocation, observation, null);
 
     if (format === "json") {
       const stream = parseEventStream(result.stdout);
@@ -389,6 +393,7 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
       stdout: result.stdout,
       stderr: result.stderr,
       text: extractResponseText(result.stdout, format),
+      recordingManifestPath: recording?.manifestPath ?? null,
     };
   }
 
@@ -404,12 +409,12 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
     invocation: OpenCodeInvocation,
     observation: ProcessOutcomeObservation | null,
     error: unknown,
-  ): Promise<void> {
+  ): Promise<RecordedInvocation | null> {
     if (this.#options.recordInvocations === false || observation === null) {
-      return;
+      return null;
     }
 
-    await recordStageInvocation(
+    return recordStageInvocation(
       request.workingDirectory,
       { featureId: request.featureId, stage: request.stage },
       {

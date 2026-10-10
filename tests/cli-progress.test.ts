@@ -92,13 +92,19 @@ async function runCli(args: readonly string[], options: RunOptions): Promise<Cli
 function progressStackFactory(): {
   readonly factory: (repoRoot: string, request: CliStackRequest) => CliStack;
   readonly stageTimeouts: number[];
+  readonly formatRetries: number[];
 } {
   const stageTimeouts: number[] = [];
+  const formatRetries: number[] = [];
   const activity = ["\u2192 Read grill.json"];
 
   const factory = (repoRoot: string, request: CliStackRequest): CliStack => {
     if (request.stageTimeoutMs !== undefined) {
       stageTimeouts.push(request.stageTimeoutMs);
+    }
+
+    if (request.formatRetries !== undefined) {
+      formatRetries.push(request.formatRetries);
     }
 
     const base = new FakeStageExecutor();
@@ -136,7 +142,7 @@ function progressStackFactory(): {
     });
   };
 
-  return { factory, stageTimeouts };
+  return { factory, stageTimeouts, formatRetries };
 }
 
 async function startFeature(repoRoot: string, factory: ReturnType<typeof progressStackFactory>["factory"]): Promise<void> {
@@ -297,6 +303,57 @@ describe("the stage progress reporter", () => {
       "stage grill failed after 45s; recording folder: /home/someone/.cache/agent-workflow-kit/workspaces/abc/.agentflow/recordings/F-001/grill",
     ]);
   });
+
+  it("prints a reply-retry line naming the code and which retry it is", () => {
+    const printed: string[] = [];
+    const report = createStageProgressReporter({
+      write: (line) => {
+        printed.push(line);
+      },
+      timers: manualTimers().timers,
+    });
+
+    report({
+      type: "format_retry",
+      stage: "grill",
+      code: "malformed_response",
+      retry: 1,
+      maxRetries: 2,
+    });
+    report({
+      type: "format_retry",
+      stage: "grill",
+      code: "empty_response",
+      retry: 2,
+      maxRetries: 2,
+    });
+
+    expect(printed).toEqual([
+      "grill: reply rejected (malformed_response), retry 1 of 2",
+      "grill: reply rejected (empty_response), retry 2 of 2",
+    ]);
+  });
+
+  it("keeps reply-retry lines quiet, like every other progress line", () => {
+    const printed: string[] = [];
+    const report = createStageProgressReporter({
+      write: (line) => {
+        printed.push(line);
+      },
+      timers: manualTimers().timers,
+      quiet: true,
+    });
+
+    report({
+      type: "format_retry",
+      stage: "grill",
+      code: "malformed_response",
+      retry: 1,
+      maxRetries: 2,
+    });
+
+    expect(printed).toEqual([]);
+  });
 });
 
 describe("agentflow run progress", () => {
@@ -361,6 +418,43 @@ describe("agentflow run progress", () => {
 
     expect(ran.exitCodes).toEqual([1]);
     expect(ran.stderr).toContain("--stage-timeout");
+  });
+
+  it("passes --format-retries to the stack, defaults to 2, and accepts 0 as a real answer", async () => {
+    const repoRoot = await makeRepo();
+
+    const explicit = progressStackFactory();
+    await startFeature(repoRoot, explicit.factory);
+    await runCli(["run", "F-001", "--format-retries", "1"], {
+      repoRoot,
+      createStack: explicit.factory,
+    });
+    expect(explicit.formatRetries).toEqual([1]);
+
+    const disabled = progressStackFactory();
+    await runCli(["run", "F-001", "--format-retries", "0"], {
+      repoRoot,
+      createStack: disabled.factory,
+    });
+    expect(disabled.formatRetries).toEqual([0]);
+
+    const defaults = progressStackFactory();
+    await runCli(["run", "F-001"], { repoRoot, createStack: defaults.factory });
+    expect(defaults.formatRetries).toEqual([2]);
+  });
+
+  it("refuses a --format-retries value that is not a whole number of retries", async () => {
+    const repoRoot = await makeRepo();
+    const { factory } = progressStackFactory();
+    await startFeature(repoRoot, factory);
+
+    const ran = await runCli(["run", "F-001", "--format-retries", "many"], {
+      repoRoot,
+      createStack: factory,
+    });
+
+    expect(ran.exitCodes).toEqual([1]);
+    expect(ran.stderr).toContain("--format-retries");
   });
 });
 

@@ -140,6 +140,7 @@ export class FakeOpenCodeTransport implements OpenCodeTransport {
   readonly #default: FakeOpenCodeBehavior | undefined;
   readonly #byStage = new Map<WorkStage, FakeOpenCodeBehavior>();
   readonly #byAgent = new Map<string, FakeOpenCodeBehavior>();
+  readonly #sequences = new Map<WorkStage, FakeOpenCodeBehavior[]>();
 
   constructor(defaultBehavior?: FakeOpenCodeBehavior) {
     this.#default = defaultBehavior;
@@ -148,6 +149,18 @@ export class FakeOpenCodeTransport implements OpenCodeTransport {
   /** Targets one stage, which is the only way to separate the three stages that share `verifier`. */
   configure(stage: WorkStage, behavior: FakeOpenCodeBehavior): this {
     this.#byStage.set(stage, behavior);
+    return this;
+  }
+
+  /**
+   * Answers one stage's calls in order, one behavior per call, repeating the last one.
+   *
+   * This is the seam the bounded retry tests need: a stage whose first reply fails the response
+   * contract and whose retry is good is two calls to the same stage, and a per-stage behavior that
+   * never changes cannot express that.
+   */
+  configureSequence(stage: WorkStage, behaviors: readonly FakeOpenCodeBehavior[]): this {
+    this.#sequences.set(stage, [...behaviors]);
     return this;
   }
 
@@ -161,8 +174,10 @@ export class FakeOpenCodeTransport implements OpenCodeTransport {
     if (stage === undefined) {
       this.#byStage.clear();
       this.#byAgent.clear();
+      this.#sequences.clear();
     } else {
       this.#byStage.delete(stage);
+      this.#sequences.delete(stage);
     }
 
     return this;
@@ -191,10 +206,21 @@ export class FakeOpenCodeTransport implements OpenCodeTransport {
   async run(request: OpenCodeTransportRequest): Promise<OpenCodeRawResult> {
     this.calls.push(request);
 
+    // A queued behavior is the most specific answer a stage can have: it answers *this* call, in
+    // order, while the per-stage behavior would answer every call of that stage the same way.
+    const sequence = this.#sequences.get(request.stage);
+    const sequenced =
+      sequence === undefined || sequence.length === 0
+        ? undefined
+        : sequence.length > 1
+          ? sequence.shift()
+          : sequence.at(0);
+
     const behavior: FakeOpenCodeBehavior = {
       ...this.#default,
       ...this.#byAgent.get(request.agent),
       ...this.#byStage.get(request.stage),
+      ...sequenced,
     };
 
     if (behavior.activity !== undefined) {
