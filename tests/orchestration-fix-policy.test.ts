@@ -787,26 +787,21 @@ describe("where a fix is allowed to write", () => {
       await orchestrator.runNext("F-001");
     }
 
+    // D-13: plan_review needs_fix goes to the human at the approval gate, not to the fixer.
     const review = await orchestrator.runNext("F-001");
 
-    expect(review).toMatchObject({ status: "fix_requested", state: WorkflowState.Fixing });
-
-    const result = await orchestrator.runNext("F-001");
-
-    expect(result).toMatchObject({
-      status: "rejected",
-      stage: "fixing",
-      error: { code: "workspace_not_configured" },
+    expect(review).toMatchObject({
+      status: "stage_completed",
+      state: WorkflowState.AwaitingPlanApproval,
     });
     expect(executor.calls.some((request) => request.stage === "fixing")).toBe(false);
   });
 
-  it("does not charge a human's uncommitted work to a fix that ran before approval", async () => {
+  it("advances to the approval gate when plan_review reports needs_fix, without entering the fixer", async () => {
     const root = await makeRoot();
-    // A fix sent back from plan review runs against whatever the human has in their checkout, which may
-    // already contain their uncommitted work. The tree as it looked before the fix ran is the only
-    // baseline that can tell that apart from the fix, so the difference between the two — here, nothing,
-    // because a pre-approval fix is read-only — is the only thing the fix can be said to have done.
+    // A pre-approval stage runs read-only against the human's checkout. D-13 makes a plan_review
+    // needs_fix advance to the gate instead of entering the fixer, so the human decides what to do
+    // with the findings. The fixer's authority over code-stage defects is untouched.
     const box = changeSet();
     const harness = createHarness(root, { changes: box.read });
 
@@ -821,26 +816,11 @@ describe("where a fix is allowed to write", () => {
     const review = await harness.orchestrator.runNext("F-001");
 
     expect(review).toMatchObject({
-      status: "fix_requested",
-      stage: "plan_review",
-      state: WorkflowState.Fixing,
-    });
-
-    box.set({ modified: ["src/human-in-progress.ts"] });
-
-    const result = await harness.orchestrator.runNext("F-001");
-
-    expect(lastRequestFor(harness, "fixing")?.workspace.access).toBe("read_only");
-    expect(result).toMatchObject({
       status: "stage_completed",
-      stage: "fixing",
-      state: WorkflowState.PlanReview,
+      stage: "plan_review",
+      state: WorkflowState.AwaitingPlanApproval,
     });
-
-    const history = await fixHistory(harness);
-
-    expect(history).toHaveLength(1);
-    expect(history[0]).toMatchObject({ outcome: "accepted", changedPaths: [] });
+    expect(harness.executor.calls.some((request) => request.stage === "fixing")).toBe(false);
   });
 });
 

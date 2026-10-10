@@ -6,7 +6,13 @@ import {
   DEFAULT_TIMEOUT_MS,
   type StageProgressCallback,
 } from "@agent-workflow-kit/opencode";
-import { approvedScopeFromPlan } from "@agent-workflow-kit/orchestration";
+import {
+  approvedScopeFromPlan,
+  formatFindings,
+  formatPlanReview,
+  planReviewReport,
+  type PlanReviewReport,
+} from "@agent-workflow-kit/orchestration";
 import { parseStatus } from "@agent-workflow-kit/workspace";
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
 import { createStageProgressReporter } from "./progress.js";
@@ -484,6 +490,27 @@ async function warnAboutUntrackedFiles(repoRoot: string): Promise<void> {
 }
 
 /**
+ * The stored plan review for one feature, read the way the human at the approval gate reads it.
+ *
+ * Derived from the `plan_review` artifact alone — no session field carries a verdict or a finding
+ * (D-13), and the artifact is the same bytes approval digests. An artifact that cannot be read is
+ * treated as a review that recorded nothing: this never fails a command, because a display that
+ * cannot be produced must not stop the decision it was going to inform. The gate below is the only
+ * caller that acts on the answer, and it acts only when the document positively says something is
+ * unresolved.
+ */
+async function storedPlanReview(
+  store: CliStack["store"],
+  featureId: string,
+): Promise<PlanReviewReport> {
+  try {
+    return planReviewReport(await store.readArtifact(featureId, "plan_review"));
+  } catch {
+    return planReviewReport(undefined);
+  }
+}
+
+/**
  * The scope-warning text for one feature's stored plan, or `null` when the plan authorizes
  * something.
  *
@@ -586,6 +613,11 @@ export function createCli(options: CreateCliOptions = {}): Command {
           );
           lines.push(`Recording folder: ${latest.folder}`);
         }
+
+        // The review findings this feature's plan reviewer recorded, wherever the workflow has got
+        // to since. Read-only and best-effort like the rest of this command: a feature with no
+        // review records nothing here (P-16, D-13).
+        lines.push(...formatPlanReview(await storedPlanReview(store, targetFeatureId)));
 
         console.log(lines.join("\n"));
       } catch (error: unknown) {
@@ -719,6 +751,25 @@ export function createCli(options: CreateCliOptions = {}): Command {
             const action = result.action ?? "unknown";
             console.log(`Workflow paused at ${result.state} - awaiting ${action}`);
             console.log("Run 'agentflow approve plan' or 'agentflow approve push' to continue.");
+
+            // At the plan gate, the review is the reason the workflow is waiting: it is shown here
+            // because this is the moment the human is being asked to act on it, and because a review
+            // that still has findings changes which command can continue the workflow (D-13).
+            if (action === "approve_plan") {
+              const review = await storedPlanReview(stack.store, targetFeatureId);
+
+              for (const line of formatPlanReview(review)) {
+                console.log(line);
+              }
+
+              if (review.unresolved) {
+                console.log(
+                  `Approving this plan requires \`agentflow approve plan ${targetFeatureId} --accept-findings\`; ` +
+                    `\`agentflow abandon ${targetFeatureId} --reason "<text>"\` ends the feature instead.`,
+                );
+              }
+            }
+
             return;
           }
 
@@ -739,6 +790,13 @@ export function createCli(options: CreateCliOptions = {}): Command {
           ]);
           if (errorStatuses.has(result.status)) {
             console.error(`Workflow error (${result.status}): ${result.error?.message ?? "Unknown error"}`);
+
+            // Findings a stage reported on its way to the error, printed because a message about
+            // *that* the run failed is what sends a human to the finding that says *why* (P-16).
+            for (const line of formatFindings(result.findings)) {
+              console.error(line);
+            }
+
             exit(1);
             return;
           }
@@ -767,7 +825,11 @@ export function createCli(options: CreateCliOptions = {}): Command {
     .command("plan")
     .description("Approve the current plan")
     .argument("[feature-id]", "Feature ID to approve (defaults to most recent)")
-    .action(async (featureId: string | undefined) => {
+    .option(
+      "--accept-findings",
+      "Approve despite unresolved plan-review findings, acknowledging them explicitly",
+    )
+    .action(async (featureId: string | undefined, opts: { acceptFindings?: boolean }) => {
       try {
         const repoRoot = getRepoRoot(cwd());
 
@@ -780,6 +842,30 @@ export function createCli(options: CreateCliOptions = {}): Command {
 
         const targetFeatureId = await getTargetFeatureId(stack.store, exit, featureId);
         if (targetFeatureId === null) {
+          return;
+        }
+
+        // D-13: a plan-review verdict belongs to the human at this gate, so unresolved findings make
+        // this command stop unless they are acknowledged with --accept-findings. The gate reads the
+        // stored review and nothing else — the orchestrator's approval, its digests, and what it
+        // accepts are exactly what they were before the flag existed, and a review that recorded
+        // nothing leaves approval as unblocked as it always was.
+        const review = await storedPlanReview(stack.store, targetFeatureId);
+
+        if (review.unresolved && opts.acceptFindings !== true) {
+          console.error(
+            `Plan approval refused: the plan review left unresolved findings for ${targetFeatureId}.`,
+          );
+
+          for (const line of formatPlanReview(review)) {
+            console.error(line);
+          }
+
+          console.error(
+            "Re-run with `--accept-findings` to approve anyway, or end the feature with " +
+              `\`agentflow abandon ${targetFeatureId} --reason "<text>"\`.`,
+          );
+          exit(1);
           return;
         }
 
@@ -832,6 +918,47 @@ export function createCli(options: CreateCliOptions = {}): Command {
           console.error(`Push approval failed: ${result.error?.message ?? "Unknown error"}`);
           exit(1);
         }
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
+        exit(1);
+      }
+    });
+
+  program
+    .command("abandon")
+    .description("End a feature that should not proceed")
+    .argument("[feature-id]", "Feature ID to abandon (defaults to most recent)")
+    .requiredOption("-r, --reason <reason>", "Why this feature is being abandoned")
+    .action(async (featureId: string | undefined, opts: { reason: string }) => {
+      try {
+        const repoRoot = getRepoRoot(cwd());
+        const stack = createStack(repoRoot, {});
+
+        const targetFeatureId = await getTargetFeatureId(stack.store, exit, featureId);
+        if (targetFeatureId === null) {
+          return;
+        }
+
+        // The reason is the operator's own statement, echoed so the decision is on the record of the
+        // session that ran the command. It is deliberately not persisted: no session field carries
+        // it, and inventing one would be a schema change this command does not own (D-13).
+        console.log(`Abandoning ${targetFeatureId}: ${opts.reason}`);
+
+        // The state machine decides whether this feature can still be ended, not this command: a
+        // feature that already terminated, or one whose state forbids `fail`, is refused with the
+        // machine's own message rather than with a second opinion from the CLI.
+        const result = await stack.orchestrator.failFeature(targetFeatureId);
+
+        if (result.status === "feature_failed") {
+          console.log(
+            `Feature ${targetFeatureId} abandoned; the workflow reached terminal state ${result.state}.`,
+          );
+          return;
+        }
+
+        console.error(`Abandon failed: ${result.error?.message ?? "Unknown error"}`);
+        exit(1);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Error: ${message}`);

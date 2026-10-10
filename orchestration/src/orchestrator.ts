@@ -2129,6 +2129,12 @@ export class WorkflowOrchestrator {
       recordedGate = base.finalGate ?? null;
     }
 
+    // D-13: a plan-review verdict is the human's to act on, not the fixer's. `plan_review` reporting
+    // `needs_fix` commits its artifact and advances to the approval gate, where the findings are read
+    // and the human decides — approving, abandoning, or editing the plan. Every other fixable stage
+    // keeps its route to the fixer; the fixer's authority over code-stage defects is untouched.
+    const routesToHumanGate = stage === "plan_review" && effective.outcome === "needs_fix";
+
     // Finalization is the only mutation a stage result can cause. It runs without any lock held
     // while the executor works, and the store re-checks the revision inside the lock, so a stale
     // result can neither write its artifacts nor apply its event to a later state.
@@ -2137,10 +2143,17 @@ export class WorkflowOrchestrator {
       session,
       ...(effective.outcome === "inconclusive"
         ? {}
-        : { event: effective.outcome === "needs_fix" ? "request_fix" : definition.successEvent }),
+        : {
+            event:
+              effective.outcome === "needs_fix" && !routesToHumanGate
+                ? "request_fix"
+                : definition.successEvent,
+          }),
       successStatus:
         effective.outcome === "needs_fix"
-          ? "fix_requested"
+          ? routesToHumanGate
+            ? "stage_completed"
+            : "fix_requested"
           : effective.outcome === "inconclusive"
             ? "inconclusive"
             : "stage_completed",

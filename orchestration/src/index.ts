@@ -47,6 +47,14 @@ export type {
 export { digestArtifactText } from "./approval.js";
 export type { ApprovalOutcome, ApprovalVerification } from "./approval.js";
 
+export {
+  formatFindings,
+  formatPlanReview,
+  PLAN_REVIEW_LINE_LIMIT,
+  planReviewReport,
+} from "./plan-review.js";
+export type { PlanReviewFinding, PlanReviewReport, ReportedFinding } from "./plan-review.js";
+
 export { buildPushApproval, PUSH_APPROVAL_REVISION_OFFSET } from "./push-approval.js";
 export type { PushApprovalEvidence, PushApprovalOutcome } from "./push-approval.js";
 
