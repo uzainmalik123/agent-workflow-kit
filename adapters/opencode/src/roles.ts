@@ -131,15 +131,17 @@ const ROLE_DEFINITIONS: Readonly<Record<StageRole, OpenCodeRoleDefinition>> = {
       "Check the file scope: whether each step's expected files are plausible and complete for its action.",
       "Check for test gaps: which requirements would pass with no test at all.",
       "Check risk and architectural inconsistency against the requirements and the repository guidance you were given.",
+      "Write the `plan_review` artifact content as a JSON object with exactly `verdict` (exactly `pass` or `needs_fix`, nothing else), `summary` (one or two sentences), and `findings` (an array; each entry has `severity`, `message`, and optional `filePath` and `line`). The prompt's \"Plan review artifact shape\" section shows the exact JSON, key for key.",
     ],
     prohibited: [
       "Do not modify any project file.",
       "Do not edit the plan. You report what is wrong; you never rewrite it.",
       "Do not approve the plan. A human approves it.",
       "Do not soften a finding because the plan looks reasonable overall.",
+      "Do not use any other verdict spelling, and do not put findings in any other key: only `verdict`, `summary`, and `findings` are read, with each finding's `severity`, `message`, and optional `filePath` and `line`.",
     ],
     deliverables: [
-      "A `plan_review` document: a verdict, findings ordered by severity, and the specific coverage, scope, test, risk, and architecture problems you found.",
+      "A `plan_review` document: a `verdict` of exactly `pass` or `needs_fix`, a `summary`, and `findings` ordered by severity (each with `severity`, `message`, and optional `filePath` and `line`), covering the specific coverage, scope, test, risk, and architecture problems you found. The prompt's \"Plan review artifact shape\" section shows the exact JSON, key for key.",
     ],
   },
   implementer: {

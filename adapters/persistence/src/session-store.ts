@@ -651,6 +651,11 @@ export class FeatureSessionStore {
     return serialized;
   }
 
+  /** Absolute path of a stored artifact file, for messages that tell a human where to read. */
+  async artifactPath(featureId: string, name: FeatureArtifactName): Promise<string> {
+    return this.#artifactPath(await this.#loadLocation(featureId), name);
+  }
+
   async readEvents(featureId: string): Promise<FeatureEvent[]> {
     const location = await this.#loadLocation(featureId);
     return this.#readEventsAt(location.directoryPath, featureId);

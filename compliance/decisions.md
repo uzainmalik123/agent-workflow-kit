@@ -133,3 +133,16 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 - **Context:** see P-23. D-13 sends plan-review findings to the human, but the gate currently shows only what the reviewer put in the artifact content.
 - **Options:** (1) the reviewer role must include `verdict` and `findings` in the artifact content (prompt plus contract test, model-dependent); (2) the orchestrator persists the validated stage-result findings (changes stored outputs and approval evidence, needs a versioned decision); (3) the CLI reads findings from the recording (rejected: recordings are diagnostics, not evidence).
 - **Recommendation:** (1) now, (2) if models fail to comply in practice.
+
+## D-19. A capability the project does not declare is skipped, visibly; a declared one that cannot run is blocked
+
+- **Status:** Accepted (owner decision, 2026-10-11)
+- **Context:** in the first real run, `build` was blocked with `package_manager_unknown` although the project has no build script, which blocked the whole static stage.
+- **Decision:** the framework checks whether a script or configured command exists for a capability before checking whether the package manager is known. No script or command declared: the capability is **skipped**, reported as `skipped (<reason>)` in the verification summary and the CLI. A declared script or command that cannot run (unknown package manager, missing dependencies, unsupported ecosystem) stays **blocked** with an actionable explanation (D-20). The set of required capabilities does not change, and nothing a plan or the project declares may be skipped.
+- **Basis:** a blocked result is evidence a human must resolve. Blocking on something that would never run adds noise, while skipping something declared would weaken verification. Changes verification evidence (R-263), so it is this decision, not a quiet change.
+
+## D-20. Every refusal, failure, or blocked result must explain itself
+
+- **Status:** Accepted (owner decision, 2026-10-11)
+- **Decision:** every message the CLI prints for a refusal, failure, blocked result, or inconclusive result has four parts: (1) what happened, (2) why, in plain words naming the real cause (for example "this project has no lockfile and no `packageManager` field in package.json"), (3) how to fix it, with the exact command or edit, and (4) where the evidence is (a file path), plus the next command. The raw reason code appears in parentheses so it can be searched. "Unknown error" is never printed; if the cause is not known, the message says "cause not determined" and gives the evidence path and `agentflow status <id>`.
+- **Implementation rule:** messages come from one catalog module that maps every known reason or error code to a message builder. A test iterates all capability reason codes and all adapter and orchestration error codes, so a new code without a message fails the build.

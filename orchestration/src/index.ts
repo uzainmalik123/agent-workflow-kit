@@ -54,6 +54,7 @@ export {
   PLAN_REVIEW_RESOLVED_VERDICTS,
   PLAN_REVIEW_UNREADABLE_REASON,
   planReviewReport,
+  terminalFindingsWidth,
 } from "./plan-review.js";
 export type {
   PlanReviewFinding,

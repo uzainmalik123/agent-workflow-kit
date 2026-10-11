@@ -646,18 +646,15 @@ describe("agentflow abandon", () => {
     const session = await sessionAt(repoRoot);
     expect(session.machine.state).toBe(WorkflowState.Failed);
 
-    // A second abandon has nothing left to end, and the state machine — not the CLI — is what says
-    // so. Its message is the one a human reads.
+    // A second abandon is idempotent (Task R): an already-failed feature prints
+    // that there is nothing to abandon and exits 0.
     const again = await runCli(["abandon", "F-001", "--reason", "Again"], {
       repoRoot,
       createStack: stackFactory(executor),
     });
 
-    expect(again.exitCodes).toEqual([1]);
-    expect(again.stderr).toContain(
-      'State "failed" is terminal and cannot process event "fail".',
-    );
-    expect(again.stdout).toContain("Abandoning F-001: Again");
+    expect(again.exitCodes).toEqual([]);
+    expect(again.stdout).toContain("Feature F-001 is already failed; nothing to abandon.");
   });
 
   it("ends a feature from fixing, where `fail` is legal", async () => {

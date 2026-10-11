@@ -119,20 +119,21 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Open (Task P)
 - **Evidence:** recordings store argv, stdout, stderr, exit code, and duration, not usage. OpenCode exposes usage through its JSON event stream, `opencode stats`, session export, and its session database; completeness of the JSON stream is reported to be best-effort. V2 behavior is unverified.
 
-### P-22. Test verification blocked: package_manager_unknown
+### P-22. Static verification blocked: package_manager_unknown
 
-- **Status:** Open (Task Q)
-- **Evidence (first real run, 2026-10-11):** static_verification returned `inconclusive`; the deterministic test check was blocked with `package_manager_unknown` and no command result. Cause unverified; hypothesis: the fixture has no lockfile or packageManager field.
+- **Status:** Cause found (Task Q); fixture and docs fix in Task R
+- **Cause:** the package manager is decided only by a lockfile (with a `packageManager` field as a fallback). With neither, the `build` capability is marked blocked even when the project has no build script, which blocks the whole static stage. The configured `node test.mjs` check bypasses the package-manager check and passes. Whether an undeclared capability should be skipped instead is decision D-19.
+- **Workaround:** add a lockfile or a `packageManager` field to the baseline commit.
 
 ### P-23. A needs_fix plan review shows "No findings were recorded"
 
-- **Status:** Confirmed; fix in progress (Task Q diagnosis, then a task)
-- **Evidence (2026-10-11):** the reviewer's accepted reply had six top-level findings (one error: STEP-1 verification is behavioral only and cannot detect validation, try/catch, or module-level state; warnings: the new assertion is appended after the success banner, and FR-4 has no automated check; info: unmapped data requirements, an "or equivalent import check" escape hatch). The gate printed none, and the human approved blind with `--accept-findings`. The gate reads only the stored artifact content, not the reply's top-level findings.
-- **Workaround:** read the findings from the recording of the accepted attempt before approving.
+- **Status:** Cause found (Task Q); fix in Task R (D-18 option 1)
+- **Cause:** the stored review contained `verdict` and `findingsBySeverity` (six strings) and no `findings` key, which is the only key the gate reads. The reply's top-level findings are validated but not persisted.
 
-### P-24. Inconclusive results print "Unknown error" and clip findings at 120 characters
+### P-24. Inconclusive results print "Unknown error"; findings are clipped at 120 characters
 
-- **Status:** Open (Task Q or a small follow-up)
+- **Status:** Cause found (Task Q); fix in Task R
+- **Cause:** an inconclusive stage commits no event and carries no error object, so the CLI falls back to "Unknown error". Findings are clipped by the 120-character line limit.
 
 ---
 
