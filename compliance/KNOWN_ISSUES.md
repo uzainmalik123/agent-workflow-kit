@@ -41,7 +41,7 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ### P-6. A plan_review needs_fix dead-ends in the fixer
 
-- **Status:** Confirmed by Task I; fix specified in D-13 (Task N)
+- **Status:** Resolved in Tasks N and N2
 - **Evidence:** the fixer is authorized to write zero paths, has no output slot for the plan, and cannot change its digest (hashed before human approval). Every path ends in `feature_failed` after up to 5 attempts, or an unresumable `fixing` state. The fix guard and the pre-approval scope check also contradict each other (a path the plan names is writable under one and refused under the other).
 
 ### P-7. One malformed model reply kills the run (no retry)
@@ -91,7 +91,7 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ### P-16. The CLI hides findings and offers no way out of a failed feature
 
-- **Status:** Open (Task N)
+- **Status:** Mitigated: findings render at the gate and in status, and agentflow abandon exists.
 - **Evidence (Task I):** review findings are never rendered; `agentflow status` omits the error and fix attempts; there is no resume, retry, or abandon command; `failFeature()` is unwired. Re-running a stuck feature burns the remaining attempts. The error message is not persisted on the session.
 
 ### P-17. A CLI test exercises a copy of the run loop
@@ -101,10 +101,13 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ### P-18. The plan-review gate fails open on unreadable reviews
 
-- **Status:** Mitigated in Task N2 (this branch); one gap remains open, see below
-- **Evidence (Task N, `orchestration/src/plan-review.ts`):** a stored `plan_review` artifact that is missing, unparseable, or in an unrecognized shape yielded an empty report with `unresolved: false`, so `approve plan` proceeded without `--accept-findings` and without showing findings, even if the stage outcome was `needs_fix`. The reader trusted the model-authored artifact shape.
-- **Fix (Task N2):** the reader fails closed. Only a verdict in `PLAN_REVIEW_RESOLVED_VERDICTS` (`pass`, `passed`, `approved`, `ok`, `success`, case- and separator-insensitive) with no `error`-severity finding is resolved; a missing, unparseable, or empty artifact is unresolved with the reason "review could not be read", and the `approve plan` refusal names the verdict value or that reason. Covered in `tests/plan-review-report.test.ts` and `tests/cli-d13-plan-review-gate.test.ts`.
-- **Remaining (open):** an inconsistent reviewer — stage outcome `needs_fix` with an artifact verdict that reads as resolved — cannot be detected at approval time: the outcome is not persisted (session, events, and recordings carry no stage outcome; both outcomes commit the same `advance` event), and deriving it would need a new session field, which was not added. A reviewer that both reports `needs_fix` and writes a passing verdict with no error findings bypasses the gate. Options: accept the gap, persist the outcome (schema change, versioned decision), or treat the artifact verdict as authoritative.
+- **Status:** Mitigated in Task N2 (commit 7d5f2e3)
+- **Detail:** a missing, unparseable, or empty review, or an unknown verdict, is unresolved and `approve plan` refuses without `--accept-findings`. Passing verdicts: pass, passed, approved, ok, success (case and separator insensitive), and no error-severity finding. A missing review with `--accept-findings` still fails because approval needs the bytes.
+
+### P-19. The stage outcome is not persisted
+
+- **Status:** Open, decision needed (D-17)
+- **Evidence (Task N2):** `FeatureSession` carries no stage outcome, and both `success` and `needs_fix` from plan_review commit the same `advance` event. A reviewer that writes a passing verdict over a `needs_fix` outcome cannot be detected at approval time. Options: accept the gap, persist the outcome (a schema or envelope change needing a versioned decision), or declare the artifact's verdict authoritative.
 
 ---
 
