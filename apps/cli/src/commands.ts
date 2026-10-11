@@ -18,6 +18,7 @@ import { parseStatus } from "@agent-workflow-kit/workspace";
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
 import { createStageProgressReporter } from "./progress.js";
 import { findLatestRecording } from "./recordings.js";
+import { collectUsage, formatUsageTable, formatUsageTotalsLine, usageToJson } from "./usage.js";
 import { nextStep, formatNext } from "./next-step.js";
 import { createRealStack, type OrchestratorStack } from "./stack.js";
 import { join, dirname, resolve } from "node:path";
@@ -644,6 +645,15 @@ export function createCli(options: CreateCliOptions = {}): Command {
           lines.push(...formatPlanReview(await storedPlanReview(store, targetFeatureId)));
         }
 
+        // Token usage totals, best-effort and read-only like the recording line
+        // above: a feature with no recordings gets a "no recorded attempts"
+        // line, and an unreadable cache changes nothing else about status.
+        try {
+          lines.push(formatUsageTotalsLine(await collectUsage(repoRoot, targetFeatureId)));
+        } catch {
+          // Best-effort by design; status must keep working with no usage data.
+        }
+
         console.log(lines.join("\n"));
 
         // What to do now, from whatever state the feature is in. Same stream as the status
@@ -660,6 +670,42 @@ export function createCli(options: CreateCliOptions = {}): Command {
             ),
           ),
         );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
+        exit(1);
+      }
+    });
+
+  program
+    .command("usage")
+    .description("Show recorded token usage per stage and attempt (as reported by OpenCode, best effort)")
+    .argument("[feature-id]", "Feature ID to show usage for (defaults to most recent)")
+    .option("--json", "Output usage as JSON")
+    .action(async (featureId: string | undefined, opts: { json?: boolean }) => {
+      try {
+        const repoRoot = getRepoRoot(cwd());
+        // Read-only like `status`: usage is derived from invocation recordings
+        // in the project and the workspace cache, so no agent runtime is needed.
+        const store = createFeatureSessionStore(repoRoot);
+
+        const targetFeatureId = await getTargetFeatureId(store, exit, featureId);
+        if (targetFeatureId === null) {
+          return;
+        }
+
+        // Touch the session so an unknown feature id fails the same way
+        // `status` fails, rather than printing an empty usage table for it.
+        await store.load(targetFeatureId);
+
+        const summary = await collectUsage(repoRoot, targetFeatureId);
+
+        if (opts.json === true) {
+          console.log(JSON.stringify(usageToJson(targetFeatureId, summary), null, 2));
+          return;
+        }
+
+        console.log(formatUsageTable(targetFeatureId, summary));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Error: ${message}`);

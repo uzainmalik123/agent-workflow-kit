@@ -193,6 +193,25 @@ export type {
 } from "./diagnostics.js";
 
 export {
+  annotateInvocationUsage,
+  exportSessionUsage,
+  findUsageForRun,
+  isAvailableUsage,
+  listSessionIds,
+  parseUsageFromExport,
+  unavailableUsage,
+  usageFromManifestValue,
+  USAGE_LOOKUP_TIMEOUT_MS,
+} from "./usage.js";
+export type {
+  AvailableInvocationUsage,
+  InvocationUsage,
+  UnavailableInvocationUsage,
+  UsageLookupOptions,
+  UsageTotals,
+} from "./usage.js";
+
+export {
   advertisesFlag,
   DEBUG_AGENTS_COMMAND,
   DEFAULT_CAPABILITY_PROBE_TIMEOUT_MS,
