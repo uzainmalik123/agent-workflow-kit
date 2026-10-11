@@ -10,7 +10,7 @@ An agent-independent, deterministic software development workflow toolkit that s
 - Persistence layer (`adapters/persistence/`) for repository-local feature sessions under `.agentflow/features/` with atomic writes and concurrency control.
 - Project discovery and verification (`adapters/project/`) that selects project commands (lint/typecheck/test/build/runtime), runs them as separate processes, and produces deterministic evidence.
 - Isolated execution (`adapters/workspace/`) in detached Git worktrees at approved commits, with lease management, scope enforcement, and restoration of unauthorized changes.
-- CLI (`apps/cli/`) with `init`, `start`, `status`, `run`, and `approve` commands.
+- CLI (`apps/cli/`) with `init`, `start`, `status`, `run`, `approve`, and `next` commands (every command ends with a `Next:` line saying what to run now).
 - OpenCode V2 adapter (`adapters/opencode/`) with role-based profiles (read/write), least-privilege permissions, structured JSON protocol, and configuration isolation outside the target repo.
 - Build produces distributable packages; 1185 tests pass; smoke test passes.
 
@@ -94,24 +94,41 @@ cd /path/to/your/project
 git init  # if not already a repo
 node /path/to/agent-workflow-kit/apps/cli/dist/cli.js init
 # Creates .agentflow/, agent-workflow.config.json
+# Next: edit agent-workflow.config.json so the commands match the project,
+# commit it, then start:
 
 node /path/to/agent-workflow-kit/apps/cli/dist/cli.js start \
   --feature-id F-001 \
   --title "Your feature" \
   --request "What you want done" \
   --slug your-feature-slug
+# Next: agentflow run F-001
 
-node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run
-# Runs stages until a human gate (plan or push approval)
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run F-001
+# Runs stages until a human gate (plan or push approval), then says what to do next
 
-node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve plan
-# After reviewing the generated plan
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js status F-001
+# Review the generated plan (and the plan-review findings, if any)
 
-node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run
-# Runs post-approval stages until push gate
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve plan F-001
+# Approvals only move the workflow forward; nothing runs until the next command:
+# Next: agentflow run F-001
 
-node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve push --actor "your-name"
-# Creates branch, commits, pushes to origin
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run F-001
+# Runs post-approval stages until the push gate
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js status F-001
+# Read the final summary before deciding
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve push F-001 --actor "your-name"
+# Records permission to publish; then `run` commits and pushes:
+# Next: agentflow run F-001
+
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run F-001
+# Commits and pushes, then reports completion
+
+# Lost at any point? This prints the one recommended command and why:
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js next F-001
 ```
 
 **Planned** (does not work yet):

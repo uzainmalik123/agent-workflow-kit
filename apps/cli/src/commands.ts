@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { WorkflowState } from "@agent-workflow-kit/core";
 import { createFeatureSessionStore } from "@agent-workflow-kit/persistence";
 import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/project";
 import {
@@ -17,6 +18,7 @@ import { parseStatus } from "@agent-workflow-kit/workspace";
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
 import { createStageProgressReporter } from "./progress.js";
 import { findLatestRecording } from "./recordings.js";
+import { nextStep, formatNext } from "./next-step.js";
 import { createRealStack, type OrchestratorStack } from "./stack.js";
 import { join, dirname, resolve } from "node:path";
 import { mkdir, writeFile, readFile, lstat } from "node:fs/promises";
@@ -561,6 +563,23 @@ export function createCli(options: CreateCliOptions = {}): Command {
     .name("agentflow")
     .description("Agent Workflow Kit CLI")
     .version(packageVersion, "-v, --version", "Show version")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Typical sequence (approvals only move the workflow forward; 'run' does the work):",
+        '  agentflow init',
+        '  agentflow start --feature-id F-001 --title "..." --request "..."',
+        "  agentflow run F-001                  # advances until a human gate",
+        "  agentflow status F-001               # review the plan",
+        "  agentflow approve plan F-001         # then 'agentflow run F-001' does the work",
+        "  agentflow run F-001                  # advances until the push gate",
+        "  agentflow status F-001               # read the final summary",
+        "  agentflow approve push F-001",
+        "  agentflow run F-001                  # commits and pushes",
+        "  agentflow next F-001                 # what to do now, from any state",
+      ].join("\n"),
+    )
     .hook("preAction", (thisCommand) => {
       const opts = thisCommand.opts<{ verbose?: boolean }>();
       if (opts.verbose) {
@@ -575,6 +594,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
       try {
         const repoRoot = getRepoRoot(cwd());
         await initializeProject(repoRoot);
+        console.log(
+          `Next: edit ${PROJECT_CONFIG_FILENAME} so the verification commands match this project, commit it, then run 'agentflow start --feature-id F-001 --title "<title>"'.`,
+        );
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Error: ${message}`);
@@ -623,6 +645,58 @@ export function createCli(options: CreateCliOptions = {}): Command {
         }
 
         console.log(lines.join("\n"));
+
+        // What to do now, from whatever state the feature is in. Same stream as the status
+        // itself, appended after it: the lines above are unchanged.
+        const statusUnresolved =
+          session.machine.state === WorkflowState.AwaitingPlanApproval
+            ? (await storedPlanReview(store, targetFeatureId)).unresolved
+            : undefined;
+        console.log(
+          formatNext(
+            nextStep(
+              session,
+              statusUnresolved === undefined ? {} : { planReviewUnresolved: statusUnresolved },
+            ),
+          ),
+        );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Error: ${message}`);
+        exit(1);
+      }
+    });
+
+  program
+    .command("next")
+    .description("Show the recommended next command for a feature")
+    .argument("<feature-id>", "Feature ID to inspect")
+    .action(async (featureId: string) => {
+      try {
+        const repoRoot = getRepoRoot(cwd());
+        // Read-only like `status`: the recommendation is derived from persisted state, so no
+        // agent runtime is needed.
+        const store = createFeatureSessionStore(repoRoot);
+
+        let session;
+        try {
+          session = await store.load(featureId);
+        } catch {
+          console.error(`Error: unknown feature id "${featureId}". No session exists for it.`);
+          exit(1);
+          return;
+        }
+
+        const unresolved =
+          session.machine.state === WorkflowState.AwaitingPlanApproval
+            ? (await storedPlanReview(store, featureId)).unresolved
+            : undefined;
+        const step = nextStep(
+          session,
+          unresolved === undefined ? {} : { planReviewUnresolved: unresolved },
+        );
+        console.log(`Next: ${step.command}`);
+        console.log(step.reason);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Error: ${message}`);
@@ -657,6 +731,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
 
         if (result.status === "created") {
           console.log(`Created feature ${result.featureId} (${result.state})`);
+          // The new feature is in `draft`, a machine-driven state, so the recommendation is the
+          // same one `nextStep` gives there, derived from the persisted session.
+          console.log(formatNext(nextStep(await stack.store.load(result.featureId))));
         } else {
           console.error(`Failed to create feature: ${result.error?.message ?? "Unknown error"}`);
           exit(1);
@@ -773,11 +850,32 @@ export function createCli(options: CreateCliOptions = {}): Command {
               }
             }
 
+            // What to do now that the workflow is waiting on a human. Same stream as the pause
+            // message above; silenced by --quiet like any other stdout guidance from this command.
+            if (opts.quiet !== true) {
+              const paused = await stack.store.load(targetFeatureId);
+              const pausedUnresolved =
+                paused.machine.state === WorkflowState.AwaitingPlanApproval
+                  ? (await storedPlanReview(stack.store, targetFeatureId)).unresolved
+                  : undefined;
+              console.log(
+                formatNext(
+                  nextStep(
+                    paused,
+                    pausedUnresolved === undefined ? {} : { planReviewUnresolved: pausedUnresolved },
+                  ),
+                ),
+              );
+            }
+
             return;
           }
 
           if (result.status === "terminal") {
             console.log(`Workflow reached terminal state: ${result.state}`);
+            if (opts.quiet !== true) {
+              console.log(formatNext(nextStep(await stack.store.load(targetFeatureId))));
+            }
             return;
           }
 
@@ -887,6 +985,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
 
         if (result.status === "gate_approved") {
           console.log(`Plan approved. Workflow advanced to ${result.state}`);
+          // The approval only moved the workflow forward; nothing has run yet.
+          console.log(
+            `Next: agentflow run ${targetFeatureId} - approval only moved the workflow forward; 'agentflow run ${targetFeatureId}' does the work.`,
+          );
         } else {
           console.error(`Plan approval failed: ${result.error?.message ?? "Unknown error"}`);
           exit(1);
@@ -919,6 +1021,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
 
         if (result.status === "gate_approved") {
           console.log(`Push approved. Workflow advanced to ${result.state}`);
+          // The approval only recorded permission to publish; nothing has run yet.
+          console.log(
+            `Next: agentflow run ${targetFeatureId} - approval only recorded permission to publish; 'agentflow run ${targetFeatureId}' commits and pushes.`,
+          );
         } else {
           console.error(`Push approval failed: ${result.error?.message ?? "Unknown error"}`);
           exit(1);
@@ -959,6 +1065,8 @@ export function createCli(options: CreateCliOptions = {}): Command {
           console.log(
             `Feature ${targetFeatureId} abandoned; the workflow reached terminal state ${result.state}.`,
           );
+          // A failed feature cannot be resumed; the recommendation comes from the terminal state.
+          console.log(formatNext(nextStep(await stack.store.load(targetFeatureId))));
           return;
         }
 
