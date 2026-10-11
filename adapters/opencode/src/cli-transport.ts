@@ -10,6 +10,13 @@ import {
 } from "./process.js";
 import { describeRecordingError, recordStageInvocation } from "./diagnostics.js";
 import type { RecordedInvocation } from "./diagnostics.js";
+import {
+  annotateInvocationUsage,
+  findUsageForRun,
+  listSessionIds,
+  unavailableUsage,
+  type InvocationUsage,
+} from "./usage.js";
 import { createActivityRelay, type ActivityRelay } from "./progress.js";
 import { OPENCODE_RUNTIME_CONFIG_ENVIRONMENT_VARIABLE } from "./runtime-config.js";
 import {
@@ -321,6 +328,13 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
       forced,
     });
 
+    // Usage observation only: the session IDs visible before this run, so the
+    // session created by this run can be identified afterwards with
+    // `session list` / `session export`. Best-effort and never part of the
+    // stage invocation itself: the argv, format, prompt, and response parsing
+    // below are exactly what they were before usage existed.
+    const sessionsBefore = await this.#listSessionsBefore(request);
+
     let result: RunProcessResult;
     let observation: ProcessOutcomeObservation | null = null;
     // When a caller wants progress, the child's stderr is offered line by line while the run is
@@ -353,7 +367,8 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
       relay?.flush();
       // The recording is written before the refusal leaves this function, so even a failed run
       // leaves behind what it actually received and said. Best-effort: it cannot mask `error`.
-      await this.#recordInvocation(request, invocation, observation, error);
+      const failedRecording = await this.#recordInvocation(request, invocation, observation, error);
+      await this.#recordUsage(request, sessionsBefore, failedRecording);
 
       if (error instanceof OpenCodeAdapterError) {
         throw error;
@@ -367,6 +382,7 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
     // into the same manifest once it has parsed the reply: parsing happens after this function
     // returns, so the transport cannot know the verdict when it writes the recording.
     const recording = await this.#recordInvocation(request, invocation, observation, null);
+    await this.#recordUsage(request, sessionsBefore, recording);
 
     if (format === "json") {
       const stream = parseEventStream(result.stdout);
@@ -426,6 +442,59 @@ export class OpenCodeCliTransport implements OpenCodeTransport {
         error: describeRecordingError(error),
       },
     );
+  }
+
+  /**
+   * The session IDs visible before the stage's own `opencode run`.
+   *
+   * Observation only and best-effort: a lookup that fails yields an empty set,
+   * in which case the usage step falls back to the newest session afterwards.
+   * It runs `opencode session list` in the stage working directory and never
+   * touches the stage invocation itself.
+   */
+  async #listSessionsBefore(request: OpenCodeTransportRequest): Promise<readonly string[]> {
+    if (this.#options.recordInvocations === false) {
+      return [];
+    }
+
+    try {
+      return await listSessionIds(request.workingDirectory, {
+        ...(this.#options.command === undefined ? {} : { command: this.#options.command }),
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Records token usage into the invocation's own manifest.
+   *
+   * Best-effort like the recording itself: the session created by this run is
+   * identified by diffing the before/after session list and exported for its
+   * tokens and cost, and any failure records an unavailable marker. A usage
+   * lookup never throws, never changes the stage's outcome, and never alters
+   * how the reply is extracted.
+   */
+  async #recordUsage(
+    request: OpenCodeTransportRequest,
+    sessionsBefore: readonly string[],
+    recording: RecordedInvocation | null,
+  ): Promise<void> {
+    if (recording === null || this.#options.recordInvocations === false) {
+      return;
+    }
+
+    let usage: InvocationUsage;
+
+    try {
+      usage = await findUsageForRun(sessionsBefore, request.workingDirectory, {
+        ...(this.#options.command === undefined ? {} : { command: this.#options.command }),
+      });
+    } catch {
+      usage = unavailableUsage("usage lookup failed");
+    }
+
+    await annotateInvocationUsage(recording.manifestPath, usage);
   }
 }
 

@@ -15,7 +15,10 @@ import type { ProcessOutcomeObservation } from "./process.js";
  * ```text
  * <workingDirectory>/.agentflow/recordings/<featureId>/<stage>/<startedAt>-<suffix>/
  *   invocation.json   command, argv, cwd, startedAt, durationMs, exitCode, termination, error kind,
- *                     plus the executor's reply verdict — attempt number and response outcome
+ *                     plus the executor's reply verdict — attempt number and response outcome —
+ *                     plus best-effort token usage { inputTokens, outputTokens, reasoningTokens,
+ *                     cacheReadTokens, cacheWriteTokens, cost, source } as reported by OpenCode
+ *                     (or an unavailable marker when it could not be read)
  *   stdout.txt        the raw stdout capture
  *   stderr.txt        the raw stderr capture
  * ```

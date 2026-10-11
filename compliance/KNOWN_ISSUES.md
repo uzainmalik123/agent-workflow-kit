@@ -126,8 +126,9 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ### P-23. A needs_fix plan review shows "No findings were recorded"
 
-- **Status:** Open (Task Q)
-- **Evidence:** plan_review reported needs_fix; the gate displayed no findings and the human had to approve blind with `--accept-findings`. Hypothesis: the reply's top-level findings are not persisted and the gate reads only the artifact content.
+- **Status:** Confirmed; fix in progress (Task Q diagnosis, then a task)
+- **Evidence (2026-10-11):** the reviewer's accepted reply had six top-level findings (one error: STEP-1 verification is behavioral only and cannot detect validation, try/catch, or module-level state; warnings: the new assertion is appended after the success banner, and FR-4 has no automated check; info: unmapped data requirements, an "or equivalent import check" escape hatch). The gate printed none, and the human approved blind with `--accept-findings`. The gate reads only the stored artifact content, not the reply's top-level findings.
+- **Workaround:** read the findings from the recording of the accepted attempt before approving.
 
 ### P-24. Inconclusive results print "Unknown error" and clip findings at 120 characters
 

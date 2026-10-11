@@ -168,3 +168,130 @@ export async function findLatestRecording(
 
   return latest;
 }
+
+/** One invocation manifest, fully read, for usage aggregation. */
+export interface AllStageRecording extends LatestStageRecording {
+  /** The 1-based attempt number from the Task M annotation, or `null` when absent. */
+  readonly attempt: number | null;
+  /** The reply verdict from the Task M annotation, or `null` when absent. */
+  readonly responseOutcome: string | null;
+  /** The raw parsed manifest, so usage can be derived without a second read. */
+  readonly manifest: Record<string, unknown>;
+}
+
+function toAttemptNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    return null;
+  }
+
+  return value;
+}
+
+async function readFullInvocation(manifestPath: string): Promise<AllStageRecording | null> {
+  let text: string;
+
+  try {
+    text = await readFile(manifestPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const stage = record["stage"];
+  const startedAt = record["startedAt"];
+  const durationMs = record["durationMs"];
+
+  if (typeof stage !== "string" || stage.length === 0) {
+    return null;
+  }
+
+  if (typeof startedAt !== "string" || Number.isNaN(Date.parse(startedAt))) {
+    return null;
+  }
+
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
+    return null;
+  }
+
+  const attempt = toAttemptNumber(record["attempt"]);
+  const responseOutcome =
+    typeof record["responseOutcome"] === "string" ? record["responseOutcome"] : null;
+
+  return {
+    stage,
+    startedAt,
+    durationMs,
+    folder: manifestPath.slice(0, -INVOCATION_MANIFEST_FILENAME.length - 1),
+    attempt,
+    responseOutcome,
+    manifest: record,
+  };
+}
+
+async function fullRecordingsIn(
+  root: string,
+  featureSegment: string,
+): Promise<readonly AllStageRecording[]> {
+  const featureDirectory = join(root, featureSegment);
+  const found: AllStageRecording[] = [];
+
+  for (const stage of await listDirectory(featureDirectory)) {
+    const stageDirectory = join(featureDirectory, stage);
+
+    for (const invocation of await listDirectory(stageDirectory)) {
+      const folder = join(stageDirectory, invocation);
+      const manifest = await readFullInvocation(join(folder, INVOCATION_MANIFEST_FILENAME));
+
+      if (manifest !== null) {
+        found.push(manifest);
+      }
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Every invocation recording for one feature, across both recording locations.
+ *
+ * Covers the project's own `.agentflow/recordings/` and every workspace in the
+ * cache whose sidecar vouches for this repository, so write-stage attempts in
+ * the workspace cache are counted alongside read-stage attempts. Sorted by
+ * `startedAt`, oldest first. Best-effort like `findLatestRecording`: an
+ * unreadable manifest contributes nothing.
+ */
+export async function findAllRecordings(
+  repoRoot: string,
+  featureId: string,
+): Promise<readonly AllStageRecording[]> {
+  const featureSegment = safeRecordingSegment(featureId);
+
+  if (featureSegment.length === 0) {
+    return [];
+  }
+
+  const root = resolve(repoRoot);
+  const found: AllStageRecording[] = [];
+
+  for (const recordingsRoot of await recordingRoots(root)) {
+    for (const candidate of await fullRecordingsIn(recordingsRoot, featureSegment)) {
+      found.push(candidate);
+    }
+  }
+
+  found.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+
+  return found;
+}
