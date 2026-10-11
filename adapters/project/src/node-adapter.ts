@@ -78,11 +78,15 @@ export function planNodeVerification(input: {
   const halves = TEST_FALLBACK_SCRIPTS.filter((name) => scripts.has(name));
 
   const capabilities: Record<VerificationCapability, CapabilityDetection> = {
-    lint: unusable
-      ? detection("lint", "blocked", "package_manager_unknown", lintScript, packageManagerReason)
-      : lintScript === null
+    // D-19: the script (or its absence) is decided before the package manager. No script declared
+    // means skipped with script_absent; a declared script with an unknown manager stays blocked.
+    // The required capability set, the manager detection rules, and the D-10 denylist are unchanged.
+    lint:
+      lintScript === null
         ? detection("lint", "unavailable", "script_absent", null, 'The manifest declares no "lint" script.')
-        : detection("lint", "applicable", "detected", lintScript, `The manifest declares a "${lintScript}" script.`),
+        : unusable
+          ? detection("lint", "blocked", "package_manager_unknown", lintScript, packageManagerReason)
+          : detection("lint", "applicable", "detected", lintScript, `The manifest declares a "${lintScript}" script.`),
     typecheck: !isTypeScript
       ? detection(
           "typecheck",
@@ -91,16 +95,16 @@ export function planNodeVerification(input: {
           null,
           "The project declares no TypeScript configuration or dependency, so it has no typecheck stage.",
         )
-      : unusable
-        ? detection("typecheck", "blocked", "package_manager_unknown", typecheckScript, packageManagerReason)
-        : typecheckScript === null
-          ? detection(
-              "typecheck",
-              "unavailable",
-              "script_absent",
-              null,
-              "The project is TypeScript but declares no typecheck script.",
-            )
+      : typecheckScript === null
+        ? detection(
+            "typecheck",
+            "unavailable",
+            "script_absent",
+            null,
+            "The project is TypeScript but declares no typecheck script.",
+          )
+        : unusable
+          ? detection("typecheck", "blocked", "package_manager_unknown", typecheckScript, packageManagerReason)
           : detection(
               "typecheck",
               "applicable",
@@ -108,11 +112,12 @@ export function planNodeVerification(input: {
               typecheckScript,
               `The manifest declares a "${typecheckScript}" script.`,
             ),
-    test: unusable
-      ? detection("test", "blocked", "package_manager_unknown", wholeSuite, packageManagerReason)
-      : wholeSuite === null && halves.length === 0
+    test:
+      wholeSuite === null && halves.length === 0
         ? detection("test", "unavailable", "script_absent", null, "The manifest declares no test script.")
-        : detection(
+        : unusable
+          ? detection("test", "blocked", "package_manager_unknown", wholeSuite, packageManagerReason)
+          : detection(
             "test",
             "applicable",
             "detected",
@@ -121,11 +126,12 @@ export function planNodeVerification(input: {
               ? `The manifest declares ${halves.map((name) => `"${name}"`).join(" and ")}.`
               : 'The manifest declares a "test" script, which is the whole suite.',
           ),
-    build: unusable
-      ? detection("build", "blocked", "package_manager_unknown", buildScript, packageManagerReason)
-      : buildScript === null
+    build:
+      buildScript === null
         ? detection("build", "unavailable", "script_absent", null, 'The manifest declares no "build" script.')
-        : detection("build", "applicable", "detected", buildScript, `The manifest declares a "${buildScript}" script.`),
+        : unusable
+          ? detection("build", "blocked", "package_manager_unknown", buildScript, packageManagerReason)
+          : detection("build", "applicable", "detected", buildScript, `The manifest declares a "${buildScript}" script.`),
     runtime: detection(
       "runtime",
       "unsupported",

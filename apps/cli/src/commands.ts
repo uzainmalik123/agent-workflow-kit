@@ -17,6 +17,7 @@ import {
 } from "@agent-workflow-kit/orchestration";
 import { parseStatus } from "@agent-workflow-kit/workspace";
 import type { FeatureSession } from "@agent-workflow-kit/persistence";
+import { formatCatalogCode, formatVerificationCheck, formatVerificationSummary, ORCHESTRATION_STATUS_CODES } from "./error-catalog.js";
 import { createStageProgressReporter } from "./progress.js";
 import { findLatestRecording } from "./recordings.js";
 import { collectUsage, formatUsageTable, formatUsageTotalsLine, usageToJson } from "./usage.js";
@@ -578,19 +579,59 @@ function inconclusiveLines(result: OrchestrationResult): readonly string[] {
     ),
   );
   lines.push(...formatFindings(result.findings));
-  const blocked = (result.verification?.checks ?? []).filter((check) => check.status === "blocked");
+  // D-19/D-20: blocked checks stay actionable and skipped checks are visible as
+  // `skipped (<reason>)` via the one catalog (verification summary lines).
+  const checks = result.verification?.checks ?? [];
+  const blocked = checks.filter((check) => check.status === "blocked");
+  const skipped = checks.filter((check) => check.status === "skipped");
   lines.push(
     ...formatFindings(
       blocked.map((check) => ({
         severity: "warning" as const,
-        message: `Blocked ${check.id} (${check.reason ?? "no reason"}): ${check.detail}`,
+        message: formatVerificationCheck({
+          id: `Blocked ${check.id}`,
+          status: check.status,
+          reason: check.reason,
+          detail: check.detail,
+        }),
       })),
     ),
   );
+  if (skipped.length > 0) {
+    for (const line of formatVerificationSummary(
+      skipped.map((check) => ({ id: check.id, status: check.status, reason: check.reason, detail: check.detail })),
+    )) {
+      lines.push(...formatFindings([{ severity: "info" as const, message: line }]));
+    }
+  }
   if (lines.length === 1) {
-    lines.push(`  cause not determined; see evidence with \`agentflow status ${result.featureId}\`.`);
+    lines.push(
+      ...formatCatalogCode("inconclusive", { featureId: result.featureId }),
+    );
   }
   return lines;
+}
+
+/**
+ * Lines for any orchestration result that carries an error (or should have).
+ *
+ * Never prints "Unknown error": when no error object is present the catalog entry for the
+ * status/error code says "cause not determined" with the evidence path and
+ * `agentflow status <id>`. The raw code is always in parentheses, lines are wrapped, and
+ * control characters are stripped by the catalog.
+ */
+function resultErrorLines(
+  result: { readonly status: string; readonly featureId: string; readonly error?: { readonly code: string; readonly message: string } | null },
+  fallbackCode?: string,
+): readonly string[] {
+  // Prefer the run status when the CLI prints statuses (executor_error, stage_failed,
+  // scope_violation): the orchestrator's error code for those (executor_threw,
+  // stage_reported_failure) is a different layer. Otherwise use the error code so specific
+  // refusals (illegal_transition, fix_*, approval_*, workspace_*) keep their raw code.
+  const statusCovered = (ORCHESTRATION_STATUS_CODES as readonly string[]).includes(result.status);
+  const code = statusCovered ? result.status : (result.error?.code ?? fallbackCode ?? result.status);
+  const detail = result.error?.message ?? null;
+  return formatCatalogCode(code, { featureId: result.featureId, detail });
 }
 
 /**
@@ -863,7 +904,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
           // same one `nextStep` gives there, derived from the persisted session.
           console.log(formatNext(nextStep(await stack.store.load(result.featureId))));
         } else {
-          console.error(`Failed to create feature: ${result.error?.message ?? "Unknown error"}`);
+          console.error("Failed to create feature:");
+          for (const line of resultErrorLines(result, "stage_failed")) {
+            console.error(line);
+          }
           exit(1);
         }
       } catch (error: unknown) {
@@ -1028,7 +1072,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
                 console.error(line);
               }
             } else {
-              console.error(`Workflow error (${result.status}): ${result.error?.message ?? "Unknown error"}`);
+              console.error(`Workflow error (${result.status}):`);
+            for (const line of resultErrorLines(result)) {
+              console.error(line);
+            }
 
               // Findings a stage reported on its way to the error, printed because a message about
               // *that* the run failed is what sends a human to the finding that says *why* (P-16).
@@ -1132,7 +1179,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
             `Next: agentflow run ${targetFeatureId} - approval only moved the workflow forward; 'agentflow run ${targetFeatureId}' does the work.`,
           );
         } else {
-          console.error(`Plan approval failed: ${result.error?.message ?? "Unknown error"}`);
+          console.error("Plan approval failed:");
+          for (const line of resultErrorLines(result, "approval_evidence_missing")) {
+            console.error(line);
+          }
           exit(1);
         }
       } catch (error: unknown) {
@@ -1168,7 +1218,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
             `Next: agentflow run ${targetFeatureId} - approval only recorded permission to publish; 'agentflow run ${targetFeatureId}' commits and pushes.`,
           );
         } else {
-          console.error(`Push approval failed: ${result.error?.message ?? "Unknown error"}`);
+          console.error("Push approval failed:");
+          for (const line of resultErrorLines(result, "approval_evidence_missing")) {
+            console.error(line);
+          }
           exit(1);
         }
       } catch (error: unknown) {
@@ -1235,7 +1288,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
-        console.error(`Abandon failed: ${result.error?.message ?? "Unknown error"}`);
+        console.error("Abandon failed:");
+        for (const line of resultErrorLines(result, "stage_failed")) {
+          console.error(line);
+        }
         exit(1);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
