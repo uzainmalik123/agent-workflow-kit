@@ -109,6 +109,16 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Open, decision needed (D-17)
 - **Evidence (Task N2):** `FeatureSession` carries no stage outcome, and both `success` and `needs_fix` from plan_review commit the same `advance` event. A reviewer that writes a passing verdict over a `needs_fix` outcome cannot be detected at approval time. Options: accept the gap, persist the outcome (a schema or envelope change needing a versioned decision), or declare the artifact's verdict authoritative.
 
+### P-20. The CLI never says what to do next
+
+- **Status:** Open (Task O)
+- **Evidence (user report, 2026-10-11):** after `approve plan` the CLI prints "advanced to implementing" and nothing runs until `agentflow run <id>` is called again; the same applies to `approve push`. A first-time user cannot tell how to proceed.
+
+### P-21. Token usage is not tracked per feature
+
+- **Status:** Open (Task P)
+- **Evidence:** recordings store argv, stdout, stderr, exit code, and duration, not usage. OpenCode exposes usage through its JSON event stream, `opencode stats`, session export, and its session database; completeness of the JSON stream is reported to be best-effort. V2 behavior is unverified.
+
 ---
 
 ## Security-relevant
