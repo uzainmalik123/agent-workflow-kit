@@ -143,6 +143,10 @@ function startupBlock(
     }
   }
 
+  // D-19: a declared script or a configured command is established above before the
+  // package-manager check below. A capability with no script and no configured command never
+  // reaches here: it is reported via absentCheck with the detection reason (script_absent means
+  // skipped). A configured command is unaffected by the manager check and runs as declared.
   if (command.source === "configured") {
     // A configured command that names no script involves no package manager, so there is nothing left
     // to check: no manager to identify, no adjacent script name to imply, and no dependency install
