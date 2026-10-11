@@ -126,3 +126,10 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 - **Context:** see P-14. Models sometimes return the correct JSON object without the markdown fence.
 - **Decision (draft):** a reply is accepted if it is exactly one fenced JSON block with nothing after it (today's rule), OR if the whole trimmed reply is a single JSON object and nothing else. Prose before or after, two objects, or an object in the middle of text are rejected. The same schema validation applies to both forms.
 - **Basis:** the contract's purpose is unambiguous extraction with no prose smuggling; a bare-object-only reply preserves that. It does change PRD §10.8 and needs a versioned decision.
+
+## D-18. Plan-review findings must reach the human at the gate
+
+- **Status:** Proposed
+- **Context:** see P-23. D-13 sends plan-review findings to the human, but the gate currently shows only what the reviewer put in the artifact content.
+- **Options:** (1) the reviewer role must include `verdict` and `findings` in the artifact content (prompt plus contract test, model-dependent); (2) the orchestrator persists the validated stage-result findings (changes stored outputs and approval evidence, needs a versioned decision); (3) the CLI reads findings from the recording (rejected: recordings are diagnostics, not evidence).
+- **Recommendation:** (1) now, (2) if models fail to comply in practice.
