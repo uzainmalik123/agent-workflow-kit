@@ -95,7 +95,7 @@ export type {
   WriteOpenCodeProjectFilesOptions,
 } from "./agents.js";
 
-export { PLAN_EXAMPLE, RESPONSE_FENCE_REMINDER, buildStagePrompt } from "./prompts.js";
+export { PLAN_EXAMPLE, PLAN_REVIEW_EXAMPLE, RESPONSE_FENCE_REMINDER, buildStagePrompt } from "./prompts.js";
 export type { BuildStagePromptInput } from "./prompts.js";
 
 export {

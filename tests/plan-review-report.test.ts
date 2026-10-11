@@ -1,7 +1,6 @@
 import {
   formatFindings,
   formatPlanReview,
-  PLAN_REVIEW_LINE_LIMIT,
   PLAN_REVIEW_RESOLVED_VERDICTS,
   PLAN_REVIEW_UNREADABLE_REASON,
   planReviewReport,
@@ -209,11 +208,18 @@ describe("rendering a stored plan review", () => {
     expect(line).not.toContain("\u0007");
   });
 
-  it("cuts a line at the limit rather than letting it run on", () => {
-    const [line] = formatFindings([{ severity: "error", message: "x".repeat(400) }]);
+  it("wraps a long line at the terminal width instead of cutting it", () => {
+    const message = "x".repeat(400);
+    const lines = formatFindings([{ severity: "error", message }]);
 
-    expect(line?.length).toBe(PLAN_REVIEW_LINE_LIMIT);
-    expect(line?.endsWith("…")).toBe(true);
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(100);
+    }
+    expect(lines.some((line) => line.endsWith("…"))).toBe(false);
+    // Nothing is silently lost: the wrapped text reassembles to the full finding
+    // once wrapping whitespace is removed (a single over-long word is hard-split).
+    expect(lines.join("").replace(/\s/g, "")).toContain(message);
   });
 
   it("carries a finding's file and line when the review recorded them", () => {

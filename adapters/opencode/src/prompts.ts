@@ -85,6 +85,35 @@ export const PLAN_EXAMPLE = {
   ],
 } as const satisfies Plan;
 
+/**
+ * The concrete plan review the plan-review prompt shows, and the exact object
+ * the review contract test reads back through `planReviewReport`.
+ *
+ * One constant, two consumers: {@link renderPlanReviewShape} renders this value
+ * verbatim into the plan reviewer's prompt, and the contract test feeds the same
+ * object to `planReviewReport` for both verdicts and asserts the findings appear
+ * and the verdicts agree with `PLAN_REVIEW_RESOLVED_VERDICTS`. A change either
+ * side cannot honour — a renamed key, a new verdict spelling, a finding without
+ * `message` — fails that test instead of teaching a model to write a review the
+ * gate cannot read, which is how P-23 happened.
+ */
+export const PLAN_REVIEW_EXAMPLE = {
+  verdict: "needs_fix",
+  summary: "STEP-2 has no verification that checks the product.",
+  findings: [
+    {
+      severity: "warning",
+      message: "STEP-2 verification is behavioral only and cannot detect a wrong product.",
+      filePath: "src/multiply.mjs",
+      line: 12,
+    },
+    {
+      severity: "info",
+      message: "Consider splitting STEP-1 so the helper and its edge cases are separate.",
+    },
+  ],
+} as const;
+
 function renderContextEntry(entry: StageArtifactContext): string {
   const isText = isTextArtifactName(entry.name);
 
@@ -191,6 +220,35 @@ function renderFixPolicy(stage: StageExecutionRequest["stage"]): string {
   }
 
   return "- `needs_fix` is **not** available for this stage. A `needs_fix` outcome is rejected. Report a problem with `failed` or `inconclusive` instead.";
+}
+
+/**
+ * The shape of the `plan_review` artifact, rendered for the one stage that produces it.
+ *
+ * The example is shown rather than described because the load-bearing detail is the key set:
+ * `verdict` (exactly `pass` or `needs_fix`), `summary`, and `findings` (each with `severity`,
+ * `message`, and optional `filePath` and `line`). The gate reads only those keys from the stored
+ * artifact content — top-level response `findings` are validated but never persisted, and any other
+ * key (such as `findingsBySeverity`) is not read, so a review that puts its findings anywhere else
+ * reads at the gate as "No findings were recorded". The example is {@link PLAN_REVIEW_EXAMPLE},
+ * the same constant the contract test reads.
+ */
+function renderPlanReviewShape(request: StageExecutionRequest): string {
+  if (!request.outputs.some((spec) => spec.name === "plan_review")) {
+    return "";
+  }
+
+  return [
+    "## Plan review artifact shape",
+    "",
+    "Return the `plan_review` artifact as the JSON object below, with exactly these keys: `verdict`",
+    "is exactly `pass` or `needs_fix` (nothing else, no other spelling); `summary` is one or two",
+    "sentences; `findings` is an array in which each entry has `severity`, `message`, and optional",
+    "`filePath` and `line`. Put every finding in `findings`: any other key is not read at the approval",
+    "gate, and a review with no `findings` reads there as having recorded none.",
+    "",
+    fence("json", JSON.stringify(PLAN_REVIEW_EXAMPLE, null, 2)),
+  ].join("\n");
 }
 
 function renderResponseProtocol(request: StageExecutionRequest): string {
@@ -653,6 +711,7 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
   const definition = roleDefinition(request.role);
   const profile = profileForRole(request.role);
   const planShape = renderPlanShape(request);
+  const planReviewShape = renderPlanReviewShape(request);
 
   const sections: string[] = [
     `# Agent Workflow Kit: ${definition.label} on stage \`${request.stage}\``,
@@ -678,6 +737,7 @@ export function buildStagePrompt(input: BuildStagePromptInput): string {
     ["## Routed context", "", renderContext(request)].join("\n"),
     ["## Output slots you may fill", "", renderOutputs(request)].join("\n"),
     ...(planShape === "" ? [] : [planShape]),
+    ...(planReviewShape === "" ? [] : [planReviewShape]),
     ...(request.verification === null || request.verification === undefined
       ? []
       : [renderEvidence(request.verification)]),

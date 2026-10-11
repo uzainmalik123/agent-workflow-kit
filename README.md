@@ -86,6 +86,8 @@ pnpm verify         # lint + typecheck + test (1185 tests)
 pnpm verify:dist    # build + smoke
 ```
 
+A project needs a lockfile or a `packageManager` field in `package.json`, otherwise verification is blocked with `package_manager_unknown`.
+
 ## Using it on another project
 
 ```bash

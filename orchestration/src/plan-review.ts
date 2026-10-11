@@ -1,14 +1,23 @@
 import { isRecord } from "./result-validation.js";
 
 /**
- * How long one rendered line may get before it is cut.
+ * How long one rendered line may get before it is wrapped.
  *
- * A finding is model-authored text printed into a terminal: unbounded, it can run off the screen or
- * push everything a human needs above it out of view. One line per finding, capped here, keeps a
- * review scannable. The full text is never lost — it is still in the stored artifact, which is what
- * approval digests are taken over.
+ * Kept for compatibility with callers that imported it; the renderer no longer
+ * truncates. Findings wrap to the terminal width (100 columns when not a TTY)
+ * instead, so no finding text is silently lost. The full text was and remains
+ * in the stored artifact, which is what approval digests are taken over.
  */
 export const PLAN_REVIEW_LINE_LIMIT = 120;
+
+/** Width findings wrap to: the TTY width when available, otherwise 100 columns. */
+export function terminalFindingsWidth(): number {
+  const stdout = process.stdout as unknown as { columns?: unknown; isTTY?: unknown };
+  if (stdout.isTTY === true && typeof stdout.columns === "number" && Number.isFinite(stdout.columns)) {
+    return Math.max(40, Math.min(120, Math.floor(stdout.columns)));
+  }
+  return 100;
+}
 
 /**
  * The verdicts that count as a passing review, in their canonical form: lowercase, no separators.
@@ -234,13 +243,13 @@ function isResolvedVerdict(verdict: string): boolean {
 }
 
 /**
- * Strips what must not reach a terminal and fits the line to the limit.
+ * Strips what must not reach a terminal.
  *
  * Control characters go first because a model-authored message may carry a newline that would split
  * one finding across lines, or an escape sequence that would rewrite the terminal it is printed on.
  * They are replaced character by character rather than with a `[\u0000-\u001f]` pattern, which this
- * repository's lint refuses to allow anywhere. The clip comes last so it counts the line a human
- * actually sees.
+ * repository's lint refuses to allow anywhere. Wrapping (not clipping) happens afterwards, so no
+ * text is silently lost.
  */
 function renderLine(text: string): string {
   const printable = text
@@ -253,9 +262,80 @@ function renderLine(text: string): string {
     .replace(/ {2,}/g, " ")
     .replace(/\s+$/, "");
 
-  return printable.length <= PLAN_REVIEW_LINE_LIMIT
-    ? printable
-    : `${printable.slice(0, PLAN_REVIEW_LINE_LIMIT - 1)}…`;
+  return printable;
+}
+
+/**
+ * Wraps one printable line to a width with a hanging indent.
+ *
+ * The first line is emitted as-is; every continuation line starts with four
+ * spaces so wrapped findings stay visually attached to the finding they belong
+ * to. Words wrap; a single word longer than the width is split rather than
+ * pushing the line past the margin. Nothing is truncated.
+ */
+function wrapHanging(line: string, width: number): readonly string[] {
+  const safeWidth = Math.max(40, Math.floor(width));
+  if (line.length <= safeWidth) {
+    return [line];
+  }
+  const continuation = "    ";
+  const words = line.split(" ").filter((word) => word !== "");
+  const lines: string[] = [];
+  let current = "";
+  const pushCurrent = (): void => {
+    if (current === "") {
+      return;
+    }
+    lines.push(lines.length === 0 ? current : `${continuation}${current}`);
+    current = "";
+  };
+  for (const word of words) {
+    if (current === "") {
+      if (lines.length === 0 && word.length <= safeWidth) {
+        current = word;
+        continue;
+      }
+      if (lines.length === 0) {
+        // First line: hard-split an over-long opening word.
+        let rest = word;
+        lines.push(rest.slice(0, safeWidth));
+        rest = rest.slice(safeWidth);
+        while (rest.length > safeWidth - continuation.length) {
+          lines.push(`${continuation}${rest.slice(0, safeWidth - continuation.length)}`);
+          rest = rest.slice(safeWidth - continuation.length);
+        }
+        current = rest;
+        continue;
+      }
+      // Continuation line: hard-split an over-long word.
+      let rest = word;
+      while (rest.length > safeWidth - continuation.length) {
+        lines.push(`${continuation}${rest.slice(0, safeWidth - continuation.length)}`);
+        rest = rest.slice(safeWidth - continuation.length);
+      }
+      current = rest;
+      continue;
+    }
+    const candidate = `${current} ${word}`;
+    const limit = lines.length === 0 ? safeWidth : safeWidth - continuation.length;
+    if (candidate.length <= limit) {
+      current = candidate;
+      continue;
+    }
+    pushCurrent();
+    if (lines.length === 0 && word.length <= safeWidth) {
+      current = word;
+    } else {
+      let rest = word;
+      while (rest.length > safeWidth - continuation.length) {
+        lines.push(`${continuation}${rest.slice(0, safeWidth - continuation.length)}`);
+        rest = rest.slice(safeWidth - continuation.length);
+      }
+      current = rest;
+    }
+  }
+  pushCurrent();
+  return lines;
 }
 
 function locationOf(finding: ReportedFinding): string {
@@ -269,15 +349,22 @@ function locationOf(finding: ReportedFinding): string {
 }
 
 /**
- * Renders findings one line each: severity, message, and location when there is one.
+ * Renders findings wrapped to the terminal width, never truncated.
  *
  * Used for the review at the gate and for the findings a failed run reports, which is the same text
  * in both places for the same reason — a finding a human cannot read is a finding they cannot act
  * on. An empty list renders nothing at all, so a caller can print the result unconditionally.
+ * Each finding may produce several lines: the first carries `  [severity] message`, continuations
+ * carry a four-space hanging indent. Control characters are stripped; text is never cut with an
+ * ellipsis. `width` defaults to the terminal width (100 columns when not a TTY) and is exposed so
+ * tests can pin it.
  */
-export function formatFindings(findings: readonly ReportedFinding[]): readonly string[] {
-  return findings.map((finding) =>
-    renderLine(`  [${finding.severity}] ${finding.message}${locationOf(finding)}`),
+export function formatFindings(
+  findings: readonly ReportedFinding[],
+  width: number = terminalFindingsWidth(),
+): readonly string[] {
+  return findings.flatMap((finding) =>
+    wrapHanging(renderLine(`  [${finding.severity}] ${finding.message}${locationOf(finding)}`), width),
   );
 }
 
@@ -292,9 +379,9 @@ export function formatFindings(findings: readonly ReportedFinding[]): readonly s
  * but recorded no findings still gets its verdict line, because "needs fix, no findings listed" is
  * exactly the kind of answer a human needs to see rather than have silently swallowed.
  */
-export function formatPlanReview(report: PlanReviewReport): readonly string[] {
+export function formatPlanReview(report: PlanReviewReport, width: number = terminalFindingsWidth()): readonly string[] {
   if (report.reason === PLAN_REVIEW_UNREADABLE_REASON) {
-    return [renderLine(`Plan review: ${PLAN_REVIEW_UNREADABLE_REASON}`)];
+    return wrapHanging(renderLine(`Plan review: ${PLAN_REVIEW_UNREADABLE_REASON}`), width);
   }
 
   if (report.findings.length === 0 && !report.unresolved) {
@@ -315,8 +402,8 @@ export function formatPlanReview(report: PlanReviewReport): readonly string[] {
 
   if (report.findings.length === 0) {
     lines.push(renderLine(" No findings were recorded."));
-    return lines;
+    return lines.flatMap((line) => wrapHanging(line, width));
   }
 
-  return [...lines, ...formatFindings(report.findings)];
+  return [...lines.flatMap((line) => wrapHanging(line, width)), ...formatFindings(report.findings, width)];
 }

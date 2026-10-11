@@ -12,6 +12,7 @@ import {
   formatFindings,
   formatPlanReview,
   planReviewReport,
+  type OrchestrationResult,
   type PlanReviewReport,
 } from "@agent-workflow-kit/orchestration";
 import { parseStatus } from "@agent-workflow-kit/workspace";
@@ -514,6 +515,85 @@ async function storedPlanReview(
 }
 
 /**
+ * Absolute path of the stored `plan_review` artifact, for messages that tell the
+ * human where the bytes the gate read live. Best-effort: a session that cannot
+ * be located yields `null` rather than a command that fails on its way to being
+ * helpful.
+ */
+async function storedPlanReviewPath(
+  store: CliStack["store"],
+  featureId: string,
+): Promise<string | null> {
+  try {
+    return await store.artifactPath(featureId, "plan_review");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Lines for an unresolved review that recorded no parseable findings.
+ *
+ * The gate reads only the stored artifact content's `verdict`, `summary`, and
+ * `findings` keys. When none parsed, the honest answer names the file the gate
+ * read and tells the human to read it before approving — never a guess about
+ * other keys the reviewer may have written.
+ */
+async function unreadReviewPointer(
+  store: CliStack["store"],
+  featureId: string,
+  review: PlanReviewReport,
+): Promise<readonly string[]> {
+  if (!review.unresolved || review.findings.length > 0) {
+    return [];
+  }
+  const path = await storedPlanReviewPath(store, featureId);
+  if (path === null) {
+    return ["Read the stored plan review artifact before approving."];
+  }
+  return [`Stored review: ${path} — Read it before approving.`];
+}
+
+/**
+ * Lines explaining an inconclusive orchestration result.
+ *
+ * An inconclusive stage commits no event and carries no error object, so there
+ * is no error message to print. The explanation is the stage's own: its evidence
+ * descriptions, its findings, and any blocked verification check with its reason
+ * code. Never "Unknown error".
+ */
+function inconclusiveLines(result: OrchestrationResult): readonly string[] {
+  const lines = [
+    `Workflow inconclusive at ${result.stage ?? "unknown stage"} (${result.state}): the stage could not conclude.`,
+  ];
+  if (result.error?.message) {
+    lines.push(`  cause: ${result.error.message}`);
+  }
+  lines.push(
+    ...formatFindings(
+      result.evidence.map((entry) => ({
+        severity: "info" as const,
+        message: `${entry.kind}: ${entry.description}`,
+      })),
+    ),
+  );
+  lines.push(...formatFindings(result.findings));
+  const blocked = (result.verification?.checks ?? []).filter((check) => check.status === "blocked");
+  lines.push(
+    ...formatFindings(
+      blocked.map((check) => ({
+        severity: "warning" as const,
+        message: `Blocked ${check.id} (${check.reason ?? "no reason"}): ${check.detail}`,
+      })),
+    ),
+  );
+  if (lines.length === 1) {
+    lines.push(`  cause not determined; see evidence with \`agentflow status ${result.featureId}\`.`);
+  }
+  return lines;
+}
+
+/**
  * The scope-warning text for one feature's stored plan, or `null` when the plan authorizes
  * something.
  *
@@ -642,7 +722,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
         // run there is no artifact and nothing is shown, while a present-but-unreadable artifact says
         // so rather than reading as clean (P-16, D-13, N2).
         if (session.artifacts.plan_review.status === "present") {
-          lines.push(...formatPlanReview(await storedPlanReview(store, targetFeatureId)));
+          const review = await storedPlanReview(store, targetFeatureId);
+          lines.push(...formatPlanReview(review));
+          lines.push(...(await unreadReviewPointer(store, targetFeatureId, review)));
         }
 
         // Token usage totals, best-effort and read-only like the recording line
@@ -887,6 +969,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
               for (const line of formatPlanReview(review)) {
                 console.log(line);
               }
+              for (const line of await unreadReviewPointer(stack.store, targetFeatureId, review)) {
+                console.log(line);
+              }
 
               if (review.unresolved) {
                 console.log(
@@ -936,12 +1021,20 @@ export function createCli(options: CreateCliOptions = {}): Command {
             "persistence_error",
           ]);
           if (errorStatuses.has(result.status)) {
-            console.error(`Workflow error (${result.status}): ${result.error?.message ?? "Unknown error"}`);
+            if (result.status === "inconclusive") {
+              // An inconclusive stage carries no error object; its explanation is the
+              // stage's own evidence, findings, and blocked checks — never "Unknown error".
+              for (const line of inconclusiveLines(result)) {
+                console.error(line);
+              }
+            } else {
+              console.error(`Workflow error (${result.status}): ${result.error?.message ?? "Unknown error"}`);
 
-            // Findings a stage reported on its way to the error, printed because a message about
-            // *that* the run failed is what sends a human to the finding that says *why* (P-16).
-            for (const line of formatFindings(result.findings)) {
-              console.error(line);
+              // Findings a stage reported on its way to the error, printed because a message about
+              // *that* the run failed is what sends a human to the finding that says *why* (P-16).
+              for (const line of formatFindings(result.findings)) {
+                console.error(line);
+              }
             }
 
             exit(1);
@@ -1007,6 +1100,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
           );
 
           for (const line of formatPlanReview(review)) {
+            console.error(line);
+          }
+          for (const line of await unreadReviewPointer(stack.store, targetFeatureId, review)) {
             console.error(line);
           }
 
@@ -1084,7 +1180,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
 
   program
     .command("abandon")
-    .description("End a feature that should not proceed")
+    .description(
+      "End a feature that should not proceed. Idempotent on an already-failed feature (prints that it is already failed and exits 0); an already-complete feature cannot be abandoned (exits 1).",
+    )
     .argument("[feature-id]", "Feature ID to abandon (defaults to most recent)")
     .requiredOption("-r, --reason <reason>", "Why this feature is being abandoned")
     .action(async (featureId: string | undefined, opts: { reason: string }) => {
@@ -1095,6 +1193,27 @@ export function createCli(options: CreateCliOptions = {}): Command {
         const targetFeatureId = await getTargetFeatureId(stack.store, exit, featureId);
         if (targetFeatureId === null) {
           return;
+        }
+
+        // Terminal states are answered here, not by the state machine: abandoning an
+        // already-terminal feature is a CLI-level idempotence question, and the machine's
+        // generic "terminal and cannot process event" refusal would not say which terminal
+        // state it is or what exit code idempotence requires. Unknown ids still reach
+        // `failFeature` below and keep the existing error.
+        try {
+          const session = await stack.store.load(targetFeatureId);
+          if (session.machine.state === WorkflowState.Failed) {
+            console.log(`Feature ${targetFeatureId} is already failed; nothing to abandon.`);
+            return;
+          }
+          if (session.machine.state === WorkflowState.Complete) {
+            console.error(`Feature ${targetFeatureId} is already complete and cannot be abandoned.`);
+            exit(1);
+            return;
+          }
+        } catch {
+          // An unknown id keeps the existing error path: fall through to `failFeature`,
+          // whose failure the catch below reports.
         }
 
         // The reason is the operator's own statement, echoed so the decision is on the record of the
