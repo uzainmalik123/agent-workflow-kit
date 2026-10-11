@@ -119,6 +119,20 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Open (Task P)
 - **Evidence:** recordings store argv, stdout, stderr, exit code, and duration, not usage. OpenCode exposes usage through its JSON event stream, `opencode stats`, session export, and its session database; completeness of the JSON stream is reported to be best-effort. V2 behavior is unverified.
 
+### P-22. Test verification blocked: package_manager_unknown
+
+- **Status:** Open (Task Q)
+- **Evidence (first real run, 2026-10-11):** static_verification returned `inconclusive`; the deterministic test check was blocked with `package_manager_unknown` and no command result. Cause unverified; hypothesis: the fixture has no lockfile or packageManager field.
+
+### P-23. A needs_fix plan review shows "No findings were recorded"
+
+- **Status:** Open (Task Q)
+- **Evidence:** plan_review reported needs_fix; the gate displayed no findings and the human had to approve blind with `--accept-findings`. Hypothesis: the reply's top-level findings are not persisted and the gate reads only the artifact content.
+
+### P-24. Inconclusive results print "Unknown error" and clip findings at 120 characters
+
+- **Status:** Open (Task Q or a small follow-up)
+
 ---
 
 ## Security-relevant
