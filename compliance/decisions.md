@@ -146,3 +146,10 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 - **Status:** Accepted (owner decision, 2026-10-11)
 - **Decision:** every message the CLI prints for a refusal, failure, blocked result, or inconclusive result has four parts: (1) what happened, (2) why, in plain words naming the real cause (for example "this project has no lockfile and no `packageManager` field in package.json"), (3) how to fix it, with the exact command or edit, and (4) where the evidence is (a file path), plus the next command. The raw reason code appears in parentheses so it can be searched. "Unknown error" is never printed; if the cause is not known, the message says "cause not determined" and gives the evidence path and `agentflow status <id>`.
 - **Implementation rule:** messages come from one catalog module that maps every known reason or error code to a message builder. A test iterates all capability reason codes and all adapter and orchestration error codes, so a new code without a message fails the build.
+- **Raw message rule (added 2026-10-11):** the CLI always prints the raw error message from the result (verbatim, wrapped, control characters stripped) as a "Detail:" line, even when the catalog has a specific explanation. "Cause not determined" appears only when the message is empty. The catalog may add the fix and evidence path; it may never remove the message.
+
+## D-21. Verification stages state which criteria they can and cannot judge
+
+- **Status:** Proposed. Blocked on Task U.
+- **Context:** the static verifier was handed six acceptance criteria that depend on test execution and correctly reported them inconclusive, which parked the workflow until a manual re-run. The test stage later satisfied all of them.
+- **Decision (draft):** a stage's context tells the verifier which capabilities its recorded bundle covers; criteria that need evidence from a later stage are reported `deferred`, and `deferred` criteria do not make the stage inconclusive. The final gate still requires every criterion to be satisfied by some stage.
