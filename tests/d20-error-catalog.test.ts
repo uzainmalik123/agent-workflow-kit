@@ -5,7 +5,14 @@ import { join } from "node:path";
 import { WorkflowState } from "@agent-workflow-kit/core";
 import { createCli, type CliStack, type CliStackRequest } from "../apps/cli/src/commands.js";
 import {
+  BASELINE_REFUSAL_CODES,
+  CAPABILITY_REASONS,
+  ORCHESTRATION_FAILURE_CLASS,
+  WORKSPACE_REFUSAL_CODES,
+} from "@agent-workflow-kit/orchestration";
+import {
   ALL_CATALOG_CODES,
+  CLI_STATUS_CODES,
   formatCatalogCode,
   formatVerificationSummary,
   stripControlCharacters,
@@ -90,8 +97,68 @@ afterEach(async () => {
 });
 
 describe("D-20 catalog: exhaustive coverage", () => {
+  it("covers every real union: 78 orchestration codes, 9 capability reasons, 14 opencode codes, 8 project codes, baseline + workspace refusals, CLI statuses", () => {
+    // Read from the sources, not assumed (Task W.1):
+    // - OrchestrationErrorCode: orchestration/src/errors.ts:10-88, via the keys of
+    //   ORCHESTRATION_FAILURE_CLASS (orchestration/src/errors.ts:96-176, a
+    //   Record<OrchestrationErrorCode, ...> so a new code without a class fails the build).
+    // - CAPABILITY_REASONS: orchestration/src/verification.ts:66-78.
+    // - OpenCode adapter error codes: adapters/opencode/src/errors.ts:1-15 (type-only union,
+    //   mirrored here so the suite names every member).
+    // - Project adapter error codes: adapters/project/src/errors.ts:8-16 (likewise mirrored).
+    // - Baseline refusals (incl. tracked_workspace_dirty):
+    //   orchestration/src/workspace.ts:201-207; workspace refusals: :239-251.
+    // - CLI run-loop statuses printed through the catalog: apps/cli/src/commands.ts:1059-1068.
+    const orchestrationCodes = Object.keys(ORCHESTRATION_FAILURE_CLASS);
+    expect(orchestrationCodes.length).toBe(78);
+    const opencodeCodes = [
+      "unknown_role",
+      "role_mismatch",
+      "transport_failed",
+      "transport_timeout",
+      "transport_cancelled",
+      "non_zero_exit",
+      "output_truncated",
+      "empty_response",
+      "malformed_response",
+      "invalid_result",
+      "unsafe_output_path",
+      "project_plugin_detected",
+      "opencode_configuration_tampered",
+      "workspace_mismatch",
+    ] as const;
+    expect(opencodeCodes.length).toBe(14);
+    const projectCodes = [
+      "root_unavailable",
+      "unsafe_path",
+      "manifest_unreadable",
+      "manifest_malformed",
+      "config_invalid",
+      "command_invalid",
+      "command_forbidden",
+      "fingerprint_failed",
+    ] as const;
+    expect(projectCodes.length).toBe(8);
+    const expected = new Set<string>([
+      ...orchestrationCodes,
+      ...CAPABILITY_REASONS,
+      ...opencodeCodes,
+      ...projectCodes,
+      ...BASELINE_REFUSAL_CODES,
+      ...WORKSPACE_REFUSAL_CODES,
+      ...CLI_STATUS_CODES,
+    ]);
+    expect(expected.has("tracked_workspace_dirty")).toBe(true);
+    const actual = new Set<string>(ALL_CATALOG_CODES);
+    for (const code of expected) {
+      expect(actual.has(code), `catalog lacks a message for ${code}`).toBe(true);
+    }
+    for (const code of actual) {
+      expect(expected.has(code), `catalog covers unknown code ${code}`).toBe(true);
+    }
+  });
+
   it("maps every code to a four-part message with the raw code, wrapped and stripped", () => {
-    expect(ALL_CATALOG_CODES.length).toBe(9 + 6 + 11);
     for (const code of ALL_CATALOG_CODES) {
       const lines = formatCatalogCode(code, { featureId: "F-001", detail: "recorded detail with\tescape\u001b[0m" });
       expect(lines.length).toBeGreaterThan(0);
@@ -114,6 +181,22 @@ describe("D-20 catalog: exhaustive coverage", () => {
       expect(text).not.toContain("\t");
       expect(text).not.toContain("Unknown error");
     }
+  });
+
+  it("prints no <placeholder> in any catalog message: every <id>/<stage> is interpolated", () => {
+    // A printed "<...>" is an uninterpolated placeholder. The Detail line echoes caller text
+    // verbatim, so this formats without a detail: the catalog's own words must never contain "<".
+    for (const code of ALL_CATALOG_CODES) {
+      for (const context of [
+        { featureId: "F-001", stage: "static_verification", checkId: "build" },
+        {},
+      ]) {
+        const text = formatCatalogCode(code, context).join("\n");
+        expect(text, `code ${code}`).not.toContain("<");
+      }
+    }
+    const unknown = formatCatalogCode("not_a_real_code", { featureId: "F-009" }).join("\n");
+    expect(unknown).not.toContain("<");
   });
 
   it("falls back to cause not determined with evidence and status command for unknown codes", () => {
