@@ -11,7 +11,7 @@
  * with the exact command or edit, (4) where the evidence is (a file path), plus the next command.
  * The raw code appears in parentheses so it can be searched. "Unknown error" is never emitted;
  * when the cause is not determined the message says "cause not determined" and gives the evidence
- * path and `agentflow status <id>`. Lines are wrapped (never truncated) and control characters
+ * path and the status command for the feature. Lines are wrapped (never truncated) and control characters
  * are stripped.
  *
  * Sources (read, not assumed):
@@ -89,6 +89,8 @@ export interface CatalogContext {
   readonly evidencePath?: string | null;
   /** Capability or check id, for verification messages. */
   readonly checkId?: string | null;
+  /** Workflow stage the message is about, for recording and evidence paths. */
+  readonly stage?: string | null;
 }
 
 interface CatalogEntry {
@@ -100,18 +102,31 @@ interface CatalogEntry {
 }
 
 function statusOf(context: CatalogContext): string {
-  return context.featureId === undefined ? "agentflow status <id>" : `agentflow status ${context.featureId}`;
+  // No literal "<id>" placeholder may reach a printed message: without a real feature id the
+  // command is stated without one rather than with a placeholder.
+  return context.featureId === undefined ? "agentflow status" : `agentflow status ${context.featureId}`;
+}
+
+/**
+ * Replaces the `<id>` and `<stage>` placeholders with the real feature id and stage, so no printed
+ * message contains a literal "<id>" or "<stage>". Unknown values read as "unknown" rather than as
+ * a placeholder.
+ */
+function interpolatePlaceholders(text: string, context: CatalogContext): string {
+  return text
+    .replaceAll("<id>", context.featureId ?? "unknown")
+    .replaceAll("<stage>", context.stage ?? "unknown");
 }
 
 function evidenceOf(context: CatalogContext, fallback: string): string {
-  return context.evidencePath ?? fallback;
+  const configured = context.evidencePath ?? fallback;
+  return interpolatePlaceholders(configured, context);
 }
 
-function withDetail(base: string, context: CatalogContext): string {
-  if (context.detail === undefined || context.detail === null || context.detail.trim() === "") {
-    return base;
-  }
-  return `${base} Detail recorded: ${stripControlCharacters(context.detail)}`;
+/** The `agentflow run` command for this feature, with the real id rather than a placeholder. */
+function runOf(context: CatalogContext, rest = ""): string {
+  const id = context.featureId ?? "unknown";
+  return `agentflow run ${id}${rest}`;
 }
 
 /**
@@ -121,6 +136,10 @@ function withDetail(base: string, context: CatalogContext): string {
  */
 function entryFor(code: string, context: CatalogContext): CatalogEntry {
   const status = statusOf(context);
+  // "cause not determined" appears only when the orchestrator recorded no message: with a message,
+  // the Detail line appended by `formatCatalogCode` carries the cause instead of this phrase.
+  const hasDetail =
+    context.detail !== undefined && context.detail !== null && context.detail.trim() !== "";
   switch (code) {
     case "detected":
       return {
@@ -133,10 +152,7 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
     case "script_absent":
       return {
         what: `Verification check${context.checkId === undefined || context.checkId === null ? "" : ` "${context.checkId}"`} was skipped because the project declares nothing for it`,
-        why: withDetail(
-          "the manifest declares no script for this capability, so there is nothing the framework could run without inventing a command",
-          context,
-        ),
+        why: "the manifest declares no script for this capability, so there is nothing the framework could run without inventing a command",
         fix: 'To verify this capability, add the script to package.json (for example "lint": "eslint .") or declare the command in agent-workflow.config.json under verification.static or verification.test',
         evidence: evidenceOf(context, "package.json"),
         next: status,
@@ -144,7 +160,9 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
     case "configured":
       return {
         what: `Verification check${context.checkId === undefined || context.checkId === null ? "" : ` "${context.checkId}"`} refers to project configuration`,
-        why: "cause not determined: the \"configured\" reason code is listed in CAPABILITY_REASONS but no detection path in adapters/project sets it as a capability reason, so its real project state is not understood from the source",
+        why: hasDetail
+          ? "the recorded detail below names the project state; the \"configured\" reason code itself is listed in CAPABILITY_REASONS but no detection path in adapters/project sets it as a capability reason"
+          : "cause not determined: the \"configured\" reason code is listed in CAPABILITY_REASONS but no detection path in adapters/project sets it as a capability reason, so its real project state is not understood from the source",
         fix: "Inspect package.json and agent-workflow.config.json to see what the project declares for this capability",
         evidence: evidenceOf(context, "agent-workflow.config.json"),
         next: status,
@@ -168,10 +186,7 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
     case "not_configured":
       return {
         what: `Verification could not be measured for${context.checkId === undefined || context.checkId === null ? " this capability" : ` "${context.checkId}"`}`,
-        why: withDetail(
-          "the project could not be inspected (unreadable manifest or unsafe path), so no capability could be classified; the refusal code is in the recorded detail",
-          context,
-        ),
+        why: "the project could not be inspected (unreadable manifest or unsafe path), so no capability could be classified; the refusal code is in the recorded detail",
         fix: "Make package.json readable and not a symlink, then re-run. Check the detail for the refusal code (root_unavailable, manifest_malformed, config_invalid)",
         evidence: evidenceOf(context, "package.json"),
         next: status,
@@ -187,10 +202,7 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
     case "package_manager_unknown":
       return {
         what: `Verification check${context.checkId === undefined || context.checkId === null ? "" : ` "${context.checkId}"`} is blocked because the package manager is unknown`,
-        why: withDetail(
-          "this project has no lockfile and no `packageManager` field in package.json, so the framework cannot tell which manager (pnpm, npm, yarn, bun) would run the declared script",
-          context,
-        ),
+        why: "this project has no lockfile and no `packageManager` field in package.json, so the framework cannot tell which manager (pnpm, npm, yarn, bun) would run the declared script",
         fix: "Commit a lockfile (for example npm install --package-lock-only) or set the manager in package.json (for example \"packageManager\": \"pnpm@12.9.1\"), or declare the check as a bare tool in agent-workflow.config.json so no manager is needed",
         evidence: evidenceOf(context, "package.json"),
         next: status,
@@ -206,22 +218,16 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
     case "transport_timeout":
       return {
         what: "The OpenCode stage run timed out",
-        why: withDetail(
-          "the opencode child process exceeded its per-stage time budget and was killed; the budget is the shared runner deadline",
-          context,
-        ),
-        fix: "Re-run with a larger budget, for example agentflow run <id> --stage-timeout 1800, or reduce what the stage is asked to do",
+        why: "the opencode child process exceeded its per-stage time budget and was killed; the budget is the shared runner deadline",
+        fix: "Re-run with a larger budget, for example " + runOf(context, " --stage-timeout 1800") + ", or reduce what the stage is asked to do",
         evidence: evidenceOf(context, ".agentflow/recordings/<id>/<stage>/"),
         next: status,
       };
     case "non_zero_exit":
       return {
         what: "The OpenCode run exited with a non-zero code",
-        why: withDetail(
-          "the opencode CLI process itself failed before any reply could be judged; this is a failed run, not a rejected reply, and it is never retried as a format issue",
-          context,
-        ),
-        fix: "Read the recording manifest stderr excerpt, then re-run agentflow run <id>; if the binary is missing, install OpenCode V2",
+        why: "the opencode CLI process itself failed before any reply could be judged; this is a failed run, not a rejected reply, and it is never retried as a format issue",
+        fix: "Read the recording manifest stderr excerpt, then re-run " + runOf(context) + "; if the binary is missing, install OpenCode V2",
         evidence: evidenceOf(context, ".agentflow/recordings/<id>/<stage>/"),
         next: status,
       };
@@ -229,50 +235,38 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
       return {
         what: "The OpenCode run returned no response text",
         why: "the agent process exited 0 but produced an empty reply, so there is no fenced JSON block to judge; empty replies are retried up to 2 times",
-        fix: "Re-run agentflow run <id>; if it repeats, inspect the recording stdout.txt for what the model actually emitted",
+        fix: "Re-run " + runOf(context) + "; if it repeats, inspect the recording stdout.txt for what the model actually emitted",
         evidence: evidenceOf(context, ".agentflow/recordings/<id>/<stage>/"),
         next: status,
       };
     case "malformed_response":
       return {
         what: "The OpenCode reply was rejected as malformed",
-        why: withDetail(
-          "the reply had no fenced JSON block, an unclosed fence, invalid JSON, or a missing required field; the contract requires exactly one fenced JSON object",
-          context,
-        ),
-        fix: "No manual fix is needed for one miss: the stage is retried up to 2 times with a rejection notice. Re-run agentflow run <id> if all attempts were rejected",
+        why: "the reply had no fenced JSON block, an unclosed fence, invalid JSON, or a missing required field; the contract requires exactly one fenced JSON object",
+        fix: "No manual fix is needed for one miss: the stage is retried up to 2 times with a rejection notice. Re-run " + runOf(context) + " if all attempts were rejected",
         evidence: evidenceOf(context, ".agentflow/recordings/<id>/<stage>/"),
         next: status,
       };
     case "invalid_result":
       return {
         what: "The OpenCode reply failed validation",
-        why: withDetail(
-          "the fenced JSON parsed but carried a workflow control field or failed the stage result schema; an agent may not choose transitions or approvals",
-          context,
-        ),
-        fix: "No manual fix is needed for one miss: the stage is retried up to 2 times. Re-run agentflow run <id> if all attempts were rejected",
+        why: "the fenced JSON parsed but carried a workflow control field or failed the stage result schema; an agent may not choose transitions or approvals",
+        fix: "No manual fix is needed for one miss: the stage is retried up to 2 times. Re-run " + runOf(context) + " if all attempts were rejected",
         evidence: evidenceOf(context, ".agentflow/recordings/<id>/<stage>/"),
         next: status,
       };
     case "opencode_configuration_tampered":
       return {
         what: "The OpenCode run was refused because framework configuration was tampered with",
-        why: withDetail(
-          "a generated agent file or a repository OpenCode boundary (permission, plugin, tool, or instruction source) failed integrity: missing, malformed, or crossed by the repository",
-          context,
-        ),
-        fix: "Do not hand-edit generated agent files. Re-run agentflow run <id> to regenerate them outside the repository, and remove any repository .opencode plugin or agent id that shadows a framework profile",
+        why: "a generated agent file or a repository OpenCode boundary (permission, plugin, tool, or instruction source) failed integrity: missing, malformed, or crossed by the repository",
+        fix: "Do not hand-edit generated agent files. Re-run " + runOf(context) + " to regenerate them outside the repository, and remove any repository .opencode plugin or agent id that shadows a framework profile",
         evidence: evidenceOf(context, ".agentflow/recordings/<id>/<stage>/"),
         next: status,
       };
     case "scope_violation":
       return {
         what: "The stage was refused for writing outside the approved scope",
-        why: withDetail(
-          "the measured change set contains paths the approved plan never named in steps[].expectedFiles, or paths the framework protects",
-          context,
-        ),
+        why: "the measured change set contains paths the approved plan never named in steps[].expectedFiles, or paths the framework protects",
         fix: "Run git status to list the paths, restrict the stage to the approved files, or amend the plan and re-approve it",
         evidence: evidenceOf(context, ".agentflow/features/<id>/"),
         next: status,
@@ -280,33 +274,24 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
     case "executor_error":
       return {
         what: "The stage executor threw instead of returning a result",
-        why: withDetail(
-          "the adapter refused or the transport failed (timeout, non-zero exit, tampered config); the workflow records no stage opinion for this run",
-          context,
-        ),
-        fix: "Read the recording folder named on stderr, then re-run agentflow run <id>",
+        why: "the adapter refused or the transport failed (timeout, non-zero exit, tampered config); the workflow records no stage opinion for this run",
+        fix: "Read the recording folder named on stderr, then re-run " + runOf(context),
         evidence: evidenceOf(context, ".agentflow/recordings/<id>/<stage>/"),
         next: status,
       };
     case "stage_failed":
       return {
         what: "The stage reported failure",
-        why: withDetail(
-          "the executor completed the stage and the stage itself reported failed with findings",
-          context,
-        ),
-        fix: "Read the findings with the status command, repair the defect, then re-run agentflow run <id>",
+        why: "the executor completed the stage and the stage itself reported failed with findings",
+        fix: "Read the findings with the status command, repair the defect, then re-run " + runOf(context),
         evidence: evidenceOf(context, ".agentflow/features/<id>/"),
         next: status,
       };
     case "inconclusive":
       return {
         what: "The workflow is inconclusive at this stage and could not conclude",
-        why: withDetail(
-          "the stage committed no event and carried no error object; typically deferred verification (nothing declared to run) or an unmeasured check",
-          context,
-        ),
-        fix: "Declare what is missing (verification command or runtime config) or read the stage evidence, then re-run agentflow run <id>",
+        why: "the stage committed no event and carried no error object; typically deferred verification (nothing declared to run) or an unmeasured check",
+        fix: "Declare what is missing (verification command or runtime config) or read the stage evidence, then re-run " + runOf(context),
         evidence: evidenceOf(context, ".agentflow/features/<id>/"),
         next: status,
       };
@@ -314,7 +299,7 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
       return {
         what: "The requested event is not legal in the current workflow state",
         why: "the state machine refused the transition (for example approving a push while still planning); only the machine decides what an event means",
-        fix: "Run agentflow status <id> to see the current state, then use the command the Next line recommends",
+        fix: "Run " + status + " to see the current state, then use the command the Next line recommends",
         evidence: evidenceOf(context, ".agentflow/features/<id>/session.json"),
         next: status,
       };
@@ -322,17 +307,14 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
       return {
         what: "The approval gate is missing the evidence it must freeze",
         why: "an approved artifact (plan, spec, gate result, or fingerprint) is absent or unreadable at the gate",
-        fix: "Run agentflow run <id> until the producing stage completes, then re-approve",
+        fix: "Run " + runOf(context) + " until the producing stage completes, then re-approve",
         evidence: evidenceOf(context, ".agentflow/features/<id>/"),
         next: status,
       };
     case "tracked_workspace_dirty":
       return {
         what: "The plan cannot be approved on top of uncommitted tracked work",
-        why: withDetail(
-          "the baseline capture found staged or unstaged tracked changes; the approved baseline must be the commit the human reviewed",
-          context,
-        ),
+        why: "the baseline capture found staged or unstaged tracked changes; the approved baseline must be the commit the human reviewed",
         fix: "Run git status to list the work, then run git stash or git commit to reach a clean tree before approving",
         evidence: evidenceOf(context, ".agentflow/features/<id>/session.json"),
         next: status,
@@ -341,7 +323,7 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
       return {
         what: "The orchestrator has no workspace provider configured",
         why: "a post-approval stage or fix needs an isolated worktree to measure, but the orchestrator was built without one; through the CLI this is a wiring defect, not a project defect",
-        fix: "Re-run with the product stack (createRealStack wires GitWorkspaceProvider); if this persists, report the wiring and re-run agentflow status <id>",
+        fix: "Re-run with the product stack (createRealStack wires GitWorkspaceProvider); if this persists, report the wiring and re-run " + status,
         evidence: evidenceOf(context, ".agentflow/features/<id>/session.json"),
         next: status,
       };
@@ -372,7 +354,9 @@ function entryFor(code: string, context: CatalogContext): CatalogEntry {
     default:
       return {
         what: "The command could not conclude",
-        why: "cause not determined",
+        why: hasDetail
+          ? "the recorded detail below carries what the orchestrator reported"
+          : "cause not determined",
         fix: "Re-run the command; if it repeats, inspect the evidence path below",
         evidence: evidenceOf(context, ".agentflow/features/<id>/"),
         next: status,
@@ -454,12 +438,28 @@ function wrapLines(lines: readonly string[], width: number): readonly string[] {
 /**
  * Formats one catalog code as wrapped, stripped lines with the raw code in parentheses.
  * Unknown codes fall back to "cause not determined" with the evidence path and status command.
+ *
+ * The orchestrator's raw message is always printed as a `Detail:` line (verbatim, wrapped, control
+ * characters stripped), even when the catalog explains the code; the catalog may add the fix and
+ * the evidence path but never removes the message. "cause not determined" appears only when the
+ * message is empty. No printed line contains a literal "<id>" or "<stage>": placeholders are
+ * interpolated with the real feature id and stage.
  */
 export function formatCatalogCode(code: string, context: CatalogContext = {}, width = 100): readonly string[] {
   const known = isCatalogCode(code);
   const entry = known ? entryFor(code, context) : entryFor("unknown", context);
   const first = `${entry.what} (${code}). Why: ${entry.why}. Fix: ${entry.fix}. Evidence: ${entry.evidence}. Next: ${entry.next}.`;
-  return wrapLines([stripControlCharacters(first)], width);
+  const lines = wrapLines([stripControlCharacters(interpolatePlaceholders(first, context))], width);
+  const detail = context.detail ?? "";
+  if (detail.trim() === "") {
+    return lines;
+  }
+  // Verbatim apart from wrapping and control-character stripping: split on newlines first so a
+  // multi-line message keeps its lines, then wrap each one.
+  const detailLines = detail
+    .split("\n")
+    .flatMap((line) => wrapLines([`Detail: ${stripControlCharacters(line)}`], width));
+  return [...lines, ...detailLines];
 }
 
 /** Formats a CLI error without ever printing "Unknown error". */

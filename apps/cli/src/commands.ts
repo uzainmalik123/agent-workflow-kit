@@ -606,7 +606,7 @@ function inconclusiveLines(result: OrchestrationResult): readonly string[] {
   }
   if (lines.length === 1) {
     lines.push(
-      ...formatCatalogCode("inconclusive", { featureId: result.featureId }),
+      ...formatCatalogCode("inconclusive", { featureId: result.featureId, stage: result.stage ?? null }),
     );
   }
   return lines;
@@ -617,11 +617,13 @@ function inconclusiveLines(result: OrchestrationResult): readonly string[] {
  *
  * Never prints "Unknown error": when no error object is present the catalog entry for the
  * status/error code says "cause not determined" with the evidence path and
- * `agentflow status <id>`. The raw code is always in parentheses, lines are wrapped, and
- * control characters are stripped by the catalog.
+ * the status command for the feature. The raw code is always in parentheses, the orchestrator's
+ * raw message is always printed as a `Detail:` line (verbatim, wrapped, control characters
+ * stripped) even when the catalog explains the code, and no printed line contains a literal
+ * "<id>" or "<stage>": the real feature id and stage are interpolated at this call site.
  */
 function resultErrorLines(
-  result: { readonly status: string; readonly featureId: string; readonly error?: { readonly code: string; readonly message: string } | null },
+  result: { readonly status: string; readonly featureId: string; readonly stage?: string | null; readonly error?: { readonly code: string; readonly message: string } | null },
   fallbackCode?: string,
 ): readonly string[] {
   // Prefer the run status when the CLI prints statuses (executor_error, stage_failed,
@@ -631,7 +633,7 @@ function resultErrorLines(
   const statusCovered = (ORCHESTRATION_STATUS_CODES as readonly string[]).includes(result.status);
   const code = statusCovered ? result.status : (result.error?.code ?? fallbackCode ?? result.status);
   const detail = result.error?.message ?? null;
-  return formatCatalogCode(code, { featureId: result.featureId, detail });
+  return formatCatalogCode(code, { featureId: result.featureId, detail, stage: result.stage ?? null });
 }
 
 /**

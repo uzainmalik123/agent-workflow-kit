@@ -110,6 +110,16 @@ export interface VerificationCommandEvidence {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly script: string | null;
+  /**
+   * When the check's command started, as an ISO timestamp.
+   *
+   * A check that never started carries `""` instead of a fabricated time (D-22): inventing a start
+   * time would make the evidence say something untrue. The validator accepts an empty (or null)
+   * value only for a `skipped` check with a declared skip reason; every check that ran must carry
+   * a valid timestamp. Basis: R-146 (missing runtime configuration yields deferred, never a false
+   * success). This is a verification-evidence behavior change under R-263, and no other evidence
+   * rule is changed here.
+   */
   readonly startedAt: string;
   readonly durationMs: number;
   readonly exitCode: number | null;
@@ -421,6 +431,34 @@ function validateCapabilityDetections(value: unknown): readonly CapabilityDetect
   return detections;
 }
 
+/**
+ * Skip reasons that prove a check never started, so the check carries no start timestamp (D-22).
+ *
+ * A check that never started must not fabricate one: an invented `startedAt` would make the evidence
+ * say something untrue. The validator therefore accepts an empty (or null) `startedAt` only for a
+ * `skipped` check whose reason is one of these — the reasons the framework itself produces for a
+ * check that never ran — and still requires a valid timestamp for every check that ran. Basis: R-146
+ * (missing runtime configuration yields deferred, never a false success). This is a
+ * verification-evidence behavior change under R-263; no other evidence rule is changed.
+ *
+ * Found by reading the producers:
+ * - `runtime_not_configured`, `not_attempted`: adapters/project/src/runtime.ts:128-130
+ *   (`statusForReason`; the unconfigured case is built at runtime.ts:280-317 with `startedAt: ""`
+ *   from the `NOT_STARTED` diagnostics at runtime.ts:86-98).
+ * - `script_absent`, `language_without_typecheck`, `ecosystem_unsupported`, `runtime_deferred`:
+ *   adapters/project/src/node-adapter.ts:84-141 and adapters/project/src/profile.ts:162-190 (a
+ *   capability with no script or command is reported via `absentCheck` as `skipped`, while a
+ *   declared command that cannot run stays `blocked`).
+ */
+export const SKIPPED_WITHOUT_START_REASONS: ReadonlySet<string> = new Set([
+  "runtime_not_configured",
+  "not_attempted",
+  "script_absent",
+  "language_without_typecheck",
+  "ecosystem_unsupported",
+  "runtime_deferred",
+]);
+
 function validateCheck(value: unknown): VerificationCommandEvidence | null {
   if (!isRecord(value)) {
     return null;
@@ -458,7 +496,20 @@ function validateCheck(value: unknown): VerificationCommandEvidence | null {
     return null;
   }
 
-  if (!isTimestamp(value["startedAt"]) || !isCount(value["durationMs"])) {
+  // A skipped check never started, so it carries no start time rather than a fabricated one. An
+  // empty (or null) value is accepted only with a declared skip reason from the set above; a check
+  // that ran — passed, failed, blocked, timed out, or cancelled — must carry a valid timestamp.
+  const rawStartedAt = value["startedAt"];
+  const checkStatus = oneOf(VERIFICATION_CHECK_STATUSES, value["status"]) ? value["status"] : null;
+  const checkReason = value["reason"];
+  const startedAtMissing = rawStartedAt === "" || rawStartedAt === null;
+  const startedAtExcused =
+    startedAtMissing &&
+    checkStatus === "skipped" &&
+    typeof checkReason === "string" &&
+    SKIPPED_WITHOUT_START_REASONS.has(checkReason);
+
+  if ((!isTimestamp(rawStartedAt) && !startedAtExcused) || !isCount(value["durationMs"])) {
     return null;
   }
 
@@ -504,7 +555,9 @@ function validateCheck(value: unknown): VerificationCommandEvidence | null {
     args: value["args"],
     cwd: value["cwd"],
     script: value["script"],
-    startedAt: value["startedAt"],
+    // A null input is normalised to `""`: the typed record keeps `startedAt: string`, and `""` is
+    // the framework's own marker for "never started" (see the `NOT_STARTED` diagnostics).
+    startedAt: typeof rawStartedAt === "string" ? rawStartedAt : "",
     durationMs: value["durationMs"],
     exitCode,
     signal: value["signal"],
