@@ -135,15 +135,25 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Cause found (Task Q); fix in Task R
 - **Cause:** an inconclusive stage commits no event and carries no error object, so the CLI falls back to "Unknown error". Findings are clipped by the 120-character line limit.
 
-### P-28. runtime_verification rejected with verification_evidence_invalid
+### P-28. Projects without runtime config are rejected at runtime_verification
 
-- **Status:** Open (Task U). Replaces the earlier wording; the test stage passed.
-- **Evidence (F-002, 2026-10-11):** `node test.mjs` passed (exit 0, 19ms), all 36 criteria passed. The run then advanced to `runtime_verification` and the step was rejected before any evidence was recorded. The fixture has no runtime section. Hypothesis: a project with no runtime config should be reported as deferred or not applicable, not rejected.
+- **Status:** Cause found (Task U); fix in Task V
+- **Cause:** with no runtime configuration the framework builds a correct "deferred" bundle (R-146) whose single skipped check has `startedAt: ""`; `validateCheck` (`orchestration/src/verification.ts:461`) requires a parseable timestamp, so the validator rejects the framework's own evidence as `verification_evidence_invalid`. The rejection is deterministic; re-running repeats it. `"runtime": null` in the config does not help (`undefined` and `null` both parse to no configuration).
 
 ### P-29. The error catalog covers 26 of more than 90 codes
 
 - **Status:** Open (Task U item 8)
 - **Evidence:** `OrchestrationErrorCode` has 78 members; the D-20 catalog's exhaustive test used a hand-written list of 11 orchestration statuses. Unlisted codes print "cause not determined" and a literal `<id>` placeholder.
+
+### P-30. Evidence production and validation were never tested together
+
+- **Status:** Open (Task V item 3)
+- **Evidence:** unit tests use fake providers at the seam between the project adapter and the orchestration validator, so the bug above only appeared in a real run. A whole-pipeline test with real providers and a fake model is needed.
+
+### P-31. CLI discarded the orchestrator's raw message
+
+- **Status:** Open (Task V item 4)
+- **Evidence:** the message "A verification evidence check is not a valid evidence record." was available but the catalog's fallback printed "cause not determined" and a literal `<id>`.
 
 ---
 

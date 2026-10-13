@@ -150,6 +150,10 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 
 ## D-21. Verification stages state which criteria they can and cannot judge
 
-- **Status:** Proposed. Blocked on Task U.
-- **Context:** the static verifier was handed six acceptance criteria that depend on test execution and correctly reported them inconclusive, which parked the workflow until a manual re-run. The test stage later satisfied all of them.
-- **Decision (draft):** a stage's context tells the verifier which capabilities its recorded bundle covers; criteria that need evidence from a later stage are reported `deferred`, and `deferred` criteria do not make the stage inconclusive. The final gate still requires every criterion to be satisfied by some stage.
+- **Status:** Accepted, conditional on the final gate enforcing coverage (Task W item 2)
+- **Decision:** a verifier's prompt states which capabilities its bundle covers. Criteria that need another stage's evidence are listed as deferred with the owning stage and do not by themselves make the stage inconclusive. The final gate must require every criterion to be satisfied by some stage; if it does not, the prompt change does not ship.
+
+## D-22. A skipped check carries no fabricated start time
+
+- **Status:** Accepted (owner decision, 2026-10-11)
+- **Decision:** evidence for a check that never started is valid without a start timestamp, but only for a skipped check with a declared reason. Any check that ran must carry a valid timestamp. Basis: R-146 (missing runtime config yields deferred, never a false success), and invented timestamps would make evidence say something untrue.
