@@ -37,8 +37,8 @@ const created = "2026-04-05T06:07:08.000Z";
 /** A reply that fails the contract: prose, no fence. Control characters included on purpose. */
 const BAD_REPLY = "prose with no fence\u0007\u001b[31m and a newline\nmore prose";
 
-/** What the same reply looks like with its control characters stripped out. */
-const BAD_REPLY_PLAIN = "prose with no fence[31m and a newlinemore prose";
+/** What the same reply looks like with its control characters and complete ANSI sequences stripped. */
+const BAD_REPLY_PLAIN = "prose with no fence and a newlinemore prose";
 
 async function makeRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "agent-workflow-kit-format-retry-"));

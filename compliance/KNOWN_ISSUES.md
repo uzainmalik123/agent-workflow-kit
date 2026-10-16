@@ -162,13 +162,15 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 
 ### P-33. A dropped provider connection fails the stage with no retry
 
-- **Status:** Open (Task Y)
+- **Status:** Resolved in Task Y (decision D-24)
 - **Evidence (F-002):** `ECONNRESET` twice, OpenCode exit 1, `executor_error` after 544s, on a free model.
+- **Fix:** the adapter retries a recognized transient provider failure up to 2 extra invocations after a 15s/45s backoff (`adapters/opencode/src/transient-retry.ts`, `tests/opencode-transient-retry.test.ts`), announced on stderr as `stage <name>: provider connection error, retry N of M in Xs` (`tests/task-y.test.ts`).
 
 ### P-34. CLI output polish
 
-- **Status:** Open (Task Y)
+- **Status:** Resolved in Task Y
 - **Evidence:** ANSI fragments (`[0m`, `[91m[1m`) in Detail lines; evidence path points at a project folder that does not exist for post-approval stages; repeated banner lines; the model used is not shown in status.
+- **Fix:** complete ANSI sequences are stripped before display (not control characters alone), so no `[0m`-shaped fragment survives; the Evidence line names the absolute recording folder the stage's own failure line named; consecutive identical Detail lines collapse to one; `status` prints the last stage's `--model` when the recording names one (`tests/task-y.test.ts`, `tests/opencode-format-retry.test.ts`).
 
 ---
 

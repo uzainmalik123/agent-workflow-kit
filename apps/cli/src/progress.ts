@@ -109,6 +109,18 @@ export function createStageProgressReporter(
       return;
     }
 
+    if (event.type === "transient_retry") {
+      // "grill: provider connection error, retry 1 of 2 in 15s" — a run that died on a dropped
+      // connection is being attempted again (D-24), which is progress in the same sense the
+      // reply-retry line above is, so --quiet silences it too. The delay is whole seconds: the
+      // backoffs are 15s and 45s, and a person reading a log wants the wait, not the milliseconds.
+      const delaySeconds = Math.max(0, Math.round(event.delayMs / 1000));
+      write(
+        `stage ${event.stage}: provider connection error, retry ${String(event.retry)} of ${String(event.maxRetries)} in ${String(delaySeconds)}s`,
+      );
+      return;
+    }
+
     if (event.type === "stage_started") {
       stopHeartbeat();
       startedAtMs = now();

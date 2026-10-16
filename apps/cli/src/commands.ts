@@ -5,6 +5,7 @@ import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/pr
 import {
   DEFAULT_FORMAT_RETRIES,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_TRANSIENT_RETRIES,
   type StageProgressCallback,
 } from "@agent-workflow-kit/opencode";
 import {
@@ -50,6 +51,7 @@ interface RunCommandOptions {
   readonly quiet?: boolean;
   readonly stageTimeout?: string;
   readonly formatRetries?: string;
+  readonly transientRetries?: string;
 }
 
 /**
@@ -71,6 +73,11 @@ export interface CliStackRequest {
    * the adapter's own default, and `0` disables retries.
    */
   readonly formatRetries?: number;
+  /**
+   * How many extra invocations a stage gets when its run dies on a transient provider failure;
+   * absent means the adapter's own default, and `0` disables the retry (D-24).
+   */
+  readonly transientRetries?: number;
 }
 
 /**
@@ -429,6 +436,38 @@ function resolveFormatRetries(flag: string | undefined): number {
 }
 
 /**
+ * The transient-retry budget, from `--transient-retries <n>` (D-24).
+ *
+ * The default is not restated here: it is `DEFAULT_TRANSIENT_RETRIES` itself — 2 — the same value
+ * the executor uses when it is given no budget at all, so the flag's help text, this conversion,
+ * and the adapter's default cannot drift apart. `0` is a real answer and disables the retry: it
+ * restores the single-attempt behaviour exactly.
+ *
+ * Like an unusable `--format-retries`, a value that is not a whole non-negative number is refused
+ * before a stack is built: how many invocations a flaky provider may cost a stage is this
+ * command's answer, not a surprise inside a stage.
+ */
+function resolveTransientRetries(flag: string | undefined): number {
+  if (flag === undefined) {
+    return DEFAULT_TRANSIENT_RETRIES;
+  }
+
+  if (!/^[0-9]+$/u.test(flag)) {
+    throw new Error(
+      `Invalid --transient-retries value: ${JSON.stringify(flag)} must be a whole number of retries.`,
+    );
+  }
+
+  const retries = Number(flag);
+
+  if (!Number.isSafeInteger(retries)) {
+    throw new Error(`Invalid --transient-retries value: ${JSON.stringify(flag)} is too large.`);
+  }
+
+  return retries;
+}
+
+/**
  * Whether `git rev-parse HEAD` resolves, i.e. the repository has at least one commit.
  *
  * `run` checks this before the workflow is touched: a stage diffs, verifies, and eventually
@@ -721,10 +760,16 @@ function inconclusiveLines(result: OrchestrationResult): readonly string[] {
  * raw message is always printed as a `Detail:` line (verbatim, wrapped, control characters
  * stripped) even when the catalog explains the code, and no printed line contains a literal
  * "<id>" or "<stage>": the real feature id and stage are interpolated at this call site.
+ *
+ * `recordingFolder` is the absolute folder the stage's own failure line already named, when one
+ * did (Task Y). It becomes the Evidence path for this failure — for a post-approval stage that
+ * folder is under the workspace cache, and the catalog's relative project fallback would point at
+ * a directory that does not exist.
  */
 function resultErrorLines(
   result: { readonly status: string; readonly featureId: string; readonly stage?: string | null; readonly error?: { readonly code: string; readonly message: string } | null },
   fallbackCode?: string,
+  recordingFolder?: string | null,
 ): readonly string[] {
   // Prefer the run status when the CLI prints statuses (executor_error, stage_failed,
   // scope_violation): the orchestrator's error code for those (executor_threw,
@@ -733,7 +778,12 @@ function resultErrorLines(
   const statusCovered = (ORCHESTRATION_STATUS_CODES as readonly string[]).includes(result.status);
   const code = statusCovered ? result.status : (result.error?.code ?? fallbackCode ?? result.status);
   const detail = result.error?.message ?? null;
-  return formatCatalogCode(code, { featureId: result.featureId, detail, stage: result.stage ?? null });
+  return formatCatalogCode(code, {
+    featureId: result.featureId,
+    detail,
+    stage: result.stage ?? null,
+    evidencePath: recordingFolder ?? null,
+  });
 }
 
 /**
@@ -857,6 +907,12 @@ export function createCli(options: CreateCliOptions = {}): Command {
           lines.push(
             `Last stage elapsed: ${String(Math.max(0, Math.round(latest.durationMs / 1000)))}s`,
           );
+          // Only when the recording names one: a manifest without a `--model` in its argv — the
+          // default model, or a recording old enough to predate the flag — says nothing here
+          // rather than inventing a model name.
+          if (latest.model !== null) {
+            lines.push(`Last stage model: ${latest.model}`);
+          }
           lines.push(`Recording folder: ${latest.folder}`);
         }
 
@@ -1023,6 +1079,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
       "--format-retries <n>",
       `Extra attempts when a stage reply fails the response contract: malformed, empty, or schema-invalid (default: ${String(DEFAULT_FORMAT_RETRIES)}, 0 disables)`,
     )
+    .option(
+      "--transient-retries <n>",
+      `Extra attempts when a stage run dies on a transient provider failure: connection reset, DNS, HTTP 502/503/504, overloaded (default: ${String(DEFAULT_TRANSIENT_RETRIES)}, 0 disables)`,
+    )
     .action(async (featureId: string | undefined, opts: RunCommandOptions) => {
       try {
         const repoRoot = getRepoRoot(cwd());
@@ -1031,6 +1091,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
         const model = resolveRunModel(opts.model);
         const stageTimeoutMs = resolveStageTimeoutMs(opts.stageTimeout);
         const formatRetries = resolveFormatRetries(opts.formatRetries);
+        const transientRetries = resolveTransientRetries(opts.transientRetries);
 
         // Before the stack exists and before any session is read: a repository with no commits
         // cannot diff, verify, or publish, so the run stops here with that answer.
@@ -1046,15 +1107,27 @@ export function createCli(options: CreateCliOptions = {}): Command {
         await warnAboutUntrackedFiles(repoRoot);
 
         // Progress goes to stderr through one reporter owned by this command: stage start/finish
-        // lines and the 30s heartbeat, silenced entirely by --quiet.
-        const reporter = createStageProgressReporter(
+        // lines and the 30s heartbeat, silenced entirely by --quiet. The failure line's recording
+        // folder is kept when it passes, because the catalog's Evidence line for the run's own
+        // failure must name the same folder the human was just shown (Task Y) — the absolute
+        // folder the stage actually recorded into, which for a post-approval stage is under the
+        // workspace cache and never under the project's own .agentflow/.
+        const baseReporter = createStageProgressReporter(
           opts.quiet === true ? { quiet: true } : {},
         );
+        let failedRecordingFolder: string | null = null;
+        const reporter: StageProgressCallback = (event) => {
+          if (event.type === "stage_failed") {
+            failedRecordingFolder = event.recordingFolder;
+          }
+          baseReporter(event);
+        };
         const stack = createStack(repoRoot, {
           model,
           onProgress: reporter,
           stageTimeoutMs,
           formatRetries,
+          transientRetries,
         });
         const orchestrator = stack.orchestrator;
 
@@ -1151,7 +1224,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
               }
             } else {
               console.error(`Workflow error (${result.status}):`);
-            for (const line of resultErrorLines(result)) {
+            for (const line of resultErrorLines(result, undefined, failedRecordingFolder)) {
               console.error(line);
             }
 

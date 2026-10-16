@@ -65,6 +65,7 @@ import type {
   OrchestrationErrorCode,
   WorkspaceRefusalCode,
 } from "@agent-workflow-kit/orchestration";
+import { stripAnsiCodes } from "@agent-workflow-kit/opencode";
 import type { OpenCodeAdapterErrorCode } from "@agent-workflow-kit/opencode";
 import type { ProjectAdapterErrorCode } from "@agent-workflow-kit/project";
 
@@ -1339,10 +1340,18 @@ export function catalogEntryFor(code: string, context: CatalogContext = {}): Cat
   };
 }
 
-/** Strips C0, DEL, and C1 control characters so model or tool text can reach a terminal. */
+/**
+ * Strips complete ANSI/CSI escape sequences and then the remaining C0, DEL, and C1 control
+ * characters, so model or tool text can reach a terminal.
+ *
+ * The sequences go first, and with their leading escape byte: removing the byte alone is what used
+ * to leave "[0m"- and "[91m[1m"-shaped fragments printed after it (Task Y, P-34). Text that never
+ * carried an escape byte is returned as it was, control characters aside.
+ */
 export function stripControlCharacters(text: string): string {
+  const withoutSequences = stripAnsiCodes(text);
   let out = "";
-  for (const character of text) {
+  for (const character of withoutSequences) {
     const code = character.codePointAt(0) ?? 0;
     if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
       continue;
@@ -1411,10 +1420,12 @@ function wrapLines(lines: readonly string[], width: number): readonly string[] {
  * Unknown codes fall back to "cause not determined" with the evidence path and status command.
  *
  * The orchestrator's raw message is always printed as a `Detail:` line (verbatim, wrapped, control
- * characters stripped), even when the catalog explains the code; the catalog may add the fix and
- * the evidence path but never removes the message. "cause not determined" appears only when the
- * message is empty. No printed line contains a literal "<id>" or "<stage>": placeholders are
- * interpolated with the real feature id and stage.
+ * characters and complete ANSI sequences stripped), even when the catalog explains the code; the
+ * catalog may add the fix and the evidence path but never removes the message. "cause not
+ * determined" appears only when the message is empty. Consecutive identical detail lines are
+ * collapsed to one, so a banner a process printed twice reads as the single fact it was (Task Y).
+ * No printed line contains a literal "<id>" or "<stage>": placeholders are interpolated with the
+ * real feature id and stage.
  */
 export function formatCatalogCode(code: string, context: CatalogContext = {}, width = 100): readonly string[] {
   const entry = catalogEntryFor(code, context);
@@ -1425,10 +1436,16 @@ export function formatCatalogCode(code: string, context: CatalogContext = {}, wi
     return lines;
   }
   // Verbatim apart from wrapping and control-character stripping: split on newlines first so a
-  // multi-line message keeps its lines, then wrap each one.
-  const detailLines = detail
+  // multi-line message keeps its lines, then wrap each one. Consecutive identical lines are
+  // collapsed first (Task Y): a provider banner OpenCode printed twice read as two separate
+  // facts when it was one, and the repetition carried nothing the first line did not.
+  const strippedDetailLines = detail
     .split("\n")
-    .flatMap((line) => wrapLines([`Detail: ${stripControlCharacters(line)}`], width));
+    .map((line) => stripControlCharacters(line))
+    .filter((line, index, all) => index === 0 || line !== all[index - 1]);
+  const detailLines = strippedDetailLines.flatMap((line) =>
+    wrapLines([`Detail: ${line}`], width),
+  );
   return [...lines, ...detailLines];
 }
 

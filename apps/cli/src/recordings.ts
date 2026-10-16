@@ -32,6 +32,11 @@ export interface LatestStageRecording {
   readonly durationMs: number;
   /** The absolute invocation directory: `invocation.json`, `stdout.txt`, `stderr.txt`. */
   readonly folder: string;
+  /**
+   * The `--model` value that invocation was launched with, or `null` when the manifest does not
+   * name one (no flag was set, or an old recording predates the flag being recorded).
+   */
+  readonly model: string | null;
 }
 
 async function listDirectory(directory: string): Promise<readonly string[]> {
@@ -74,6 +79,34 @@ interface InvocationRecord {
   readonly stage: string;
   readonly startedAt: string;
   readonly durationMs: number;
+  readonly model: string | null;
+}
+
+/**
+ * The `--model` value in a recorded argv, or `null` when there is none.
+ *
+ * The invocation is built with the model as `--model <value>` — two entries, never `--model=value`
+ * — and the prompt is the final positional argument, so a value read this way can never be the
+ * prompt. An unrecognized or absent flag means the recording simply does not say, and `null` keeps
+ * `status` from inventing a model name.
+ */
+function modelFromArgs(args: unknown): string | null {
+  if (!Array.isArray(args)) {
+    return null;
+  }
+
+  const entries: readonly unknown[] = args;
+
+  for (let index = 0; index < entries.length - 1; index += 1) {
+    if (entries[index] === "--model") {
+      const value = entries[index + 1];
+      if (typeof value === "string" && value.length > 0) {
+        return value;
+      }
+    }
+  }
+
+  return null;
 }
 
 /** The three fields the status line needs, or `null` for a manifest that cannot supply all three. */
@@ -115,7 +148,7 @@ async function readInvocation(manifestPath: string): Promise<InvocationRecord | 
     return null;
   }
 
-  return { stage, startedAt, durationMs };
+  return { stage, startedAt, durationMs, model: modelFromArgs(record["args"]) };
 }
 
 async function recordingsIn(root: string, featureSegment: string): Promise<readonly LatestStageRecording[]> {
@@ -234,6 +267,7 @@ async function readFullInvocation(manifestPath: string): Promise<AllStageRecordi
     startedAt,
     durationMs,
     folder: manifestPath.slice(0, -INVOCATION_MANIFEST_FILENAME.length - 1),
+    model: modelFromArgs(record["args"]),
     attempt,
     responseOutcome,
     manifest: record,

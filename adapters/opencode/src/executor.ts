@@ -40,6 +40,14 @@ import {
   type StageProgressCallback,
   type StageProgressEvent,
 } from "./transport.js";
+import { DEFAULT_STDERR_EXCERPT_LIMIT, excerpt } from "./process.js";
+import {
+  DEFAULT_TRANSIENT_RETRIES,
+  classifyProviderFailure,
+  transientBackoffMs,
+  type TransientFailureVerdict,
+} from "./transient-retry.js";
+import { stripAnsiCodes } from "./progress.js";
 
 /**
  * How many *extra* attempts a stage gets when its reply fails the response contract (D-15).
@@ -77,6 +85,20 @@ export function formatReplyRejectionNotice(code: string): string {
   return `Your previous reply was rejected: ${code}. Reply with exactly one fenced JSON block and nothing after it.`;
 }
 
+/**
+ * The executor error codes a transient retry can look at, and the only ones.
+ *
+ * A non-zero exit carries the child's stderr excerpt in its message — where a dropped provider
+ * connection shows itself — and a transport failure carries the spawn or stream cause. Every other
+ * code is already a decision: a stage timeout is a failed run, a cancelled transport was asked to
+ * stop, a truncated output is over the ceiling, and a format refusal belongs to the reply retry
+ * (D-15), which has already spent its own budget by the time one of those throws.
+ */
+const TRANSIENT_CANDIDATE_CODES: readonly OpenCodeAdapterErrorCode[] = [
+  "non_zero_exit",
+  "transport_failed",
+];
+
 /** The prompt for a retry: the same prompt, plus exactly one appended line. */
 function promptWithRejectionNotice(prompt: string, code: string): string {
   const base = prompt.endsWith("\n") ? prompt : `${prompt}\n`;
@@ -88,18 +110,20 @@ function promptWithRejectionNotice(prompt: string, code: string): string {
 export const REJECTED_REPLY_EXCERPT_MAX_CHARS = 200;
 
 /**
- * The first {@link REJECTED_REPLY_EXCERPT_MAX_CHARS} characters of a reply, with C0, DEL, and C1
- * control characters removed. Written as a scanner rather than a regular expression for the same
- * reason `stripAnsiCodes` is: a literal regex carrying control characters is exactly what a linter
- * should refuse, and the reply is model output — the one string in this system that must never
- * reach a terminal with its escape sequences intact. The scanner also does the bounding, so the
- * cut lands between characters rather than inside one.
+ * The first {@link REJECTED_REPLY_EXCERPT_MAX_CHARS} characters of a reply, with complete ANSI/CSI
+ * escape sequences and the remaining C0, DEL, and C1 control characters removed. Written as a
+ * scanner over the output of {@link stripAnsiCodes} for the same reason that function is: a
+ * literal regex carrying control characters is exactly what a linter should refuse, and the reply
+ * is model output — the one string in this system that must never reach a terminal with its escape
+ * sequences intact. The escape byte is removed with its sequence, not alone: stripping the byte
+ * alone is what used to leave "[0m"-shaped fragments behind (Task Y, P-34). The scanner does the
+ * bounding, so the cut lands between characters rather than inside one.
  */
 function rejectedReplyExcerpt(text: string): string {
   let out = "";
   let length = 0;
 
-  for (const character of text) {
+  for (const character of stripAnsiCodes(text)) {
     const code = character.codePointAt(0) ?? 0;
 
     if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
@@ -151,6 +175,33 @@ function replyRejectedError(
   );
 }
 
+/**
+ * The transient verdict for a thrown failure, or `null` when it is not even a candidate for the
+ * retry loop: not the adapter's own error, or a code the loop never looks at (a stage timeout, a
+ * cancellation, a truncated output, a reply the response contract refused), or a message the
+ * detector classifies as permanent or unknown.
+ */
+function transientVerdictOf(error: unknown): TransientFailureVerdict | null {
+  if (!isOpenCodeAdapterError(error)) {
+    return null;
+  }
+
+  if (!TRANSIENT_CANDIDATE_CODES.includes(error.code)) {
+    return null;
+  }
+
+  const verdict = classifyProviderFailure(error.message);
+
+  return verdict === "transient" || verdict === "retry_once" ? verdict : null;
+}
+
+/** The real backoff between transient attempts. */
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => {
+    setTimeout(resolveSleep, ms);
+  });
+}
+
 export interface OpenCodeStageExecutorOptions {
   readonly transport: OpenCodeTransport;
   /**
@@ -175,6 +226,29 @@ export interface OpenCodeStageExecutorOptions {
    * transport failure is a failed run, not a rejected reply.
    */
   readonly formatRetries?: number;
+  /**
+   * How many extra invocations a stage gets when its run dies on a transient provider failure —
+   * a connection reset, a DNS miss, an HTTP 502/503/504, an overloaded provider. Defaults to
+   * `DEFAULT_TRANSIENT_RETRIES` when absent; `0` disables the retry entirely. The backoff is 15s
+   * then 45s, every attempt is recorded, and the whole loop is bounded by a wall-clock budget of
+   * twice the stage timeout. Credit, billing, free-tier, and authentication errors, any 4xx but
+   * 429, stage timeouts, and reply-format failures are never retried; an unrecognized message is
+   * never retried either. See `transient-retry.ts` (D-24).
+   */
+  readonly transientRetries?: number;
+  /**
+   * The total wall-clock budget the transient retry may spend on one stage, in milliseconds.
+   * Defaults to twice this executor's stage timeout. A retry that cannot start inside the budget
+   * ends the stage with the failure that started the loop.
+   */
+  readonly transientBudgetMs?: number;
+  /**
+   * Waits the given milliseconds between transient attempts. Defaults to a real timer; tests pass
+   * an immediate resolution so the backoff is observable without waiting for it.
+   */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** The clock the transient budget is measured against. Defaults to `Date.now`. */
+  readonly now?: () => number;
   /**
    * Repository guidance, overriding the file lookup. Always subordinate to the framework rules.
    */
@@ -234,14 +308,19 @@ export interface OpenCodeStageExecutorOptions {
  *   -> StageExecutionResult
  * ```
  *
+ * around the whole of which sits one bounded retry for transient provider failures (D-24): a run
+ * that died on a dropped connection, an HTTP 502/503/504, or an overloaded provider is attempted
+ * again after a 15s/45s backoff, every attempt recorded, inside a wall-clock budget of twice the
+ * stage timeout.
+ *
  * The adapter translates and refuses. It never decides a workflow transition, never approves a
  * gate, and never turns an unusable agent response into a stage outcome: a transport failure, a
  * timeout, a non-zero exit, malformed output, a mismatched feature or stage, a forbidden artifact
  * name, a smuggled workflow field, or repository-supplied OpenCode plugin code is thrown as an
  * `OpenCodeAdapterError` so the orchestrator reports an executor failure instead of trusting the
- * agent. The reply retry is the one place a refusal is followed by another invocation, and it is
- * bounded and scoped to the three refusals that are statements about a reply's shape (D-15): the
- * contract every attempt must satisfy is exactly the one that refused the attempt before it.
+ * agent. Two bounded retries end in another invocation and nothing else does (D-15, D-24): the
+ * reply retry, scoped to the three refusals that are statements about a reply's shape, and the
+ * transient retry, scoped to the provider-failure messages the detector recognizes.
  *
  * The two preflight checks answer different questions and neither substitutes for the other. The plugin
  * preflight asks whether the repository ships OpenCode code at all. The profile shadow check asks
@@ -260,6 +339,7 @@ export class OpenCodeStageExecutor implements StageExecutor {
 
   constructor(options: OpenCodeStageExecutorOptions) {
     const formatRetries = options.formatRetries;
+    const transientRetries = options.transientRetries;
 
     // Refused here rather than clamped: a retry count that is not a whole non-negative number is
     // a caller's bug, and silently rounding it would decide how many model invocations a stage
@@ -267,6 +347,24 @@ export class OpenCodeStageExecutor implements StageExecutor {
     if (formatRetries !== undefined && (!Number.isSafeInteger(formatRetries) || formatRetries < 0)) {
       throw new RangeError(
         `formatRetries must be a non-negative whole number; received ${String(formatRetries)}.`,
+      );
+    }
+
+    if (
+      transientRetries !== undefined &&
+      (!Number.isSafeInteger(transientRetries) || transientRetries < 0)
+    ) {
+      throw new RangeError(
+        `transientRetries must be a non-negative whole number; received ${String(transientRetries)}.`,
+      );
+    }
+
+    if (
+      options.transientBudgetMs !== undefined &&
+      (!Number.isSafeInteger(options.transientBudgetMs) || options.transientBudgetMs <= 0)
+    ) {
+      throw new RangeError(
+        `transientBudgetMs must be a positive whole number of milliseconds; received ${String(options.transientBudgetMs)}.`,
       );
     }
 
@@ -285,7 +383,7 @@ export class OpenCodeStageExecutor implements StageExecutor {
     this.#emit({ type: "stage_started", stage: request.stage });
 
     try {
-      const result = await this.#runStage(request);
+      const result = await this.#runStageWithTransientRetry(request);
       const elapsedMs = Date.now() - startedAtMs;
       this.#emit({ type: "stage_finished", stage: request.stage, elapsedMs });
 
@@ -315,6 +413,81 @@ export class OpenCodeStageExecutor implements StageExecutor {
       });
       throw error;
     }
+  }
+
+  /**
+   * Runs the stage once, then again after a backoff when the run died on a transient provider
+   * failure (D-24), up to the configured retry budget and inside the wall-clock budget.
+   *
+   * The loop brackets {@link #runStage}, which is one complete stage run with its own recordings;
+   * every attempt therefore keeps its own recording, and the stage progress events around the
+   * whole thing are emitted exactly once by {@link execute}. A failure that is not a transient
+   * candidate — anything but a `non_zero_exit` or `transport_failed` whose message the detector
+   * recognizes — is rethrown immediately, exactly as the loop that produced it left it.
+   */
+  async #runStageWithTransientRetry(request: StageExecutionRequest): Promise<StageExecutionResult> {
+    const maxRetries = this.#transientRetries();
+    const budgetMs = this.#transientBudgetMs();
+    const now = this.#options.now ?? Date.now;
+    const sleep = this.#options.sleep ?? defaultSleep;
+    const startedAtMs = now();
+
+    for (let retry = 0; ; retry++) {
+      try {
+        return await this.#runStage(request);
+      } catch (error) {
+        const verdict = transientVerdictOf(error);
+
+        // Unknown errors are not retried: the detector, not the caller, decides what a fresh
+        // invocation can plausibly fix.
+        if (maxRetries === 0 || verdict === null) {
+          throw error;
+        }
+
+        // A 429 gets the backoff once, whatever the configured budget allows beyond that.
+        const allowed = verdict === "retry_once" ? Math.min(1, maxRetries) : maxRetries;
+
+        // `retry` counts the failures seen so far (0-based); after `allowed` retries the next
+        // failure is final.
+        if (retry >= allowed) {
+          throw error;
+        }
+
+        const elapsedMs = now() - startedAtMs;
+
+        if (elapsedMs >= budgetMs) {
+          throw error;
+        }
+
+        const delayMs = transientBackoffMs(retry + 1);
+        this.#emit({
+          type: "transient_retry",
+          stage: request.stage,
+          retry: retry + 1,
+          maxRetries: allowed,
+          delayMs,
+        });
+        await sleep(delayMs);
+      }
+    }
+  }
+
+  /** The retry budget for runs that died on a transient provider failure. */
+  #transientRetries(): number {
+    return this.#options.transientRetries ?? DEFAULT_TRANSIENT_RETRIES;
+  }
+
+  /**
+   * The wall-clock budget the transient retry may spend, defaulting to twice this executor's
+   * stage timeout — so the default bounds two full-length attempts plus the backoffs between
+   * them, and a retry can never outlive the run it belongs to by more than the stage itself.
+   */
+  #transientBudgetMs(): number {
+    if (this.#options.transientBudgetMs !== undefined) {
+      return this.#options.transientBudgetMs;
+    }
+
+    return (this.#options.timeoutMs ?? DEFAULT_TIMEOUT_MS) * 2;
   }
 
   /**
@@ -423,9 +596,14 @@ export class OpenCodeStageExecutor implements StageExecutor {
 
       if (raw.exitCode !== 0) {
         await this.#recordReplyOutcome(raw, attempt, "non_zero_exit");
+        // The bounded stderr excerpt travels with the refusal — it is where a transient provider
+        // failure (D-24) shows itself, and the only place a human can read what the child said.
+        const stderrExcerpt = excerpt(raw.stderr, DEFAULT_STDERR_EXCERPT_LIMIT);
         throw new OpenCodeAdapterError(
           "non_zero_exit",
-          `The OpenCode run for agent "${agent}" exited with code ${String(raw.exitCode)}.`,
+          `The OpenCode run for agent "${agent}" exited with code ${String(raw.exitCode)}.${
+            stderrExcerpt === "" ? "" : ` stderr: ${stderrExcerpt}`
+          }`,
         );
       }
 

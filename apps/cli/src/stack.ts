@@ -62,6 +62,12 @@ export interface RealStackOptions {
    * `--format-retries <n>` documents; `0` disables retries.
    */
   readonly formatRetries?: number;
+  /**
+   * How many extra invocations a stage gets when its run dies on a transient provider failure.
+   * Absent means the adapter's own default, `DEFAULT_TRANSIENT_RETRIES` — 2 — which is also the
+   * value the CLI's `--transient-retries <n>` documents; `0` disables the retry (D-24).
+   */
+  readonly transientRetries?: number;
 }
 
 /**
@@ -93,6 +99,7 @@ export function createRealStack(repoRoot: string, options: RealStackOptions = {}
     ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     ...(options.stageTimeoutMs === undefined ? {} : { timeoutMs: options.stageTimeoutMs }),
     ...(options.formatRetries === undefined ? {} : { formatRetries: options.formatRetries }),
+    ...(options.transientRetries === undefined ? {} : { transientRetries: options.transientRetries }),
   });
 
   const workspace = new GitWorkspaceProvider();

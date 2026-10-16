@@ -343,7 +343,7 @@ describe("Task V.4: CLI prints the raw message as Detail and never a placeholder
     const stripped = formatCatalogCode("stage_failed", { featureId: "F-001", detail: dirty }).join("\n");
     expect(stripped).not.toContain("\t");
     expect(stripped).not.toContain("");
-    expect(stripped).toContain("Detail: tabhereescape[0m");
+    expect(stripped).toContain("Detail: tabhereescape");
     for (const line of stripped.split("\n")) {
       expect(line.length).toBeLessThanOrEqual(100);
     }
