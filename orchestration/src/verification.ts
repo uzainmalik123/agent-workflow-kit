@@ -779,8 +779,11 @@ export function validateVerificationEvidenceBundle(raw: unknown): VerificationBu
  * Whether hard evidence forbids a passing verification stage.
  *
  * `failed` and `blocked` both block, because a stage that could not run its own check has not been
- * verified. `deferred` is not a failure — treating it as one would make the workflow unsatisfiable — but
- * for the runtime stage it still refuses a success on its own terms; see `deferredRuntimeBlocksSuccess`.
+ * verified. `deferred` is not a failure — treating it as one would make the workflow unsatisfiable —
+ * but for the runtime stage it still refuses a success on its own terms, with the D-23 exception: the
+ * one bundle that is exactly "no runtime verification is configured" advances with the gap recorded
+ * and acknowledged at the push gate. See `deferredRuntimeBlocksSuccess` and
+ * `runtimeVerificationNotConfigured`.
  */
 export function evidenceBlocksSuccess(bundle: VerificationEvidenceBundle): boolean {
   return bundle.outcome === "failed" || bundle.outcome === "blocked";
@@ -880,9 +883,45 @@ export type DeterministicEvidenceApplication =
  * So absence is not a pass. It holds the stage at inconclusive, which is a state a human resolves, and
  * it is deliberately not a `needs_fix`: nothing is known to be broken, and sending a feature back to a
  * fixer with no defect to fix teaches people to configure the stage just to get past it.
+ *
+ * (D-23 narrows this rule, not this function: the one deferred runtime bundle whose every check was
+ * skipped with {@link RUNTIME_NOT_CONFIGURED_REASON} is no longer an inconclusive hold — it is the
+ * recorded gap that advances and is acknowledged at the push gate. See
+ * {@link runtimeVerificationNotConfigured}.)
  */
 export function deferredRuntimeBlocksSuccess(bundle: VerificationEvidenceBundle): boolean {
   return bundle.verification === "runtime" && bundle.outcome === "deferred";
+}
+
+/**
+ * The check reason that means "the project declared no runtime verification".
+ *
+ * Spelled out here because the D-23 branch keys on it verbatim: a bundle skipped for any other
+ * reason is not a declared absence, and never advances by itself (R-146). The constant exists so the
+ * runtime-verification reason vocabulary and this rule cannot drift apart.
+ */
+export const RUNTIME_NOT_CONFIGURED_REASON = "runtime_not_configured" as const;
+
+/**
+ * Whether this bundle is the one recorded gap D-23 names: a runtime stage whose whole evidence is the
+ * project declaring no runtime verification.
+ *
+ * Every check must be `skipped` with `runtime_not_configured`, and the bundle must be `deferred`.
+ * Anything else — one check that was attempted and cancelled, a bundle with no checks at all, a
+ * failure inside a configured run — is not a declared absence and keeps the pre-D-23 behavior: the
+ * stage holds or fails exactly as it did before. The bundle result may be null for a stage without
+ * deterministic evidence, which is never this gap.
+ */
+export function runtimeVerificationNotConfigured(bundle: VerificationEvidenceBundle | null): boolean {
+  return (
+    bundle !== null &&
+    bundle.verification === "runtime" &&
+    bundle.outcome === "deferred" &&
+    bundle.checks.length > 0 &&
+    bundle.checks.every(
+      (check) => check.status === "skipped" && check.reason === RUNTIME_NOT_CONFIGURED_REASON,
+    )
+  );
 }
 
 /**
@@ -893,6 +932,12 @@ export function deferredRuntimeBlocksSuccess(bundle: VerificationEvidenceBundle)
  * with no evidence at all cannot be reported as a success either, because nothing was observed. A
  * verifier may still fail, request a fix, or report inconclusive on evidence that did pass, because an
  * interpreter that spots something the process exit code cannot is worth hearing.
+ *
+ * D-23 is the one exception, and it is an explicit exception rather than a relaxation: a runtime bundle
+ * that is exactly "the project declared no runtime verification" advances with the gap recorded (the
+ * orchestrator reaches this point with a framework-authored result and no model call at all), and the
+ * finding attached here is the warning a human reads at the push gate — not a hold. Any *other*
+ * deferred runtime bundle still cannot be called a success.
  */
 export function applyDeterministicEvidence(
   bundle: VerificationEvidenceBundle,
@@ -904,6 +949,16 @@ export function applyDeterministicEvidence(
       outcome: "needs_fix",
       override: "deterministic_failure",
       findings: verificationFailureFindings(bundle, featureId),
+    };
+  }
+
+  if (runtimeVerificationNotConfigured(bundle) && reported === "success") {
+    return {
+      outcome: reported,
+      // No override: the stage advances. The finding is the gap itself, so the run result and the
+      // workflow log name what was skipped and what acknowledging it will take.
+      override: "none",
+      findings: runtimeNotConfiguredFindings(bundle, featureId),
     };
   }
 
@@ -931,6 +986,31 @@ function deferredRuntimeFindings(
         "Runtime verification produced no evidence, so the stage cannot be reported as a success.",
         "Nothing was started, no request was made, and no acceptance criterion was put to the running application, so this is not a pass and not a failure: it is unmeasured.",
         "Declare a runtime command, a readiness condition, and at least one check in agent-workflow.config.json to have the feature verified at runtime.",
+      ].join(" "),
+    },
+  ];
+}
+
+/**
+ * What a human needs to know about a runtime stage D-23 advanced with a recorded gap.
+ *
+ * The gap is the message: nothing ran because nothing was configured, the stage carried the deferred
+ * bundle forward rather than calling a model to say so, and publishing stays behind an explicit
+ * acknowledgment. Written by the framework alongside the recorded bundle, not by a verifier (R-263,
+ * decision D-23).
+ */
+function runtimeNotConfiguredFindings(
+  bundle: VerificationEvidenceBundle,
+  featureId: string,
+): readonly ReviewFinding[] {
+  return [
+    {
+      featureId,
+      severity: "warning" as const,
+      message: [
+        `Runtime verification: not performed (not configured) at revision ${String(bundle.revision)}.`,
+        "No runtime verification is declared in agent-workflow.config.json, so no process was started and no acceptance criterion was put to a running application.",
+        "Publishing stays behind an explicit acknowledgment: pass `--accept-unverified runtime` to `agentflow approve push`.",
       ].join(" "),
     },
   ];

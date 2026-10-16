@@ -187,6 +187,7 @@ export const ALL_CATALOG_CODES: readonly CatalogCode[] = [
   "final_gate_not_recorded",
   "final_gate_evidence_stale",
   "push_approval_stale",
+  "push_approval_unverified_runtime",
   "push_approval_already_granted",
   "publisher_not_configured",
   "publish_not_approved",
@@ -832,6 +833,12 @@ const ORCHESTRATION_CATALOG: Record<OrchestrationErrorCode, CatalogBuilder> = {
     "The publishing approval is stale",
     "the tree, revision, or gate moved after the push approval was recorded, so the approval no longer covers this code",
     (context) => `Re-run to a fresh gate and approve push again, then ${runOf(context)}`,
+  ),
+  // orchestration/src/errors.ts:45
+  push_approval_unverified_runtime: orchestrationEntry(
+    "Push approval was refused: runtime verification was not performed",
+    "the recorded final gate carries a runtime stage that advanced with no verification configured, and publishing it needs the acknowledgment `--accept-unverified runtime`",
+    (context) => `Read the refusal, then run agentflow approve push ${context.featureId ?? "<id>"} --accept-unverified runtime`,
   ),
   // orchestration/src/errors.ts:44; orchestration/src/orchestrator.ts:851-860
   push_approval_already_granted: orchestrationEntry(

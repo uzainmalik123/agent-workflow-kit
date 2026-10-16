@@ -1,4 +1,5 @@
 import type { FinalGateResult, FinalGateStageResult } from "./final-gate.js";
+import { recordedUnverifiedRuntime } from "./final-gate.js";
 import type { FixAttemptRecord } from "./fix-history.js";
 import { latestRecordedSecurityReview } from "./security.js";
 import type { WorkspaceChanges } from "./workspace.js";
@@ -253,17 +254,31 @@ function securityCheckCounts(
 function verificationLines(gate: FinalGateResult): readonly string[] {
   const stages = verificationStagesOf(gate);
 
-  if (stages.length === 0) {
-    return [`- ${NOT_RECORDED}: the recorded gate carries no per-stage verification results.`];
-  }
+  const stageRows =
+    stages.length === 0
+      ? [`- ${NOT_RECORDED}: the recorded gate carries no per-stage verification results.`]
+      : stages.map((stage) => {
+          const measured = stage.revision === null ? "" : ` at revision ${String(stage.revision)}`;
 
-  return stages.map((stage) => {
-    const measured = stage.revision === null ? "" : ` at revision ${String(stage.revision)}`;
+          const against = stage.fingerprint === null ? "" : ` against tree ${stage.fingerprint}`;
 
-    const against = stage.fingerprint === null ? "" : ` against tree ${stage.fingerprint}`;
+          return `- ${stage.verification} (${stage.stage}): ${stage.status}${measured}${against}`;
+        });
 
-    return `- ${stage.verification} (${stage.stage}): ${stage.status}${measured}${against}`;
-  });
+  // D-23: the recorded gap is stated in the summary in the words the decision gives it, so a human at
+  // the push approval reads it before they approve and knows exactly what the flag acknowledges.
+  // Read back defensively rather than trusted: the gate document was parsed from disk, and a
+  // document written before D-23 carries no gap list at all.
+  const unverified = recordedUnverifiedRuntime(gate);
+
+  return unverified.length === 0
+    ? stageRows
+    : [
+        ...stageRows,
+        "",
+        `- runtime verification: not performed (not configured)`,
+        `- Publishing requires \`--accept-unverified runtime\` on ${gate.featureId}'s push approval.`,
+      ];
 }
 
 /**

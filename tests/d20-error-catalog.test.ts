@@ -97,7 +97,7 @@ afterEach(async () => {
 });
 
 describe("D-20 catalog: exhaustive coverage", () => {
-  it("covers every real union: 78 orchestration codes, 9 capability reasons, 14 opencode codes, 8 project codes, baseline + workspace refusals, CLI statuses", () => {
+  it("covers every real union: 79 orchestration codes, 9 capability reasons, 14 opencode codes, 8 project codes, baseline + workspace refusals, CLI statuses", () => {
     // Read from the sources, not assumed (Task W.1):
     // - OrchestrationErrorCode: orchestration/src/errors.ts:10-88, via the keys of
     //   ORCHESTRATION_FAILURE_CLASS (orchestration/src/errors.ts:96-176, a
@@ -110,7 +110,7 @@ describe("D-20 catalog: exhaustive coverage", () => {
     //   orchestration/src/workspace.ts:201-207; workspace refusals: :239-251.
     // - CLI run-loop statuses printed through the catalog: apps/cli/src/commands.ts:1059-1068.
     const orchestrationCodes = Object.keys(ORCHESTRATION_FAILURE_CLASS);
-    expect(orchestrationCodes.length).toBe(78);
+    expect(orchestrationCodes.length).toBe(79);
     const opencodeCodes = [
       "unknown_role",
       "role_mismatch",

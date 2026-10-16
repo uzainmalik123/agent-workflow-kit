@@ -157,3 +157,10 @@ Priority order used for tie-breaks (PRD §42): human approval, deterministic ver
 
 - **Status:** Accepted (owner decision, 2026-10-11)
 - **Decision:** evidence for a check that never started is valid without a start timestamp, but only for a skipped check with a declared reason. Any check that ran must carry a valid timestamp. Basis: R-146 (missing runtime config yields deferred, never a false success), and invented timestamps would make evidence say something untrue.
+
+## D-23. A project with no runtime configuration advances with a recorded gap
+
+- **Status:** Proposed (recommendation: option A). Blocked on Task X confirming the final gate can carry a deferred gap.
+- **Context:** F-002 (2026-10-11/12): with no runtime config, runtime_verification returned `inconclusive` after a 368s model call and could not advance; re-running repeats it. A second attempt failed with a provider connection reset after 544s.
+- **Decision (draft):** when the runtime bundle is `deferred` because no runtime verification is configured, the orchestrator records the bundle, makes no model call, and advances. The final summary lists "runtime verification: not performed (not configured)" and `approve push` requires `--accept-unverified runtime`. A runtime that is configured but fails, blocks, or cannot start is not covered and still stops the workflow.
+- **Basis:** PRD R-146 (never a false success): the gap is recorded and a human acknowledges it. Priority: human approval over automatic verification. Changes workflow behavior (R-263), so it needs this decision.

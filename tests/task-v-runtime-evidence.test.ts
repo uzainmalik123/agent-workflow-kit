@@ -376,7 +376,7 @@ describe("Task V.4: CLI prints the raw message as Detail and never a placeholder
 });
 
 describe("Task V.3: deterministic pipeline with real providers and a fake model executor only", () => {
-  it("drives static and test to pass and holds runtime at inconclusive on valid deferred evidence", async () => {
+  it("drives past the unconfigured runtime stage to the push gate on the recorded gap (D-23)", async () => {
     const workspaceDir = await makeCopy();
     const storeRoot = await mkdtemp(join(tmpdir(), "agent-workflow-kit-task-v-store-"));
     roots.push(storeRoot);
@@ -460,13 +460,17 @@ describe("Task V.3: deterministic pipeline with real providers and a fake model 
     expect(testResult.verification).not.toBeNull();
     expect(testResult.verification?.outcome).toBe("passed");
 
-    // Runtime: no runtime config on the p4-basic copy, so the real provider reports deferred with
-    // one skipped check. The bundle is valid (V.1), so this is NOT a rejection: the stage holds at
-    // inconclusive because nothing was measured (R-146), and the model's own success is overruled
-    // rather than accepted.
-    const runtimeResult = await runUntil((result) => result.stage === "runtime_verification");
-    expect(runtimeResult.status).toBe("inconclusive");
-    expect(runtimeResult.state).toBe(WorkflowState.RuntimeVerification);
+    // Runtime (D-23): no runtime configuration on the p4-basic copy, so the real provider reports
+    // deferred with one skipped check (V.1). This is the one absence the workflow carries forward
+    // (D-23): the framework itself advances the stage without consulting any model, records the
+    // deferred bundle, and holds publishing behind an explicit `--accept-unverified runtime`
+    // acknowledgment (compliance/decisions.md D-23). Valid-but-unmeasured deferred evidence of any
+    // other shape is still held at inconclusive exactly as before (R-146).
+    const runtimeResult = await runUntil(
+      (result) => result.stage === "runtime_verification" && result.status === "stage_completed",
+    );
+    expect(runtimeResult.status).toBe("stage_completed");
+    expect(runtimeResult.state).toBe(WorkflowState.SecurityReview);
     expect(runtimeResult.error).toBeNull();
     expect(runtimeResult.verification).not.toBeNull();
     expect(runtimeResult.verification?.outcome).toBe("deferred");
@@ -475,25 +479,65 @@ describe("Task V.3: deterministic pipeline with real providers and a fake model 
       status: "skipped",
       reason: "runtime_not_configured",
     });
-    // The fake model was consulted and overruled: its success did not stand.
-    expect(executor.requestFor("runtime_verification")).toBeDefined();
+    // The advance is the framework's own: the fake model was never consulted for the runtime stage,
+    // so there was no reported success to overrule.
+    expect(executor.requestFor("runtime_verification")).toBeUndefined();
 
-    // The hold is deterministic, not flaky: running again re-presents the same stage, still
-    // inconclusive and still without any rejection.
-    const again = await orchestrator.runNext("F-001");
-    expect(again).toMatchObject({ status: "inconclusive", stage: "runtime_verification" });
-    expect(again.error).toBeNull();
+    // The advance is a real event, not an error state: the next run walks into and through the
+    // security review, landing in the final gate instead of re-presenting the runtime stage forever
+    // (the parking this decision replaces).
+    expect(await orchestrator.runNext("F-001")).toMatchObject({
+      stage: "security_review",
+      state: WorkflowState.FinalGate,
+    });
 
-    // STOP (Task V.3 escape hatch): security_review, final_gate, final_summary and
-    // awaiting_push_approval are unreachable from here by design, not by defect. A deferred
-    // runtime bundle holds the stage at inconclusive with no state transition
-    // (orchestration/src/verification.ts `applyDeterministicEvidence` +
-    // orchestration/src/orchestrator.ts `#commit` with no event), and even past it the final gate
-    // reports deferred evidence as an inconclusive blocker rather than a pass
-    // (orchestration/src/final-gate.ts `evaluateVerificationStage`, "deferred" branch). Reaching
-    // the push gate would need a runtime configuration or a workflow-behavior change, both of
-    // which are out of scope under R-263. No stage rejected or blocked: every status observed was
-    // stage_completed or inconclusive.
+    // From here the pipeline runs on nothing but the recorded gap: the final gate treats the stage's
+    // `not_performed` verdict as the one absence its aggregate may stand on, and the session reaches
+    // awaiting_push_approval rather than parking before it.
+    const reachState = async (target: WorkflowState): Promise<void> => {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const session = await store.load("F-001");
+
+        if (session.machine.state === target) {
+          return;
+        }
+
+        if (session.machine.state === WorkflowState.AwaitingPlanApproval) {
+          await orchestrator.approvePlan("F-001");
+          continue;
+        }
+
+        await orchestrator.runNext("F-001");
+      }
+
+      throw new Error(`Pipeline never reached "${target}".`);
+    };
+
+    await reachState(WorkflowState.AwaitingPushApproval);
+
+    const gate = (await store.readArtifact("F-001", "final_gate")) as Record<string, unknown>;
+    const gaps = gate["unverifiedRuntime"] as readonly {
+      workStage: string;
+      reason: string;
+      revision: number;
+      fingerprint: string;
+    }[];
+    expect(gate["status"]).toBe("passed");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatchObject({
+      workStage: "runtime_verification",
+      reason: "runtime_not_configured",
+    });
+    expect(gaps[0]?.revision).toBeGreaterThan(0);
+    expect(gaps[0]?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+
+    const summary = await store.readArtifactText("F-001", "final_summary");
+    expect(summary).toContain("runtime verification: not performed (not configured)");
+
+    // STOP: nothing was published. The push approval itself is refused until a human acknowledges the
+    // gap with `--accept-unverified runtime` — that command surface is Task X's own suite
+    // (tests/d23-runtime-gap.test.ts); here the pipeline is driven only as far as the gate the
+    // acknowledgment belongs behind, by design rather than by defect.
     expect(observed.every((result) => result.status !== "rejected")).toBe(true);
     expect(
       observed.some((result) => result.error?.code === "verification_evidence_invalid"),

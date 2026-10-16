@@ -124,6 +124,8 @@ export {
   FINAL_GATE_VERIFICATION_STATUSES,
   MAX_FINAL_GATE_CRITERIA,
   recordedFinalGateFrom,
+  recordedUnverifiedRuntime,
+  RUNTIME_NOT_CONFIGURED_GAP_REASON,
 } from "./final-gate.js";
 export type {
   FinalGateApprovalInput,
@@ -150,6 +152,7 @@ export type {
   FinalGateVerificationInput,
   FinalGateVerificationStatus,
   RecordedFinalGateOutcome,
+  UnverifiedRuntimeGap,
 } from "./final-gate.js";
 
 export {
@@ -221,6 +224,8 @@ export {
   MAX_EVIDENCE_DETAIL_CHARS,
   MAX_EVIDENCE_EXCERPT_CHARS,
   mergeDeterministicEvidence,
+  RUNTIME_NOT_CONFIGURED_REASON,
+  runtimeVerificationNotConfigured,
   SKIPPED_WITHOUT_START_REASONS,
   validateVerificationEvidenceBundle,
   VERIFICATION_ARTIFACT_NAME,

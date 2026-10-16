@@ -2,6 +2,7 @@ import { WorkflowState, type FixReturnState } from "@agent-workflow-kit/core";
 import { staleVerificationEvidence } from "./fix-policy.js";
 import { staleSecurityReview, type SecurityReviewEvidence } from "./security.js";
 import {
+  runtimeVerificationNotConfigured,
   VERIFICATION_STAGE_BY_WORK_STAGE,
   VERIFICATION_WORK_STAGES,
   type VerificationEvidenceBundle,
@@ -67,6 +68,13 @@ export type FinalGateStatus = (typeof FINAL_GATE_STATUSES)[number];
  * `inconclusive` is a recorded `deferred` bundle: the project declared that check impossible, which
  * the verification stage itself treats as unmeasured rather than as a failure, and which the gate
  * likewise will not read as a pass.
+ *
+ * `not_performed` is D-23's separate word, and it exists for exactly one bundle: a runtime stage whose
+ * whole recorded evidence is the project declaring no runtime verification (`runtime_not_configured`).
+ * That stage advanced — decision D-23 — so it is neither a failure nor something unmeasured that a
+ * verifier still judged; it was never performed at all. It carries no blocker on its own, but it
+ * holds the push approval behind an explicit acknowledgment, and every acceptance criterion keeps its
+ * `inconclusive` verdict because none of them was put to a running application (R-146).
  */
 export const FINAL_GATE_VERIFICATION_STATUSES = [
   "passed",
@@ -74,6 +82,7 @@ export const FINAL_GATE_VERIFICATION_STATUSES = [
   "inconclusive",
   "missing",
   "stale",
+  "not_performed",
 ] as const;
 
 export type FinalGateVerificationStatus = (typeof FINAL_GATE_VERIFICATION_STATUSES)[number];
@@ -196,6 +205,25 @@ export interface FinalGateStageResult {
   readonly reference: string;
 }
 
+/**
+ * One gap the gate certified the feature with, and that publishing must be acknowledged against.
+ *
+ * D-23 names exactly one: runtime verification never ran because the project declares no runtime
+ * configuration. Every field is a fact the recorded evidence already carries — the reason code comes
+ * from the bundle's skipped check, and the revision and fingerprint come from the same bundle — so the
+ * acknowledgment in the approval record is bound to this evidence, not to a phrase.
+ */
+export const RUNTIME_NOT_CONFIGURED_GAP_REASON = "runtime_not_configured" as const;
+
+export interface UnverifiedRuntimeGap {
+  readonly workStage: "runtime_verification";
+  readonly reason: typeof RUNTIME_NOT_CONFIGURED_GAP_REASON;
+  /** The revision the deferred bundle was recorded at. */
+  readonly revision: number;
+  /** The implementation fingerprint the deferred bundle was collected against. */
+  readonly fingerprint: string;
+}
+
 /** One approved acceptance criterion and the final result the gate could establish for it. */
 export interface FinalGateCriterionResult {
   readonly requirementId: string;
@@ -228,6 +256,13 @@ export interface FinalGateResult {
   readonly criteriaTruncated: boolean;
   readonly verification: FinalGateVerificationStatus;
   readonly verificationStages: readonly FinalGateStageResult[];
+  /**
+   * The recorded gap a publishing approval must acknowledge, empty when there is none.
+   *
+   * Read back from the persisted gate document by `recordedUnverifiedRuntime`, and bound into every
+   * approval through the gate digest the approval record already carries.
+   */
+  readonly unverifiedRuntime: readonly UnverifiedRuntimeGap[];
   readonly security: FinalGateSecurityStatus;
   readonly scope: FinalGateScopeStatus;
   readonly approval: FinalGateApprovalStatus;
@@ -458,7 +493,9 @@ export function criterionClaimsFrom(artifact: unknown, stage: WorkStage): readon
  * How the per-stage verdicts combine into the one the gate reports.
  *
  * `failed` and `missing` outrank `stale`, because a stage with no evidence at all is a larger gap
- * than a stage whose evidence is merely old, and both outrank `inconclusive`. The order exists to
+ * than a stage whose evidence is merely old, and both outrank `inconclusive`. `not_performed` is the
+ * least of the findings: a declared, acknowledged absence (D-23) is the one gap the workflow is
+ * allowed to carry, so it never outranks a stage measurement — including a pass. The order exists to
  * make the aggregate deterministic rather than to make it clever: the same set of stages in the same
  * states always names the same worst one.
  */
@@ -468,6 +505,7 @@ const VERIFICATION_PRECEDENCE: readonly FinalGateVerificationStatus[] = [
   "stale",
   "inconclusive",
   "passed",
+  "not_performed",
 ];
 
 function worstVerification(
@@ -656,6 +694,20 @@ function evaluateVerificationStage(
           message: `The newest ${input.verification} evidence is "${bundle.outcome}" for revision ${String(bundle.revision)}. Deterministic checks decided this stage, and the gate does not overturn them.`,
         },
       ],
+    };
+  }
+
+  // D-23: a runtime stage whose entire recorded evidence is "no runtime verification is configured"
+  // was not performed at all — the stage advanced with the gap recorded (decision D-23), so the gate
+  // carries it forward as a named gap instead of holding the feature on evidence nobody was ever
+  // going to collect. Priority per PRD §42: a human acknowledges at the push gate rather than the
+  // workflow sitting forever on an unmeasured stage. Any other deferred bundle — one whose runs were
+  // cancelled, not attempted, or otherwise skipped for a declared reason — keeps the inconclusive
+  // verdict below, and a configured runtime that failed or blocked fails the gate above.
+  if (input.stage === "runtime_verification" && runtimeVerificationNotConfigured(bundle)) {
+    return {
+      status: "not_performed",
+      blockers: [],
     };
   }
 
@@ -870,7 +922,15 @@ export function evaluateFinalGate(input: FinalGateInput): FinalGateResult {
     });
   }
 
-  const criteria = criterionResults(input.criteria, ordered, verification);
+  const criteria = criterionResults(
+    input.criteria,
+    ordered,
+    // A criterion is never "not_performed": the vocabulary for "nobody put this criterion to a
+    // running application" is `inconclusive` (D-23). The gate can pass with the gap recorded because
+    // a human will acknowledge exactly this, but its criteria keep the unmeasured verdict, and the
+    // R-146 word for it stays the same word it always was.
+    verification === "not_performed" ? "inconclusive" : verification,
+  );
 
   const fixer = fixerStatus(input, stages);
 
@@ -886,6 +946,18 @@ export function evaluateFinalGate(input: FinalGateInput): FinalGateResult {
   const status = gateStatus(sorted, verification, security, scope);
   const route = routeOf(sorted);
 
+  // The unverified gaps are read out of the per-stage verdicts themselves: `not_performed` exists only
+  // for the D-23 runtime gap, and each row with that status carries the revision and fingerprint of
+  // the bundle the gap was recorded against.
+  const unverifiedRuntime: UnverifiedRuntimeGap[] = stages
+    .filter((stage) => stage.status === "not_performed")
+    .map((stage) => ({
+      workStage: "runtime_verification",
+      reason: RUNTIME_NOT_CONFIGURED_GAP_REASON,
+      revision: stage.revision ?? 0,
+      fingerprint: stage.fingerprint ?? "",
+    }));
+
   return {
     schemaVersion: 1,
     featureId: input.featureId,
@@ -900,6 +972,7 @@ export function evaluateFinalGate(input: FinalGateInput): FinalGateResult {
     criteriaTruncated: criteria.length > MAX_FINAL_GATE_CRITERIA,
     verification,
     verificationStages: stages,
+    unverifiedRuntime,
     security,
     scope,
     approval: input.approval.status,
@@ -971,6 +1044,56 @@ export function recordedFinalGateFrom(value: unknown): RecordedFinalGateOutcome 
 
 function isFinalGateStatus(value: unknown): value is FinalGateStatus {
   return value === "passed" || value === "failed" || value === "inconclusive";
+}
+
+/**
+ * Reads the recorded gaps back out of a gate document that already passed {@link recordedFinalGateFrom}.
+ *
+ * The gate result is a parsed document rather than a typed one, so the list is checked entry by entry
+ * instead of trusted: an entry that is not an object, names another reason or stage, or carries no
+ * usable revision is dropped rather than normalized. A dropped entry cannot widen an approval — it can
+ * only weaken a refusal, and refusals are re-litigated in `buildPushApproval` from the artifact bytes,
+ * so the check is made on the same bytes both times. A document that carries no field at all (written
+ * before D-23) reads as no gaps, which is what it means.
+ */
+export function recordedUnverifiedRuntime(value: FinalGateResult): readonly UnverifiedRuntimeGap[] {
+  const raw: unknown = (value as unknown as Record<string, unknown>)["unverifiedRuntime"];
+
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const gaps: UnverifiedRuntimeGap[] = [];
+
+  for (const entry of raw) {
+    if (!isRecord(entry) || entry["reason"] !== RUNTIME_NOT_CONFIGURED_GAP_REASON) {
+      continue;
+    }
+
+    if (entry["workStage"] !== "runtime_verification") {
+      continue;
+    }
+
+    const revision = entry["revision"];
+    const fingerprint = entry["fingerprint"];
+
+    if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 0) {
+      continue;
+    }
+
+    if (typeof fingerprint !== "string") {
+      continue;
+    }
+
+    gaps.push({
+      workStage: "runtime_verification",
+      reason: RUNTIME_NOT_CONFIGURED_GAP_REASON,
+      revision,
+      fingerprint,
+    });
+  }
+
+  return gaps;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1127,6 +1250,19 @@ const HARD_BLOCKERS: ReadonlySet<FinalGateBlockerCode> = new Set<FinalGateBlocke
   "working_tree_changed",
 ]);
 
+/**
+ * The aggregate verification verdicts a pass can stand on.
+ *
+ * `passed` is the ordinary one. `not_performed` (D-23) is the recorded runtime gap: the one absence
+ * the workflow is allowed to carry, because it was recorded by the framework, advanced past by that
+ * same decision, and is held behind an explicit human acknowledgment at the push gate. Every other
+ * aggregate — including plain `inconclusive` — keeps the gate from passing.
+ */
+const PASSING_VERIFICATION: ReadonlySet<FinalGateVerificationStatus> = new Set([
+  "passed",
+  "not_performed",
+]);
+
 function gateStatus(
   blockers: readonly FinalGateBlocker[],
   verification: FinalGateVerificationStatus,
@@ -1139,7 +1275,7 @@ function gateStatus(
 
   if (
     blockers.length > 0 ||
-    verification !== "passed" ||
+    !PASSING_VERIFICATION.has(verification) ||
     security !== "pass" ||
     (scope !== "clean" && scope !== "not_applicable")
   ) {

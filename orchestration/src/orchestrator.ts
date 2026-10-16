@@ -136,6 +136,7 @@ import {
   applyDeterministicEvidence,
   bindVerificationEvidenceToRequest,
   mergeDeterministicEvidence,
+  runtimeVerificationNotConfigured,
   validateVerificationEvidenceBundle,
   verificationEvidenceSummaries,
   VERIFICATION_ARTIFACT_NAME,
@@ -822,10 +823,22 @@ export class WorkflowOrchestrator {
    *
    * `options.actor` is recorded verbatim when given. Nothing derives it, and nothing requires it: an
    * unnamed approver is a real situation, and a name written by the framework would be worse than none.
+   *
+   * D-23: `options.acceptUnverifiedRuntime` is the acknowledgment of a recorded runtime gap. When the
+   * approval is built against a gate that carries one (runtime verification not performed because the
+   * project declares no runtime configuration) and the acknowledgment is missing, the approval is
+   * refused and the refusal lists the gap. The acknowledgment is not stored as a new session field:
+   * the record already binds the gate document by bytes, revision, and fingerprint, and that gate
+   * document is what names the gap — so "an approved session whose bound gate carries a gap" is
+   * possible only through an acknowledged approval, and a gate or tree that moved afterwards
+   * invalidates the whole binding.
    */
   async approvePush(
     featureId: string,
-    options?: { readonly actor?: string | null },
+    options?: {
+      readonly actor?: string | null;
+      readonly acceptUnverifiedRuntime?: boolean;
+    },
   ): Promise<OrchestrationResult> {
     const session = await this.#store.load(featureId);
     const base: ResultExtras = { featureId, fromState: session.machine.state };
@@ -920,6 +933,7 @@ export class WorkflowOrchestrator {
             gateSha256: digestArtifactText(await reader.readArtifactText("final_gate") ?? ""),
             fingerprint: measured.fingerprint,
             actor,
+            acceptUnverifiedRuntime: options?.acceptUnverifiedRuntime === true,
           });
 
           if (!approval.ok) {
@@ -1898,10 +1912,40 @@ export class WorkflowOrchestrator {
     let raw: unknown;
     let executorFailure: OrchestrationError | null = null;
 
-    try {
-      raw = await this.#executor.execute(request);
-    } catch (error) {
-      executorFailure = orchestrationError("executor_threw", `Stage executor threw: ${describeError(error)}`);
+    // D-23: the one runtime bundle that is exactly "no runtime verification is configured" advances
+    // without an executor call. Every other runtime outcome — a configured run that failed, blocked,
+    // started but never became ready, or ran out of time — still runs the verifier below and is still
+    // held by the same deterministic rules as before (R-263, decision D-23). The result handed down is
+    // the framework's own: no model was consulted, there is nothing in it a model wrote, and the only
+    // effect it has is to commit the recorded deferred bundle and the advance event.
+    if (runtimeVerificationNotConfigured(evidence.bundle)) {
+      raw = {
+        featureId,
+        stage,
+        outcome: "success",
+        summary:
+          "Runtime verification: not performed (not configured). No runtime verification is declared in agent-workflow.config.json, so the stage advanced with the deferred bundle recorded and publishing stays behind `--accept-unverified runtime`.",
+        findings: [],
+        evidence: [],
+        artifacts: [
+          {
+            name: VERIFICATION_ARTIFACT_NAME,
+            content: {
+              featureId,
+              stage,
+              performed: false,
+              reason: "runtime_not_configured",
+              note: "Framework-authored: no verifier ran, because there was nothing configured to verify.",
+            },
+          },
+        ],
+      };
+    } else {
+      try {
+        raw = await this.#executor.execute(request);
+      } catch (error) {
+        executorFailure = orchestrationError("executor_threw", `Stage executor threw: ${describeError(error)}`);
+      }
     }
 
     // The fix guard runs before the scope check, and that order is the whole point of not restoring

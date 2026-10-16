@@ -12,6 +12,9 @@ import {
   formatFindings,
   formatPlanReview,
   planReviewReport,
+  recordedFinalGateFrom,
+  recordedUnverifiedRuntime,
+  type FinalGateResult,
   type OrchestrationResult,
   type PlanReviewReport,
 } from "@agent-workflow-kit/orchestration";
@@ -533,6 +536,103 @@ async function storedPlanReviewPath(
 }
 
 /**
+ * The gate-derived options {@link nextStep} reads at a human gate.
+ *
+ * The two pending gates each hide one fact a hint may need: the plan gate needs to know whether the
+ * stored review is resolved, and the push gate needs to know whether the recorded gate carries a
+ * runtime gap a push approval must acknowledge (D-23). Any other state needs neither, and reads
+ * neither, so a state whose hint cannot change pays for none of it.
+ */
+async function pendingGateNextOptions(
+  store: CliStack["store"],
+  featureId: string,
+  state: WorkflowState,
+): Promise<{ planReviewUnresolved?: boolean; unverifiedRuntime?: boolean }> {
+  if (state === WorkflowState.AwaitingPlanApproval) {
+    return { planReviewUnresolved: (await storedPlanReview(store, featureId)).unresolved };
+  }
+
+  if (state === WorkflowState.AwaitingPushApproval) {
+    return { unverifiedRuntime: await pushGateRuntimeGap(store, featureId) };
+  }
+
+  return {};
+}
+
+/**
+ * The recorded final gate document, or `null` when it cannot be read.
+ *
+ * The only read the push-gate display and its refusal make: the gate document is the same bytes the
+ * approval binds itself to, so what the CLI learns here is what the orchestrator will act on.
+ */
+async function recordedFinalGate(
+  store: CliStack["store"],
+  featureId: string,
+): Promise<FinalGateResult | null> {
+  let value: unknown;
+
+  try {
+    value = await store.readArtifact(featureId, "final_gate");
+  } catch {
+    return null;
+  }
+
+  const parsed = recordedFinalGateFrom(value);
+
+  return parsed.ok ? parsed.result : null;
+}
+
+/**
+ * Whether the recorded final gate names a runtime gap a push approval must acknowledge (D-23).
+ *
+ * Unreadable reads as a gap: fail closed (N2, P-18), because the readable answers are exact and an
+ * unreadable gate is a state the approval itself refuses, so a refusal in front of that refusal —
+ * with its own explanation — is the truthful direction.
+ */
+async function pushGateRuntimeGap(store: CliStack["store"], featureId: string): Promise<boolean> {
+  const gate = await recordedFinalGate(store, featureId);
+
+  return gate === null ? true : recordedUnverifiedRuntime(gate).length > 0;
+}
+
+/**
+ * The gap lines a push-gate refusal lists, with the evidence location.
+ *
+ * Mirrors the D-20 rule for refusals: what happened, why, and where the evidence is. When the gate
+ * document cannot be read as a gate result, the line says that instead of inventing details.
+ */
+async function pushRuntimeGapLines(
+  store: CliStack["store"],
+  featureId: string,
+): Promise<readonly string[]> {
+  const gate = await recordedFinalGate(store, featureId);
+
+  if (gate === null) {
+    try {
+      const path = await store.artifactPath(featureId, "final_gate");
+      return [`Recorded final gate: ${path}`, "The gate document could not be read as a final-gate result."];
+    } catch {
+      return ["The final-gate document could not be located."];
+    }
+  }
+
+  const gaps = recordedUnverifiedRuntime(gate);
+  const path = await store.artifactPath(featureId, "final_gate").catch(() => null);
+
+  if (gaps.length === 0) {
+    return path === null ? [] : [`Recorded final gate: ${path}`];
+  }
+
+  return [
+    ...gaps.map(
+      (gap) =>
+        `- ${gap.workStage}: runtime verification: not performed (not configured) — deferred evidence recorded at revision ${String(gap.revision)} against tree ${gap.fingerprint}.`,
+    ),
+    ...(path === null ? [] : [`Recorded final gate: ${path}`]),
+  ];
+}
+
+/**
  * Lines for an unresolved review that recorded no parseable findings.
  *
  * The gate reads only the stored artifact content's `verdict`, `summary`, and
@@ -783,18 +883,8 @@ export function createCli(options: CreateCliOptions = {}): Command {
 
         // What to do now, from whatever state the feature is in. Same stream as the status
         // itself, appended after it: the lines above are unchanged.
-        const statusUnresolved =
-          session.machine.state === WorkflowState.AwaitingPlanApproval
-            ? (await storedPlanReview(store, targetFeatureId)).unresolved
-            : undefined;
-        console.log(
-          formatNext(
-            nextStep(
-              session,
-              statusUnresolved === undefined ? {} : { planReviewUnresolved: statusUnresolved },
-            ),
-          ),
-        );
+        const statusNextOptions = await pendingGateNextOptions(store, targetFeatureId, session.machine.state);
+        console.log(formatNext(nextStep(session, statusNextOptions)));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Error: ${message}`);
@@ -858,14 +948,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
-        const unresolved =
-          session.machine.state === WorkflowState.AwaitingPlanApproval
-            ? (await storedPlanReview(store, featureId)).unresolved
-            : undefined;
-        const step = nextStep(
-          session,
-          unresolved === undefined ? {} : { planReviewUnresolved: unresolved },
-        );
+        const step = nextStep(session, await pendingGateNextOptions(store, featureId, session.machine.state));
         console.log(`Next: ${step.command}`);
         console.log(step.reason);
       } catch (error: unknown) {
@@ -1031,16 +1114,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
             // message above; silenced by --quiet like any other stdout guidance from this command.
             if (opts.quiet !== true) {
               const paused = await stack.store.load(targetFeatureId);
-              const pausedUnresolved =
-                paused.machine.state === WorkflowState.AwaitingPlanApproval
-                  ? (await storedPlanReview(stack.store, targetFeatureId)).unresolved
-                  : undefined;
               console.log(
                 formatNext(
-                  nextStep(
-                    paused,
-                    pausedUnresolved === undefined ? {} : { planReviewUnresolved: pausedUnresolved },
-                  ),
+                  nextStep(paused, await pendingGateNextOptions(stack.store, targetFeatureId, paused.machine.state)),
                 ),
               );
             }
@@ -1199,7 +1275,15 @@ export function createCli(options: CreateCliOptions = {}): Command {
     .description("Approve publishing the feature")
     .argument("[feature-id]", "Feature ID to approve (defaults to most recent)")
     .option("-a, --actor <actor>", "Actor/approver identifier")
-    .action(async (featureId: string | undefined, opts: { actor?: string }) => {
+    .option(
+      "--accept-unverified <kind>",
+      "Acknowledge a recorded verification gap the final gate carries. Only 'runtime' is recognized (D-23).",
+    )
+    .action(
+      async (
+        featureId: string | undefined,
+        opts: { actor?: string; acceptUnverified?: string },
+      ) => {
       try {
         const repoRoot = getRepoRoot(cwd());
         const stack = createStack(repoRoot, {});
@@ -1209,8 +1293,30 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
+        // D-23: the acknowledgment is read into the gate before anything is approved. The recorded
+        // gate document is the same bytes the approval will bind itself to, so what the CLI refuses
+        // over here is what the orchestrator refuses over if it were called anyway. Fail closed in
+        // the same way the plan gate reads its review (N2, P-18): an unreadable gate cannot be read
+        // as gap-free, and the orchestrator's own approval refusal names its real reason.
+        const gateGap = await pushGateRuntimeGap(stack.store, targetFeatureId);
+
+        if (gateGap && opts.acceptUnverified !== "runtime") {
+          console.error(
+            `Push approval refused for ${targetFeatureId}: the recorded final gate carries a runtime verification gap that was not acknowledged.`,
+          );
+          for (const line of await pushRuntimeGapLines(stack.store, targetFeatureId)) {
+            console.error(line);
+          }
+          console.error(
+            `Re-run with \`--accept-unverified runtime\` to acknowledge the gap explicitly, or declare runtime verification in agent-workflow.config.json and re-verify.`,
+          );
+          exit(1);
+          return;
+        }
+
         const result = await stack.orchestrator.approvePush(targetFeatureId, {
           actor: opts.actor ?? null,
+          acceptUnverifiedRuntime: opts.acceptUnverified === "runtime",
         });
 
         if (result.status === "gate_approved") {

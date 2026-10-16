@@ -24,6 +24,17 @@ export interface NextStepOptions {
    * gate passing silently.
    */
   readonly planReviewUnresolved?: boolean;
+  /**
+   * Whether the recorded final gate carries a runtime gap that publishing must acknowledge (D-23).
+   * Only read at `awaiting_push_approval`, where it decides whether the recommended approval carries
+   * `--accept-unverified runtime`.
+   *
+   * Absent means unknown, which reads as a gap for the same reason `planReviewUnresolved` reads as
+   * unresolved: the flag is accepted, and refused, exactly when the gap is real, so recommending it
+   * over a gap-free session cannot grant anything — and recommending it over an unreadable gate
+   * keeps the hint on the match with what the approval itself will require (P-18, fail closed).
+   */
+  readonly unverifiedRuntime?: boolean;
 }
 
 /**
@@ -90,11 +101,18 @@ export function nextStep(session: FeatureSession, options: NextStepOptions = {})
           ? `Review the plan, then run 'agentflow approve plan ${featureId} --accept-findings' (the stored review is unresolved) or 'agentflow abandon ${featureId} --reason "..."' to end the feature.`
           : `Review the plan, then run 'agentflow approve plan ${featureId}' or 'agentflow abandon ${featureId} --reason "..."' to end the feature.`,
       };
-    case WorkflowState.AwaitingPushApproval:
+    case WorkflowState.AwaitingPushApproval: {
+      // D-23: the hint names the acknowledgment exactly when the recorded gate carries the gap, so
+      // the recommended command is the command the approval will actually accept.
+      const gap = options.unverifiedRuntime ?? true;
+
       return {
         command: `agentflow status ${featureId}`,
-        reason: `Read the final summary, then run 'agentflow approve push ${featureId}' followed by 'agentflow run ${featureId}' to commit and push.`,
+        reason: gap
+          ? `Read the final summary, then run 'agentflow approve push ${featureId} --accept-unverified runtime' (the recorded gate names runtime verification: not performed) followed by 'agentflow run ${featureId}' to commit and push.`
+          : `Read the final summary, then run 'agentflow approve push ${featureId}' followed by 'agentflow run ${featureId}' to commit and push.`,
       };
+    }
     case WorkflowState.Complete:
       return {
         command: "done",

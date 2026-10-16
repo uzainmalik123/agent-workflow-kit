@@ -82,7 +82,7 @@ Requirements: Node.js `^22.13.0 || ^24.0.0 || >=26.0.0`, pnpm `11.27.1`
 pnpm install --frozen-lockfile
 pnpm build          # builds all packages to dist/
 pnpm smoke          # runtime smoke test against dist/
-pnpm verify         # lint + typecheck + test (1185 tests)
+pnpm verify         # lint + typecheck + test (1407 tests)
 pnpm verify:dist    # build + smoke
 ```
 
@@ -125,6 +125,11 @@ node /path/to/agent-workflow-kit/apps/cli/dist/cli.js status F-001
 node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve push F-001 --actor "your-name"
 # Records permission to publish; then `run` commits and pushes:
 # Next: agentflow run F-001
+
+# If the project declares no runtime verification, the push approval is refused until the
+# recorded gap is acknowledged explicitly:
+node /path/to/agent-workflow-kit/apps/cli/dist/cli.js approve push F-001 \
+  --actor "your-name" --accept-unverified runtime
 
 node /path/to/agent-workflow-kit/apps/cli/dist/cli.js run F-001
 # Commits and pushes, then reports completion
