@@ -42,6 +42,7 @@ export type OrchestrationErrorCode =
   | "final_gate_evidence_stale"
   | "push_approval_stale"
   | "push_approval_already_granted"
+  | "push_approval_unverified_runtime"
   | "publisher_not_configured"
   | "publish_not_approved"
   | "publish_state_invalid"
@@ -129,6 +130,7 @@ export const ORCHESTRATION_FAILURE_CLASS: Readonly<Record<OrchestrationErrorCode
     final_gate_evidence_stale: "workspace",
   push_approval_stale: "workflow",
   push_approval_already_granted: "workflow",
+  push_approval_unverified_runtime: "workflow",
   publisher_not_configured: "workflow",
   publish_not_approved: "workflow",
   publish_state_invalid: "workflow",

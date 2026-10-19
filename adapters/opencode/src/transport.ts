@@ -35,6 +35,19 @@ export type StageProgressEvent =
       readonly retry: number;
       readonly maxRetries: number;
     }
+  /**
+   * The run itself died on a transient provider failure and the stage is being retried after a
+   * backoff (D-24): `retry` is which retry this is (1-based), `maxRetries` is how many this
+   * failure allows (a `429` allows one), and `delayMs` is the backoff before the next attempt.
+   * Emitted only for a failure the detector recognized; every attempt keeps its own recording.
+   */
+  | {
+      readonly type: "transient_retry";
+      readonly stage: WorkStage;
+      readonly retry: number;
+      readonly maxRetries: number;
+      readonly delayMs: number;
+    }
   /** The stage returned or threw. Emitted for every stage, success or failure alike. */
   | { readonly type: "stage_finished"; readonly stage: WorkStage; readonly elapsedMs: number }
   /**

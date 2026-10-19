@@ -2,7 +2,7 @@ import type { FeatureMutationReader, PushApprovalRecord } from "@agent-workflow-
 import { digestArtifactText } from "./approval.js";
 import type { OrchestrationError } from "./errors.js";
 import { orchestrationError } from "./errors.js";
-import type { FinalGateResult } from "./final-gate.js";
+import { recordedUnverifiedRuntime, type FinalGateResult } from "./final-gate.js";
 
 /**
  * The publishing approval.
@@ -53,6 +53,14 @@ export interface PushApprovalEvidence {
   readonly fingerprint: string;
   /** Who approved, when the caller was told. Null when it was not told. */
   readonly actor: string | null;
+  /**
+   * Whether the human acknowledged a recorded runtime gap (D-23).
+   *
+   * Set by the caller from the explicit `--accept-unverified runtime` argument. When the gate the
+   * record is built from carries a gap this must be true, or the approval is refused; when the gate
+   * carries none, the flag is inert. Nothing else can make an unverified runtime stage publishable.
+   */
+  readonly acceptUnverifiedRuntime: boolean;
 }
 
 /**
@@ -69,6 +77,10 @@ export interface PushApprovalEvidence {
  *   wrote a snapshot — moves the fingerprint, and a human approving a summary of one tree cannot be
  *   taken as approving another.
  * - A missing summary. There is nothing to have read, and approving nothing is not an approval.
+ * - A gate that carries a recorded runtime gap (D-23) and no acknowledgment. The gap is named there in
+ *   so many words — runtime verification was not performed because the project declares no runtime
+ *   configuration — and the refusal quotes it with its revision and tree, so what a human would be
+ *   signing past is spelled out rather than summarized.
  *
  * Nothing here decides whether the work is good. That was the gate's answer, it is already recorded,
  * and re-litigating it here would give an approval the power to veto a verdict nobody asked it to
@@ -145,6 +157,33 @@ export async function buildPushApproval(
       error: orchestrationError(
         "push_approval_stale",
         `The working tree now fingerprints as ${evidence.fingerprint}, but the recorded final gate was decided against ${gate.fingerprint}. The tree changed after the gate, so the summary describes work that is no longer what is on disk. Re-run the final gate and the summary, then approve again.`,
+      ),
+    };
+  }
+
+  // D-23: a gate that certified the feature with a recorded runtime gap is publishable only through an
+  // explicit acknowledgment of that exact gap, named here the way the gate recorded it. Reading the
+  // gaps back from the typed result rather than trusting a field keeps a malformed or foreign entry
+  // from manufacturing or hiding a gap, and the refusal lists every one of them. The acknowledgment
+  // is not a new session field: the record below binds this gate document by bytes, revision, and
+  // fingerprint, and this gate's own `unverifiedRuntime` is what the acknowledgment was for — so an
+  // approved record over a gap-carrying gate exists only where the flag was given, and a later gate
+  // or tree change invalidates the binding instead of reusing it.
+  const unverified = recordedUnverifiedRuntime(gate);
+
+  if (unverified.length > 0 && !evidence.acceptUnverifiedRuntime) {
+    return {
+      ok: false,
+      error: orchestrationError(
+        "push_approval_unverified_runtime",
+        `Publishing approval refused for feature "${session.featureId}": ${String(unverified.length)} recorded runtime gap(s) were not acknowledged.` +
+          unverified
+            .map(
+              (gap) =>
+                ` ${gap.workStage}: runtime verification: not performed (not configured) — deferred evidence at revision ${String(gap.revision)} against tree ${gap.fingerprint}.`,
+            )
+            .join("") +
+          ' Re-run with `--accept-unverified runtime` to acknowledge the gap explicitly, or declare runtime verification in agent-workflow.config.json and re-verify.',
       ),
     };
   }

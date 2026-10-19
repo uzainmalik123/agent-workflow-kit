@@ -155,6 +155,23 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Open (Task V item 4)
 - **Evidence:** the message "A verification evidence check is not a valid evidence record." was available but the catalog's fallback printed "cause not determined" and a literal `<id>`.
 
+### P-32. A project with no runtime config cannot pass runtime_verification
+
+- **Status:** Open, decision D-23 (Task X)
+- **Evidence (F-002):** the runtime bundle is valid and `deferred`, but the verifier returned `inconclusive` after 368s ("unmeasured, not a pass and not a failure"). Inconclusive parks the stage, there is no accept path, and re-running repeats it.
+
+### P-33. A dropped provider connection fails the stage with no retry
+
+- **Status:** Resolved in Task Y (decision D-24)
+- **Evidence (F-002):** `ECONNRESET` twice, OpenCode exit 1, `executor_error` after 544s, on a free model.
+- **Fix:** the adapter retries a recognized transient provider failure up to 2 extra invocations after a 15s/45s backoff (`adapters/opencode/src/transient-retry.ts`, `tests/opencode-transient-retry.test.ts`), announced on stderr as `stage <name>: provider connection error, retry N of M in Xs` (`tests/task-y.test.ts`).
+
+### P-34. CLI output polish
+
+- **Status:** Resolved in Task Y
+- **Evidence:** ANSI fragments (`[0m`, `[91m[1m`) in Detail lines; evidence path points at a project folder that does not exist for post-approval stages; repeated banner lines; the model used is not shown in status.
+- **Fix:** complete ANSI sequences are stripped before display (not control characters alone), so no `[0m`-shaped fragment survives; the Evidence line names the absolute recording folder the stage's own failure line named; consecutive identical Detail lines collapse to one; `status` prints the last stage's `--model` when the recording names one (`tests/task-y.test.ts`, `tests/opencode-format-retry.test.ts`).
+
 ---
 
 ## Security-relevant

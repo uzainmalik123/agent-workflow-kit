@@ -5,6 +5,7 @@ import { discoverProject, PROJECT_CONFIG_FILENAME } from "@agent-workflow-kit/pr
 import {
   DEFAULT_FORMAT_RETRIES,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_TRANSIENT_RETRIES,
   type StageProgressCallback,
 } from "@agent-workflow-kit/opencode";
 import {
@@ -12,6 +13,9 @@ import {
   formatFindings,
   formatPlanReview,
   planReviewReport,
+  recordedFinalGateFrom,
+  recordedUnverifiedRuntime,
+  type FinalGateResult,
   type OrchestrationResult,
   type PlanReviewReport,
 } from "@agent-workflow-kit/orchestration";
@@ -47,6 +51,7 @@ interface RunCommandOptions {
   readonly quiet?: boolean;
   readonly stageTimeout?: string;
   readonly formatRetries?: string;
+  readonly transientRetries?: string;
 }
 
 /**
@@ -68,6 +73,11 @@ export interface CliStackRequest {
    * the adapter's own default, and `0` disables retries.
    */
   readonly formatRetries?: number;
+  /**
+   * How many extra invocations a stage gets when its run dies on a transient provider failure;
+   * absent means the adapter's own default, and `0` disables the retry (D-24).
+   */
+  readonly transientRetries?: number;
 }
 
 /**
@@ -426,6 +436,38 @@ function resolveFormatRetries(flag: string | undefined): number {
 }
 
 /**
+ * The transient-retry budget, from `--transient-retries <n>` (D-24).
+ *
+ * The default is not restated here: it is `DEFAULT_TRANSIENT_RETRIES` itself — 2 — the same value
+ * the executor uses when it is given no budget at all, so the flag's help text, this conversion,
+ * and the adapter's default cannot drift apart. `0` is a real answer and disables the retry: it
+ * restores the single-attempt behaviour exactly.
+ *
+ * Like an unusable `--format-retries`, a value that is not a whole non-negative number is refused
+ * before a stack is built: how many invocations a flaky provider may cost a stage is this
+ * command's answer, not a surprise inside a stage.
+ */
+function resolveTransientRetries(flag: string | undefined): number {
+  if (flag === undefined) {
+    return DEFAULT_TRANSIENT_RETRIES;
+  }
+
+  if (!/^[0-9]+$/u.test(flag)) {
+    throw new Error(
+      `Invalid --transient-retries value: ${JSON.stringify(flag)} must be a whole number of retries.`,
+    );
+  }
+
+  const retries = Number(flag);
+
+  if (!Number.isSafeInteger(retries)) {
+    throw new Error(`Invalid --transient-retries value: ${JSON.stringify(flag)} is too large.`);
+  }
+
+  return retries;
+}
+
+/**
  * Whether `git rev-parse HEAD` resolves, i.e. the repository has at least one commit.
  *
  * `run` checks this before the workflow is touched: a stage diffs, verifies, and eventually
@@ -533,6 +575,103 @@ async function storedPlanReviewPath(
 }
 
 /**
+ * The gate-derived options {@link nextStep} reads at a human gate.
+ *
+ * The two pending gates each hide one fact a hint may need: the plan gate needs to know whether the
+ * stored review is resolved, and the push gate needs to know whether the recorded gate carries a
+ * runtime gap a push approval must acknowledge (D-23). Any other state needs neither, and reads
+ * neither, so a state whose hint cannot change pays for none of it.
+ */
+async function pendingGateNextOptions(
+  store: CliStack["store"],
+  featureId: string,
+  state: WorkflowState,
+): Promise<{ planReviewUnresolved?: boolean; unverifiedRuntime?: boolean }> {
+  if (state === WorkflowState.AwaitingPlanApproval) {
+    return { planReviewUnresolved: (await storedPlanReview(store, featureId)).unresolved };
+  }
+
+  if (state === WorkflowState.AwaitingPushApproval) {
+    return { unverifiedRuntime: await pushGateRuntimeGap(store, featureId) };
+  }
+
+  return {};
+}
+
+/**
+ * The recorded final gate document, or `null` when it cannot be read.
+ *
+ * The only read the push-gate display and its refusal make: the gate document is the same bytes the
+ * approval binds itself to, so what the CLI learns here is what the orchestrator will act on.
+ */
+async function recordedFinalGate(
+  store: CliStack["store"],
+  featureId: string,
+): Promise<FinalGateResult | null> {
+  let value: unknown;
+
+  try {
+    value = await store.readArtifact(featureId, "final_gate");
+  } catch {
+    return null;
+  }
+
+  const parsed = recordedFinalGateFrom(value);
+
+  return parsed.ok ? parsed.result : null;
+}
+
+/**
+ * Whether the recorded final gate names a runtime gap a push approval must acknowledge (D-23).
+ *
+ * Unreadable reads as a gap: fail closed (N2, P-18), because the readable answers are exact and an
+ * unreadable gate is a state the approval itself refuses, so a refusal in front of that refusal —
+ * with its own explanation — is the truthful direction.
+ */
+async function pushGateRuntimeGap(store: CliStack["store"], featureId: string): Promise<boolean> {
+  const gate = await recordedFinalGate(store, featureId);
+
+  return gate === null ? true : recordedUnverifiedRuntime(gate).length > 0;
+}
+
+/**
+ * The gap lines a push-gate refusal lists, with the evidence location.
+ *
+ * Mirrors the D-20 rule for refusals: what happened, why, and where the evidence is. When the gate
+ * document cannot be read as a gate result, the line says that instead of inventing details.
+ */
+async function pushRuntimeGapLines(
+  store: CliStack["store"],
+  featureId: string,
+): Promise<readonly string[]> {
+  const gate = await recordedFinalGate(store, featureId);
+
+  if (gate === null) {
+    try {
+      const path = await store.artifactPath(featureId, "final_gate");
+      return [`Recorded final gate: ${path}`, "The gate document could not be read as a final-gate result."];
+    } catch {
+      return ["The final-gate document could not be located."];
+    }
+  }
+
+  const gaps = recordedUnverifiedRuntime(gate);
+  const path = await store.artifactPath(featureId, "final_gate").catch(() => null);
+
+  if (gaps.length === 0) {
+    return path === null ? [] : [`Recorded final gate: ${path}`];
+  }
+
+  return [
+    ...gaps.map(
+      (gap) =>
+        `- ${gap.workStage}: runtime verification: not performed (not configured) — deferred evidence recorded at revision ${String(gap.revision)} against tree ${gap.fingerprint}.`,
+    ),
+    ...(path === null ? [] : [`Recorded final gate: ${path}`]),
+  ];
+}
+
+/**
  * Lines for an unresolved review that recorded no parseable findings.
  *
  * The gate reads only the stored artifact content's `verdict`, `summary`, and
@@ -621,10 +760,16 @@ function inconclusiveLines(result: OrchestrationResult): readonly string[] {
  * raw message is always printed as a `Detail:` line (verbatim, wrapped, control characters
  * stripped) even when the catalog explains the code, and no printed line contains a literal
  * "<id>" or "<stage>": the real feature id and stage are interpolated at this call site.
+ *
+ * `recordingFolder` is the absolute folder the stage's own failure line already named, when one
+ * did (Task Y). It becomes the Evidence path for this failure — for a post-approval stage that
+ * folder is under the workspace cache, and the catalog's relative project fallback would point at
+ * a directory that does not exist.
  */
 function resultErrorLines(
   result: { readonly status: string; readonly featureId: string; readonly stage?: string | null; readonly error?: { readonly code: string; readonly message: string } | null },
   fallbackCode?: string,
+  recordingFolder?: string | null,
 ): readonly string[] {
   // Prefer the run status when the CLI prints statuses (executor_error, stage_failed,
   // scope_violation): the orchestrator's error code for those (executor_threw,
@@ -633,7 +778,12 @@ function resultErrorLines(
   const statusCovered = (ORCHESTRATION_STATUS_CODES as readonly string[]).includes(result.status);
   const code = statusCovered ? result.status : (result.error?.code ?? fallbackCode ?? result.status);
   const detail = result.error?.message ?? null;
-  return formatCatalogCode(code, { featureId: result.featureId, detail, stage: result.stage ?? null });
+  return formatCatalogCode(code, {
+    featureId: result.featureId,
+    detail,
+    stage: result.stage ?? null,
+    evidencePath: recordingFolder ?? null,
+  });
 }
 
 /**
@@ -757,6 +907,12 @@ export function createCli(options: CreateCliOptions = {}): Command {
           lines.push(
             `Last stage elapsed: ${String(Math.max(0, Math.round(latest.durationMs / 1000)))}s`,
           );
+          // Only when the recording names one: a manifest without a `--model` in its argv — the
+          // default model, or a recording old enough to predate the flag — says nothing here
+          // rather than inventing a model name.
+          if (latest.model !== null) {
+            lines.push(`Last stage model: ${latest.model}`);
+          }
           lines.push(`Recording folder: ${latest.folder}`);
         }
 
@@ -783,18 +939,8 @@ export function createCli(options: CreateCliOptions = {}): Command {
 
         // What to do now, from whatever state the feature is in. Same stream as the status
         // itself, appended after it: the lines above are unchanged.
-        const statusUnresolved =
-          session.machine.state === WorkflowState.AwaitingPlanApproval
-            ? (await storedPlanReview(store, targetFeatureId)).unresolved
-            : undefined;
-        console.log(
-          formatNext(
-            nextStep(
-              session,
-              statusUnresolved === undefined ? {} : { planReviewUnresolved: statusUnresolved },
-            ),
-          ),
-        );
+        const statusNextOptions = await pendingGateNextOptions(store, targetFeatureId, session.machine.state);
+        console.log(formatNext(nextStep(session, statusNextOptions)));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Error: ${message}`);
@@ -858,14 +1004,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
-        const unresolved =
-          session.machine.state === WorkflowState.AwaitingPlanApproval
-            ? (await storedPlanReview(store, featureId)).unresolved
-            : undefined;
-        const step = nextStep(
-          session,
-          unresolved === undefined ? {} : { planReviewUnresolved: unresolved },
-        );
+        const step = nextStep(session, await pendingGateNextOptions(store, featureId, session.machine.state));
         console.log(`Next: ${step.command}`);
         console.log(step.reason);
       } catch (error: unknown) {
@@ -940,6 +1079,10 @@ export function createCli(options: CreateCliOptions = {}): Command {
       "--format-retries <n>",
       `Extra attempts when a stage reply fails the response contract: malformed, empty, or schema-invalid (default: ${String(DEFAULT_FORMAT_RETRIES)}, 0 disables)`,
     )
+    .option(
+      "--transient-retries <n>",
+      `Extra attempts when a stage run dies on a transient provider failure: connection reset, DNS, HTTP 502/503/504, overloaded (default: ${String(DEFAULT_TRANSIENT_RETRIES)}, 0 disables)`,
+    )
     .action(async (featureId: string | undefined, opts: RunCommandOptions) => {
       try {
         const repoRoot = getRepoRoot(cwd());
@@ -948,6 +1091,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
         const model = resolveRunModel(opts.model);
         const stageTimeoutMs = resolveStageTimeoutMs(opts.stageTimeout);
         const formatRetries = resolveFormatRetries(opts.formatRetries);
+        const transientRetries = resolveTransientRetries(opts.transientRetries);
 
         // Before the stack exists and before any session is read: a repository with no commits
         // cannot diff, verify, or publish, so the run stops here with that answer.
@@ -963,15 +1107,27 @@ export function createCli(options: CreateCliOptions = {}): Command {
         await warnAboutUntrackedFiles(repoRoot);
 
         // Progress goes to stderr through one reporter owned by this command: stage start/finish
-        // lines and the 30s heartbeat, silenced entirely by --quiet.
-        const reporter = createStageProgressReporter(
+        // lines and the 30s heartbeat, silenced entirely by --quiet. The failure line's recording
+        // folder is kept when it passes, because the catalog's Evidence line for the run's own
+        // failure must name the same folder the human was just shown (Task Y) — the absolute
+        // folder the stage actually recorded into, which for a post-approval stage is under the
+        // workspace cache and never under the project's own .agentflow/.
+        const baseReporter = createStageProgressReporter(
           opts.quiet === true ? { quiet: true } : {},
         );
+        let failedRecordingFolder: string | null = null;
+        const reporter: StageProgressCallback = (event) => {
+          if (event.type === "stage_failed") {
+            failedRecordingFolder = event.recordingFolder;
+          }
+          baseReporter(event);
+        };
         const stack = createStack(repoRoot, {
           model,
           onProgress: reporter,
           stageTimeoutMs,
           formatRetries,
+          transientRetries,
         });
         const orchestrator = stack.orchestrator;
 
@@ -1031,16 +1187,9 @@ export function createCli(options: CreateCliOptions = {}): Command {
             // message above; silenced by --quiet like any other stdout guidance from this command.
             if (opts.quiet !== true) {
               const paused = await stack.store.load(targetFeatureId);
-              const pausedUnresolved =
-                paused.machine.state === WorkflowState.AwaitingPlanApproval
-                  ? (await storedPlanReview(stack.store, targetFeatureId)).unresolved
-                  : undefined;
               console.log(
                 formatNext(
-                  nextStep(
-                    paused,
-                    pausedUnresolved === undefined ? {} : { planReviewUnresolved: pausedUnresolved },
-                  ),
+                  nextStep(paused, await pendingGateNextOptions(stack.store, targetFeatureId, paused.machine.state)),
                 ),
               );
             }
@@ -1075,7 +1224,7 @@ export function createCli(options: CreateCliOptions = {}): Command {
               }
             } else {
               console.error(`Workflow error (${result.status}):`);
-            for (const line of resultErrorLines(result)) {
+            for (const line of resultErrorLines(result, undefined, failedRecordingFolder)) {
               console.error(line);
             }
 
@@ -1199,7 +1348,15 @@ export function createCli(options: CreateCliOptions = {}): Command {
     .description("Approve publishing the feature")
     .argument("[feature-id]", "Feature ID to approve (defaults to most recent)")
     .option("-a, --actor <actor>", "Actor/approver identifier")
-    .action(async (featureId: string | undefined, opts: { actor?: string }) => {
+    .option(
+      "--accept-unverified <kind>",
+      "Acknowledge a recorded verification gap the final gate carries. Only 'runtime' is recognized (D-23).",
+    )
+    .action(
+      async (
+        featureId: string | undefined,
+        opts: { actor?: string; acceptUnverified?: string },
+      ) => {
       try {
         const repoRoot = getRepoRoot(cwd());
         const stack = createStack(repoRoot, {});
@@ -1209,8 +1366,30 @@ export function createCli(options: CreateCliOptions = {}): Command {
           return;
         }
 
+        // D-23: the acknowledgment is read into the gate before anything is approved. The recorded
+        // gate document is the same bytes the approval will bind itself to, so what the CLI refuses
+        // over here is what the orchestrator refuses over if it were called anyway. Fail closed in
+        // the same way the plan gate reads its review (N2, P-18): an unreadable gate cannot be read
+        // as gap-free, and the orchestrator's own approval refusal names its real reason.
+        const gateGap = await pushGateRuntimeGap(stack.store, targetFeatureId);
+
+        if (gateGap && opts.acceptUnverified !== "runtime") {
+          console.error(
+            `Push approval refused for ${targetFeatureId}: the recorded final gate carries a runtime verification gap that was not acknowledged.`,
+          );
+          for (const line of await pushRuntimeGapLines(stack.store, targetFeatureId)) {
+            console.error(line);
+          }
+          console.error(
+            `Re-run with \`--accept-unverified runtime\` to acknowledge the gap explicitly, or declare runtime verification in agent-workflow.config.json and re-verify.`,
+          );
+          exit(1);
+          return;
+        }
+
         const result = await stack.orchestrator.approvePush(targetFeatureId, {
           actor: opts.actor ?? null,
+          acceptUnverifiedRuntime: opts.acceptUnverified === "runtime",
         });
 
         if (result.status === "gate_approved") {

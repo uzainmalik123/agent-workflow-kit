@@ -4,6 +4,7 @@ import {
   type ProcessTermination,
 } from "@agent-workflow-kit/project";
 import { OpenCodeAdapterError } from "./errors.js";
+import { stripAnsiCodes } from "./progress.js";
 
 export const DEFAULT_MAX_OUTPUT_BYTES = 4_000_000;
 export const DEFAULT_STDERR_EXCERPT_LIMIT = 2_000;
@@ -73,8 +74,15 @@ export interface ProcessOutcomeObservation {
   readonly durationMs: number;
 }
 
+/**
+ * A bounded excerpt of one stream, for a message that travels: complete ANSI/CSI escape sequences
+ * (with their escape byte, not without it — stripping the byte alone is what used to leave
+ * "[0m"-shaped fragments behind, Task Y P-34) are removed first, then surrounding whitespace, then
+ * the text is cut to the limit. The raw capture stays raw in the recording; this is only the copy
+ * that travels.
+ */
 export function excerpt(text: string, limit: number): string {
-  const trimmed = text.trim();
+  const trimmed = stripAnsiCodes(text).trim();
 
   if (trimmed.length === 0) {
     return "";

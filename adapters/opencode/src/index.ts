@@ -263,6 +263,15 @@ export {
 export type { OpenCodeStageExecutorOptions } from "./executor.js";
 
 export {
+  DEFAULT_TRANSIENT_RETRIES,
+  TRANSIENT_PROVIDER_PATTERNS,
+  TRANSIENT_RETRY_BACKOFF_MS,
+  classifyProviderFailure,
+  transientBackoffMs,
+} from "./transient-retry.js";
+export type { TransientFailureVerdict } from "./transient-retry.js";
+
+export {
   ARTIFACT_TRACKING_MODES,
   DEFAULT_ARTIFACT_TRACKING_MODE,
   DEFAULT_GITIGNORE_LINES,
