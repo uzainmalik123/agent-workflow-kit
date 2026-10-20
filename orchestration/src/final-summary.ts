@@ -2,7 +2,7 @@ import type { FinalGateResult, FinalGateStageResult } from "./final-gate.js";
 import { recordedUnverifiedRuntime } from "./final-gate.js";
 import type { FixAttemptRecord } from "./fix-history.js";
 import { latestRecordedSecurityReview } from "./security.js";
-import type { WorkspaceChanges } from "./workspace.js";
+import { withoutFrameworkRecordings, type WorkspaceChanges } from "./workspace.js";
 
 /**
  * The final summary.
@@ -188,7 +188,17 @@ function stepsFrom(plan: unknown, changes: WorkspaceChanges): readonly SummarySt
     });
 }
 
-function observedPathsOf(changes: WorkspaceChanges): readonly string[] {
+/**
+ * Every path the summary lists, with the framework's own recordings removed.
+ *
+ * The summary is read by a human deciding whether to push, and a line naming this framework's own
+ * `invocation.json` as a changed file is a line about diagnostics rather than about the change. The
+ * shared predicate is the one the scope guard excuses them with, so the document and the guard agree
+ * on what "not a stage's write" means; every other `.agentflow/**` path is still listed.
+ */
+function observedPathsOf(all: WorkspaceChanges): readonly string[] {
+  const changes = withoutFrameworkRecordings(all);
+
   return [
     ...changes.modified,
     ...changes.added,
@@ -199,7 +209,8 @@ function observedPathsOf(changes: WorkspaceChanges): readonly string[] {
 }
 
 /** One line per changed path, each labelled with the category it was measured in. */
-function changedFileLines(changes: WorkspaceChanges): readonly string[] {
+function changedFileLines(all: WorkspaceChanges): readonly string[] {
+  const changes = withoutFrameworkRecordings(all);
   const lines: string[] = [];
 
   for (const path of [...changes.modified].sort()) {

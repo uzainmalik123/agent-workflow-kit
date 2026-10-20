@@ -581,6 +581,33 @@ export function isFrameworkRecordingPath(path: string): boolean {
   return FRAMEWORK_RECORDING_PATH.test(path);
 }
 
+/**
+ * The measured change set with the framework's own recordings removed, for every consumer that has to
+ * answer "what did this stage change?" rather than "what is in this tree?".
+ *
+ * The predicate above decides it once, and this is the shape most consumers need: the security scan,
+ * the security request, the fix-integrity check, the published path list, and the summary's changed
+ * file list all read a change set, and each of them would otherwise repeat the same five-category
+ * filter with a different chance of missing one. Filtering here rather than at `approvedPathsOf`
+ * keeps the measurement intact: a scope verdict still reports every path it saw (including the
+ * recordings, which it excuses individually), and a caller that genuinely wants the raw tree asks for
+ * the raw tree.
+ */
+export function withoutFrameworkRecordings(changes: WorkspaceChanges): WorkspaceChanges {
+  const keep = (path: string): boolean => !isFrameworkRecordingPath(path);
+
+  return {
+    modified: changes.modified.filter(keep),
+    added: changes.added.filter(keep),
+    deleted: changes.deleted.filter(keep),
+    // A rename is one change with two paths. An entry is kept unless *both* sides are recordings, so
+    // a rename a stage made is never reported as nothing — the side that is not a recording is still
+    // a change a human has to see.
+    renamed: changes.renamed.filter((rename) => keep(rename.from) || keep(rename.to)),
+    untracked: changes.untracked.filter(keep),
+  };
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Scope and Git-state decisions                                                                   */
 /* -------------------------------------------------------------------------------------------- */

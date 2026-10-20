@@ -20,6 +20,7 @@ import {
   approvedPathsOf,
   isProtectedWorkspacePath,
   matchesScopePattern,
+  withoutFrameworkRecordings,
   WORKSPACE_PROTECTED_PATTERNS,
   type WorkspaceChanges,
 } from "./workspace.js";
@@ -316,7 +317,11 @@ const INTEGRITY_LABELS: Readonly<Record<keyof FixIntegritySnapshot, string>> = {
  */
 export function evaluateFixIntegrity(input: FixIntegrityInput): FixIntegrityVerdict {
   const { attempt, approvedPatterns, changes, before, after } = input;
-  const observed = approvedPathsOf(changes);
+  // The fixer's changes, minus the framework's own recordings: the recorder writes into the worktree
+  // around every stage, so a recorded fixing stage always leaves its own `invocation.json`/`stdout.txt`/
+  // `stderr.txt` behind, and those are this framework's diagnostics rather than the fixer's writes.
+  // Every other path under `.agentflow/**` stays in the set and is still refused as protected below.
+  const observed = approvedPathsOf(withoutFrameworkRecordings(changes));
   const rejections: FixRejection[] = [];
 
   const protectedPaths = observed.filter(isProtectedWorkspacePath).sort();

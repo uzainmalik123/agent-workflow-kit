@@ -107,6 +107,7 @@ import {
   isProtectedWorkspacePath,
   matchesScopePattern,
   subtractWorkspaceChanges,
+  withoutFrameworkRecordings,
   type BaselineCaptureOutcome,
   type OpenWorkspaceOutcome,
   type ProjectWorkspace,
@@ -1130,7 +1131,14 @@ export class WorkflowOrchestrator {
         );
       }
 
-      const paths = approvedPathsOf(inspection.inspection.changes);
+      // What gets staged is the change set without the framework's own recordings. They are diagnostics
+      // this framework wrote into the worktree between stages, and `approvedPathsOf` reports them
+      // because they are genuinely there — handing them to `commitFeature` would `git add` them
+      // (adapters/workspace/src/publisher.ts) and publish this framework's diagnostics on the feature
+      // branch. The shared predicate is the same one the scope guard above excuses them with, so a path
+      // the scope guard allows here is a path that may be staged, and a path it refuses still fails the
+      // verdict above before this line runs.
+      const paths = approvedPathsOf(withoutFrameworkRecordings(inspection.inspection.changes));
 
       if (paths.length === 0) {
         return rejected(
@@ -3418,14 +3426,22 @@ export class WorkflowOrchestrator {
       return { ok: false, error: previous.error };
     }
 
+    // What the provider is asked to review, and what the framework's own policy check below judges, is
+    // the change set without the framework's own recordings. The provider reads the contents of every
+    // path it is handed, and a recording is this framework's diagnostic output rather than a write the
+    // stage made — so it is removed by the shared predicate here, once, for both halves. Filtering
+    // `changes` and `changedPaths` together is what keeps `bindSecurityReviewToRequest`'s agreement
+    // check (the provider's `changedPaths` against `approvedPathsOf(request.changes)`) satisfiable.
+    const reviewed = withoutFrameworkRecordings(inspected.inspection.changes);
+
     const request: SecurityReviewRequest = {
       featureId: session.featureId,
       stage,
       revision: session.revision,
       projectRoot: workspace.workingDirectory,
       workspaceId: workspace.workspaceId,
-      changes: inspected.inspection.changes,
-      changedPaths: approvedPathsOf(inspected.inspection.changes),
+      changes: reviewed,
+      changedPaths: approvedPathsOf(reviewed),
       approvedPatterns: scope.patterns,
       protectedPatterns: SECURITY_PROTECTED_PATTERNS,
       workspaceFingerprint: inspected.inspection.fingerprint,
@@ -3461,7 +3477,7 @@ export class WorkflowOrchestrator {
     const merged = mergeSecurityPolicyChecks(
       bound.evidence,
       applySecurityPolicy({
-        changes: inspected.inspection.changes,
+        changes: reviewed,
         approvedPatterns: scope.patterns,
         protectedPatterns: SECURITY_PROTECTED_PATTERNS,
       }),
