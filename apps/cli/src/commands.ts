@@ -766,8 +766,60 @@ function inconclusiveLines(result: OrchestrationResult): readonly string[] {
  * folder is under the workspace cache, and the catalog's relative project fallback would point at
  * a directory that does not exist.
  */
+/**
+ * The first deterministic check a result recorded as failed, with the paths it measured, or `null`
+ * when the failure carries no check id.
+ *
+ * This is what lets a `stage_failed` message state the check and its paths instead of telling a
+ * human to repair a defect it never showed them (Task Z, item 6). Security checks are read first
+ * because only they carry paths; a failed verification check still has an id worth naming, it just
+ * has no path list to summarize. Nothing here decides anything — it reads the evidence the run
+ * already recorded and hands it to the catalog as text.
+ */
+function failedCheckOf(
+  result: {
+    readonly security?: {
+      readonly checks?: readonly {
+        readonly check?: string;
+        readonly result?: string;
+        readonly paths?: readonly string[];
+      }[];
+    } | null;
+    readonly verification?: {
+      readonly checks?: readonly { readonly id?: string; readonly status?: string }[];
+    } | null;
+  },
+): { readonly checkId: string; readonly paths: readonly string[] } | null {
+  const security = result.security?.checks?.find((check) => check.result === "failed");
+  if (security?.check !== undefined && security.check !== "") {
+    return { checkId: security.check, paths: security.paths ?? [] };
+  }
+
+  const verification = result.verification?.checks?.find((check) => check.status === "failed");
+  if (verification?.id !== undefined && verification.id !== "") {
+    return { checkId: verification.id, paths: [] };
+  }
+
+  return null;
+}
+
 function resultErrorLines(
-  result: { readonly status: string; readonly featureId: string; readonly stage?: string | null; readonly error?: { readonly code: string; readonly message: string } | null },
+  result: {
+    readonly status: string;
+    readonly featureId: string;
+    readonly stage?: string | null;
+    readonly error?: { readonly code: string; readonly message: string } | null;
+    readonly security?: {
+      readonly checks?: readonly {
+        readonly check?: string;
+        readonly result?: string;
+        readonly paths?: readonly string[];
+      }[];
+    } | null;
+    readonly verification?: {
+      readonly checks?: readonly { readonly id?: string; readonly status?: string }[];
+    } | null;
+  },
   fallbackCode?: string,
   recordingFolder?: string | null,
 ): readonly string[] {
@@ -778,11 +830,14 @@ function resultErrorLines(
   const statusCovered = (ORCHESTRATION_STATUS_CODES as readonly string[]).includes(result.status);
   const code = statusCovered ? result.status : (result.error?.code ?? fallbackCode ?? result.status);
   const detail = result.error?.message ?? null;
+  const failedCheck = failedCheckOf(result);
   return formatCatalogCode(code, {
     featureId: result.featureId,
     detail,
     stage: result.stage ?? null,
     evidencePath: recordingFolder ?? null,
+    checkId: failedCheck?.checkId ?? null,
+    failedPaths: failedCheck?.paths ?? null,
   });
 }
 

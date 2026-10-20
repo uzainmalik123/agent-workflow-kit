@@ -3,6 +3,7 @@ import { rm, rmdir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { WorkspaceBaseline } from "@agent-workflow-kit/core";
+import { isFrameworkRecordingPath } from "@agent-workflow-kit/orchestration";
 import type {
   BaselineCapture,
   BaselineCaptureOutcome,
@@ -707,17 +708,31 @@ function describe(error: unknown): string {
  * same tree hash the same however Git happened to order its output. The HEAD commit is in the digest
  * rather than beside it: the same set of file changes measured against two different baselines is two
  * different trees, and a fingerprint that could not tell them apart would not describe either.
+ *
+ * The framework's own invocation recordings are excluded from every list, by the same predicate the
+ * scope guard excuses them with (`isFrameworkRecordingPath`), because they are diagnostics this
+ * framework writes into the worktree *between* two measurements rather than a change the work made.
+ * Without this, the recording a stage's own transport writes after the deterministic evidence was
+ * collected changes the digest on the next reading, so the final gate reports `working_tree_changed`
+ * and `security_evidence_stale` for a tree that differs only by the framework's own log files — a run
+ * that could never certify itself. The change set itself still lists them; this answers "is this the
+ * same tree the evidence described?", and a log file is not the tree. The cost is the same one the
+ * scope guard accepted: a file written at exactly the recorder's shape and location is not
+ * distinguishable from the recorder's own output, and every other path under `.agentflow/**` still
+ * changes this digest.
  */
 function fingerprintOfChanges(status: ParsedStatus, headCommit: string): string {
+  const recorded = (path: string): boolean => !isFrameworkRecordingPath(path);
   const canonical = JSON.stringify({
     head: headCommit,
-    added: [...status.added].sort(),
-    deleted: [...status.deleted].sort(),
-    modified: [...status.modified].sort(),
+    added: [...status.added].filter(recorded).sort(),
+    deleted: [...status.deleted].filter(recorded).sort(),
+    modified: [...status.modified].filter(recorded).sort(),
     renamed: [...status.renamed]
+      .filter((rename) => recorded(rename.from) && recorded(rename.to))
       .map((rename) => [rename.from, rename.to] as const)
       .sort((left, right) => left[0].localeCompare(right[0])),
-    untracked: [...status.untracked].sort(),
+    untracked: [...status.untracked].filter(recorded).sort(),
   });
 
   return createHash("sha256").update(canonical, "utf8").digest("hex");

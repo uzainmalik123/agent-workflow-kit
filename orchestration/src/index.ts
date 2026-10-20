@@ -332,14 +332,17 @@ export type {
 } from "./runtime-verification.js";
 
 export {
+  approvedPathsOf,
   approvedScopeFromPlan,
   BASELINE_REFUSAL_CODES,
   evaluateWorkspaceIntegrity,
   evaluateWorkspaceScope,
+  isFrameworkRecordingPath,
   isEmptyWorkspaceChanges,
   isProtectedWorkspacePath,
   matchesScopePattern,
   normalizeScopePattern,
+  withoutFrameworkRecordings,
   WORKSPACE_PROTECTED_PATTERNS,
   WORKSPACE_REFUSAL_CODES,
 } from "./workspace.js";

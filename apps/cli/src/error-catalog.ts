@@ -274,6 +274,14 @@ export interface CatalogContext {
   readonly checkId?: string | null;
   /** Workflow stage the message is about, for recording and evidence paths. */
   readonly stage?: string | null;
+  /**
+   * The paths the failed deterministic check measured, when the caller has them.
+   *
+   * Summarized at render time rather than printed whole: a check that failed on thirty-six recorded
+   * paths states the first few plus the count, because the reason a stage failed is the check and
+   * the shape of what it measured, not the full list the findings below already carry.
+   */
+  readonly failedPaths?: readonly string[] | null;
 }
 
 interface CatalogEntry {
@@ -312,6 +320,51 @@ function evidenceOf(context: CatalogContext, fallback: string): string {
 function runOf(context: CatalogContext, rest = ""): string {
   const id = context.featureId ?? "unknown";
   return `agentflow run ${id}${rest}`;
+}
+
+/**
+ * The Fix line for a stage that failed, stated from what the framework measured instead of telling
+ * a human to repair a defect they have not been shown (Task Z, item 6).
+ *
+ * A stage failure has two sources, and only one of them can be settled by running the command
+ * again. When the caller carries a deterministic check id — a security check, or a verification
+ * check that ran and failed — the line names that id, the paths it measured summarized to the first
+ * three plus a count, and what is true of every such measurement: it read the tree as it stands, so
+ * re-running without changing those paths reports the same failure. The repair is the paths, not
+ * another run, and the Evidence this message names is where the record of the measurement lives.
+ *
+ * When no check id reached this result — the stage reported the failure itself, through a model,
+ * with no deterministic check recorded behind it — the line does not borrow determinism it does not
+ * have: the findings this message carries are what the stage reported, and re-running starts the
+ * stage again over the same tree rather than changing what it recorded.
+ */
+function stageFailureFix(context: CatalogContext): string {
+  const checkId = context.checkId ?? null;
+  const paths = context.failedPaths ?? [];
+  const run = runOf(context);
+
+  if (checkId === null || checkId === "") {
+    return (
+      `Read the findings this message carries, then the evidence it names: re-running ${run} ` +
+      `starts the stage again over the same tree, which repeats the run rather than repairing it`
+    );
+  }
+
+  if (paths.length === 0) {
+    return (
+      `Check "${checkId}" failed, with no path recorded against it. It measured the recorded tree, ` +
+      `so re-running ${run} without changing what it measured reports the same failure — ` +
+      `the Evidence this message names is where the record of the measurement lives`
+    );
+  }
+
+  const shown = paths.slice(0, 3).join(", ");
+  const more = paths.length > 3 ? ` (+${String(paths.length - 3)} more)` : "";
+  return (
+    `Check "${checkId}" failed on ${String(paths.length)} path(s): ${shown}${more}. ` +
+    `It measured the tree as it stands, so re-running ${run} without changing those paths reports the same failure — ` +
+    `re-running is not the repair, and the Evidence this message names is where the record of the measurement lives`
+  );
 }
 
 /** Shorthand for static entries whose text does not depend on context beyond status/run paths. */
@@ -616,7 +669,7 @@ const ORCHESTRATION_CATALOG: Record<OrchestrationErrorCode, CatalogBuilder> = {
   stage_reported_failure: orchestrationEntry(
     "The stage reported failure",
     "the executor completed the stage and the stage itself reported failed with findings",
-    (context) => `Read the findings with the status command, repair the defect, then re-run ${runOf(context)}`,
+    (context) => stageFailureFix(context),
   ),
   // orchestration/src/errors.ts:12; orchestration/src/orchestrator.ts:1904
   executor_threw: orchestrationEntry(
@@ -1259,7 +1312,7 @@ const CLI_STATUS_CATALOG: Record<CliStatusCode, CatalogBuilder> = {
   stage_failed: (context) => ({
     what: "The stage reported failure",
     why: "the executor completed the stage and the stage itself reported failed with findings",
-    fix: `Read the findings with the status command, repair the defect, then re-run ${runOf(context)}`,
+    fix: stageFailureFix(context),
     evidence: evidenceOf(context, ".agentflow/features/<id>/"),
     next: statusOf(context),
   }),

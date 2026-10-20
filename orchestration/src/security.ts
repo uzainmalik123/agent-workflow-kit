@@ -8,6 +8,7 @@ import { DETERMINISTIC_EVIDENCE_KEY } from "./verification.js";
 import {
   approvedPathsOf,
   matchesScopePattern,
+  withoutFrameworkRecordings,
   WORKSPACE_PROTECTED_PATTERNS,
   type WorkspaceChanges,
 } from "./workspace.js";
@@ -379,7 +380,11 @@ export interface SecurityPolicyInput {
 export function applySecurityPolicy(
   input: SecurityPolicyInput,
 ): readonly SecurityCheckEvidence[] {
-  const observed = approvedPathsOf(input.changes);
+  // The framework's own recordings are diagnostics this framework wrote into the tree between stages,
+  // not a stage's write, so they are removed by the one shared predicate before any check looks at the
+  // change set. Nothing else under `.agentflow/**` is excused: a file a stage put there, behind a
+  // forged stamp or under any other name, is still a protected path and still fails this check.
+  const observed = approvedPathsOf(withoutFrameworkRecordings(input.changes));
   const protectedTouched = observed
     .filter((path) => isProtectedBy(path, input.protectedPatterns))
     .sort();

@@ -170,6 +170,24 @@ Status values: **Open**, **In progress**, **Resolved**, **Decision needed**.
 - **Status:** Open (Task Y)
 - **Evidence:** ANSI fragments (`[0m`, `[91m[1m`) in Detail lines; evidence path points at a project folder that does not exist for post-approval stages; repeated banner lines; the model used is not shown in status.
 
+### P-35. The security scan counts the framework's own recordings as protected-configuration changes
+
+- **Status:** Resolved (Task Z, 2026-10-20)
+- **Evidence (F-002, 2026-10-19):** security_review failed with `protected_configuration_changed`: 36 files under `.agentflow/recordings/F-002/` in the change set. Task F excused the recorder pattern in the scope guard only. Every feature that reaches security review will hit this.
+- **Reproduced and fixed:** an end-to-end run — real recorder, real transport over a fake `opencode` executable, real workspace adapter over a real temporary repository and worktree — failed `protected_configuration_changed` on 15 recording paths and `shell_execution` on 5 `invocation.json` before the fix (`tests/task-z-recordings.test.ts`). After `withoutFrameworkRecordings` is applied at the security request and its policy merge (orchestration/src/orchestrator.ts:3435, :3477; orchestration/src/security.ts:379) the same run passes with no recording path in either check, while a near-miss `.agentflow/recordings/<id>/<stage>/<stamp>/notes.md` and `.agentflow/notes.md` still fail with both paths listed.
+
+### P-36. Pipeline tests did not exercise the real recorder
+
+- **Status:** Resolved (Task Z item 2, 2026-10-20)
+- **Evidence:** the Task V pipeline test used a fake model executor, which writes no recordings; recordings are written by the real OpenCode transport. The seam between the recorder and the security scan, final gate, summary, and publisher was never tested together.
+- **Covered:** `tests/task-z-recordings.test.ts` (7 tests) writes recordings through `recordStageInvocation` — the function the OpenCode transport calls — into a real worktree, and asserts each consumer: the security scan, the final gate and summary, fix integrity (accepted for a recorded fixing stage; `fix_protected_file_touched` still returned for any other `.agentflow/` write), the summary's changed-file list, and both publish paths. `tests/task-z-stage-failed-message.test.ts` (5 tests) covers the CLI's stage-failure message with the check id and measured paths.
+
+### P-37. Publishing may stage recordings
+
+- **Status:** Resolved (Task Z item 4, 2026-10-20). Verified end to end; no push is held by this issue.
+- **Evidence:** Task F reported recordings remain in `approvedPathsOf` output and called this inert without a publish-level test.
+- **Reproduced and fixed:** the leak was reproduced before anything was fixed — publish staging (orchestration/src/orchestrator.ts:1133 → :1174 → adapters/workspace/src/publisher.ts:513) committed `.agentflow/recordings/F-001/implementation/20260405T060708Z-686b/{invocation.json,stderr.txt,stdout.txt}`, and the files were read back out of the bare remote. The publish path now derives its paths from `approvedPathsOf(withoutFrameworkRecordings(changes))`; the end-to-end publish test asserts the remote branch's tree is exactly `M src/app.ts` and holds no `.agentflow/` path at all.
+
 ---
 
 ## Security-relevant
